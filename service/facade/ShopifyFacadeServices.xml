@@ -1,0 +1,182 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="list" noun="ShopifyAuthConfigs" type="script" allow-remote="true" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/listShopifyAuthConfigs.groovy">
+        <description>List Shopify auth configs for the active tenant with secret redaction indicators.</description>
+        <in-parameters>
+            <parameter name="query"/>
+            <parameter name="pageIndex" type="Integer" default-value="0"/>
+            <parameter name="pageSize" type="Integer" default-value="20"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="pagination">
+                <parameter name="pageIndex" type="Integer"/>
+                <parameter name="pageSize" type="Integer"/>
+                <parameter name="totalCount" type="Integer"/>
+                <parameter name="pageCount" type="Integer"/>
+            </parameter>
+            <parameter name="shopifyAuthConfigs">
+                <parameter name="shopifyAuthConfigId"/>
+                <parameter name="description"/>
+                <parameter name="companyUserGroupId"/>
+                <parameter name="companyLabel"/>
+                <parameter name="createdByUserId"/>
+                <parameter name="shopApiUrl"/>
+                <parameter name="apiVersion"/>
+                <parameter name="timeZone"/>
+                <parameter name="isActive"/>
+                <parameter name="canReadOrders" type="Boolean"/>
+                <parameter name="hasAccessToken" type="Boolean"/>
+            </parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="get" noun="ShopifyAuthConfig" type="script" allow-remote="true" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/getShopifyAuthConfig.groovy">
+        <description>Get one Shopify auth config for the active tenant with the access token redacted.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="shopifyAuthConfig">
+                <parameter name="shopifyAuthConfigId"/>
+                <parameter name="description"/>
+                <parameter name="companyUserGroupId"/>
+                <parameter name="companyLabel"/>
+                <parameter name="createdByUserId"/>
+                <parameter name="shopApiUrl"/>
+                <parameter name="apiVersion"/>
+                <parameter name="timeZone"/>
+                <parameter name="isActive"/>
+                <parameter name="canReadOrders" type="Boolean"/>
+                <parameter name="hasAccessToken" type="Boolean"/>
+            </parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="save" noun="ShopifyAuthConfig" type="script" allow-remote="true" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/saveShopifyAuthConfig.groovy">
+        <description>Create or update a tenant-owned Shopify auth config, preserving the stored token when no replacement is provided.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+            <parameter name="description"/>
+            <parameter name="shopApiUrl" required="true"/>
+            <parameter name="apiVersion" required="true"/>
+            <parameter name="timeZone"/>
+            <parameter name="accessToken"/>
+            <parameter name="isActive"/>
+            <parameter name="canReadOrders"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="savedShopifyAuthConfig">
+                <parameter name="shopifyAuthConfigId"/>
+                <parameter name="description"/>
+                <parameter name="companyUserGroupId"/>
+                <parameter name="companyLabel"/>
+                <parameter name="createdByUserId"/>
+                <parameter name="shopApiUrl"/>
+                <parameter name="apiVersion"/>
+                <parameter name="timeZone"/>
+                <parameter name="isActive"/>
+                <parameter name="canReadOrders" type="Boolean"/>
+                <parameter name="hasAccessToken" type="Boolean"/>
+            </parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="delete" noun="ShopifyAuthConfig" type="script" allow-remote="true" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/deleteShopifyAuthConfig.groovy">
+        <description>Delete one tenant-owned Shopify auth config.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="deleted" type="Boolean"/>
+            <parameter name="deletedShopifyAuthConfigId"/>
+        </out-parameters>
+    </service>
+
+    <service verb="list" noun="ShopifySourceDefinitions" type="script" allow-remote="true" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/listShopifySourceDefinitions.groovy">
+        <description>List Shopify source definitions and selectable field catalogs for setup flows.</description>
+        <in-parameters>
+            <parameter name="apiVersion"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="sourceDefinitions" type="List"/>
+        </out-parameters>
+    </service>
+
+    <service verb="get" noun="ShopifySourceDefinition" type="script" allow-remote="true" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/getShopifySourceDefinition.groovy">
+        <description>Get one Shopify source definition and its selectable fields for an API version.</description>
+        <in-parameters>
+            <parameter name="sourceDefinitionId" required="true"/>
+            <parameter name="apiVersion"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="sourceDefinition" type="Map"/>
+        </out-parameters>
+    </service>
+
+    <service verb="build" noun="ShopifyGraphqlQuery" type="script" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/buildShopifyGraphqlQuery.groovy">
+        <description>Build a Shopify Admin GraphQL query from structured source, field, filter, and pagination requirements.</description>
+        <in-parameters>
+            <parameter name="sourceDefinitionId" required="true"/>
+            <parameter name="apiVersion"/>
+            <parameter name="selectedFieldPaths" type="List"/>
+            <parameter name="filters" type="Map"/>
+            <parameter name="pageSize" type="Integer" default-value="100"/>
+            <parameter name="afterCursor"/>
+            <parameter name="reverse"/>
+            <parameter name="connectionPageSizes" type="Map"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="builtQuery" type="Map"/>
+        </out-parameters>
+    </service>
+
+    <service verb="execute" noun="ShopifyGraphql" type="script" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/executeShopifyGraphql.groovy">
+        <description>Execute a generated Shopify Admin GraphQL query through a tenant-owned auth config.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+            <parameter name="queryDocument" required="true" allow-html="true"/>
+            <parameter name="variables" type="Map"/>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000"/>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000"/>
+            <parameter name="maxAttempts" type="Integer" default-value="2"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages"><parameter name="message"/></parameter>
+            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="graphqlResult" type="Map"/>
+        </out-parameters>
+    </service>
+
+</services>

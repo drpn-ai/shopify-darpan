@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="extract" noun="ShopifyOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyOrders.groovy">
+        <description>Extract Shopify orders for an automation window and write normalized JSON output to the automation data-manager folder.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true">
+                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
+            </parameter>
+            <parameter name="automationId">
+                <description>Automation id passed through for metadata.</description>
+            </parameter>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="fileSide">
+                <description>Logical file side being extracted.</description>
+            </parameter>
+            <parameter name="systemEnumId">
+                <description>Source system identifier passed through for metadata.</description>
+            </parameter>
+            <parameter name="sourceTypeEnumId">
+                <description>Source type identifier passed through for metadata.</description>
+            </parameter>
+            <parameter name="windowStart" required="true">
+                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="windowEnd" required="true">
+                <description>End of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="windowStartDate">
+                <description>Raw parent window start passed by the automation executor.</description>
+            </parameter>
+            <parameter name="windowEndDate">
+                <description>Raw parent window end passed by the automation executor.</description>
+            </parameter>
+            <parameter name="outputLocation">
+                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
+            </parameter>
+            <parameter name="fileName">
+                <description>Optional output file name. Defaults to shopify-orders-{fromMillis}-{thruMillis}.json.</description>
+            </parameter>
+            <parameter name="maxPages" type="Integer" default-value="20"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="fileTypeEnumId"/>
+            <parameter name="recordCount" type="Integer"/>
+            <parameter name="requestMetadata" type="Map"/>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
+</services>
