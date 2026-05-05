@@ -49,7 +49,7 @@ When a range filter maps to a known order sort key, the generated query uses the
 
 Order records include both `id` and `legacyResourceId`. Darpan preserves the GraphQL GID as `shopifyGid` and normalizes the extracted `id` field to `legacyResourceId` for API Order Sync so Shopify rows compare against HotWax order `externalId` values.
 
-API Order Sync extracts Shopify and HotWax independently from the same normalized date window before compare. Shopify now runs the `orders` search through Bulk Operations with quoted `created_at` bounds and `sortKey: CREATED_AT`, while HotWax uses OMS `order_date` (`orderDate_from` and `orderDate_thru`) after tenant-timezone normalization.
+API Order Sync extracts Shopify and HotWax independently from the same tenant-normalized date window before compare. Shopify runs the `orders` search through Bulk Operations with quoted `created_at` UTC bounds and `sortKey: CREATED_AT`, while HotWax uses OMS `order_date` (`orderDate_from` and `orderDate_thru`) epoch milliseconds for the same tenant-derived instants.
 
 The generated query uses variables for cursor pagination:
 

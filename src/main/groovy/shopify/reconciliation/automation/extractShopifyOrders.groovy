@@ -187,11 +187,11 @@ if (outputErrors) {
 }
 
 String sourceTimeZone = normalize(authConfig?.timeZone) ?: TenantAccessSupport.resolveActiveTenantTimeZone(ec)
-Map<String, Object> sourceWindow = ReconciliationApiWindowSupport.normalizeCalendarWindow(
-        windowStartValue,
-        windowEndValue,
-        sourceTimeZone
-)
+boolean preserveWindowInstantsValue = preserveWindowInstants instanceof Boolean ? preserveWindowInstants :
+        ["Y", "YES", "TRUE", "1", "ON"].contains(normalize(preserveWindowInstants)?.toUpperCase(Locale.ROOT))
+Map<String, Object> sourceWindow = preserveWindowInstantsValue ?
+        ReconciliationApiWindowSupport.preserveExactWindow(windowStartValue, windowEndValue, sourceTimeZone) :
+        ReconciliationApiWindowSupport.normalizeCalendarWindow(windowStartValue, windowEndValue, sourceTimeZone)
 Timestamp sourceWindowStart = (Timestamp) sourceWindow.windowStartDate
 Timestamp sourceWindowEnd = (Timestamp) sourceWindow.windowEndDate
 String windowStartText = formatWindow(sourceWindowStart)
@@ -265,6 +265,7 @@ requestMetadata = [
         sourceTypeEnumId      : normalize(sourceTypeEnumId),
         sourceTimeZone        : sourceWindow.timeZone,
         calendarDateNormalized: sourceWindow.calendarDateNormalized,
+        exactWindowPreserved  : sourceWindow.exactWindowPreserved,
         filterFields          : ["created_at"],
         searchQueries         : [searchQuery],
         windowStartUtc        : windowStartText,

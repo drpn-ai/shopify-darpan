@@ -27,7 +27,7 @@ The facade services live in `facade.ShopifyFacadeServices`:
 
 List, get, and save responses never return `accessToken`. They return `hasAccessToken` so callers can show whether a token is already stored.
 
-`timeZone` is an IANA timezone ID such as `America/Chicago`. Darpan uses it to interpret calendar-date extraction windows for that Shopify config before converting them to UTC GraphQL filters. When omitted, the config defaults to `UTC`.
+`timeZone` is an IANA timezone ID such as `America/Chicago`. Darpan stores it as the Shopify source timezone for source metadata and direct source-level extraction. Saved-run and automation reconciliation windows are owned by the Darpan tenant or automation window timezone first, then sent to Shopify as UTC GraphQL filters. When omitted, the config defaults to `UTC`.
 
 ## Access Rules
 

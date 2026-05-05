@@ -33,6 +33,9 @@
             <parameter name="windowEnd" required="true">
                 <description>End of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
             </parameter>
+            <parameter name="preserveWindowInstants" type="Boolean" default-value="false">
+                <description>When true, treat windowStart and windowEnd as already normalized instants instead of reinterpreting UTC-midnight values through the Shopify config timezone.</description>
+            </parameter>
             <parameter name="windowStartDate">
                 <description>Raw parent window start passed by the automation executor.</description>
             </parameter>
