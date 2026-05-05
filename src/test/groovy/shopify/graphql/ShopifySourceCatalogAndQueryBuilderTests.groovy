@@ -53,7 +53,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         assertEquals("ShopifyOrders", result.operationName)
         assertEquals(250, result.variables.first)
         assertEquals("cursor-123", result.variables.after)
-        assertEquals("updated_at:>=2026-04-01T00:00:00Z updated_at:<2026-04-02T00:00:00Z", result.variables.query)
+        assertEquals("updated_at:>='2026-04-01T00:00:00Z' updated_at:<'2026-04-02T00:00:00Z'", result.variables.query)
         assertEquals(75, result.variables.lineItemsFirst)
         assertFalse((Boolean) result.variables.reverse)
         assertTrue(((List<String>) result.selectedFieldPaths).contains("id"))
@@ -77,7 +77,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
             ],
         ])
 
-        assertEquals("created_at:>=2026-05-01T04:00:00Z created_at:<2026-05-02T04:00:00Z", result.variables.query)
+        assertEquals("created_at:>='2026-05-01T04:00:00Z' created_at:<'2026-05-02T04:00:00Z'", result.variables.query)
     }
 
     @Test
@@ -91,7 +91,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
             ],
         ])
 
-        assertEquals("created_at:>=2026-05-01T04:00:00Z created_at:<2026-05-02T04:00:00Z status:closed", result.variables.query)
+        assertEquals("created_at:>='2026-05-01T04:00:00Z' created_at:<'2026-05-02T04:00:00Z' status:closed", result.variables.query)
         assertEquals("CREATED_AT", result.sortKey)
     }
 

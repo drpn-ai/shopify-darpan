@@ -128,6 +128,7 @@ class ShopifyGraphqlQueryBuilder {
 
     private static String renderSearchValue(Map<String, Object> filterDefinition, Object rawValue) {
         String value = rawValue?.toString() ?: ""
+        if (filterDefinition?.type == "datetime") return "'${value.replace("'", "\\'")}'"
         return value
     }
 

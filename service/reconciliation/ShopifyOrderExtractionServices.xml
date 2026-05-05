@@ -4,7 +4,7 @@
 
     <service verb="extract" noun="ShopifyOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyOrders.groovy">
-        <description>Extract Shopify orders for an automation window and write normalized JSON output to the automation data-manager folder.</description>
+        <description>Extract Shopify orders for an automation window through Shopify Bulk Operations and write normalized JSON output to the automation data-manager folder.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned ShopifyAuthConfig identifier.</description>
@@ -45,7 +45,21 @@
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to shopify-orders-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
-            <parameter name="maxPages" type="Integer" default-value="20"/>
+            <parameter name="maxPages" type="Integer" default-value="20">
+                <description>Deprecated cursor-pagination guard retained for existing callers; Bulk Operations extraction uses maxBulkPollAttempts instead.</description>
+            </parameter>
+            <parameter name="maxBulkPollAttempts" type="Integer" default-value="60">
+                <description>Maximum Shopify Bulk Operations status polls before the extraction fails.</description>
+            </parameter>
+            <parameter name="bulkPollIntervalMillis" type="Integer" default-value="5000">
+                <description>Delay between Shopify Bulk Operations status polls.</description>
+            </parameter>
+            <parameter name="bulkStartRetryAttempts" type="Integer" default-value="10">
+                <description>Number of retries when Shopify rejects the start request because another Bulk Operation is already running.</description>
+            </parameter>
+            <parameter name="bulkStartRetryDelayMillis" type="Integer" default-value="120000">
+                <description>Delay between Bulk Operation start retries when another operation is already running.</description>
+            </parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="dataAvailable" type="Boolean"/>

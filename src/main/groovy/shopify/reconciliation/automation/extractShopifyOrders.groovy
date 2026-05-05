@@ -4,7 +4,7 @@ import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
-import shopify.graphql.ShopifyGraphqlTransport
+import shopify.graphql.ShopifyBulkOperationClient
 
 import java.sql.Timestamp
 import java.time.Instant
@@ -61,6 +61,15 @@ Closure<String> safeFileName = { Object rawName, String fallback ->
     String safeName = DataManagerSupport.safeToken(rawName, fallback)
     return safeName.toLowerCase(Locale.ROOT).endsWith(".json") ? safeName : "${safeName}.json"
 }
+Closure<String> safeJsonlFileName = { Object rawName, String fallback ->
+    String safeName = DataManagerSupport.safeToken(rawName, fallback)
+    if (safeName.toLowerCase(Locale.ROOT).endsWith(".jsonl")) return safeName
+    return safeName.replaceFirst(/(?i)\.json$/, "") + ".jsonl"
+}
+Closure<String> renderSearchDateTime = { Object value ->
+    String text = normalize(value)
+    return "'${text.replace("'", "\\'")}'"
+}
 Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object> record ->
     Map<String, Object> normalizedRecord = new LinkedHashMap<>(record ?: [:])
     String gid = normalize(normalizedRecord.id)
@@ -114,33 +123,23 @@ Closure<String> shopifyOrderSelection = {
         }
       }"""
 }
-Closure<String> buildQueryDocument = {
-    return """query DarpanShopifyOrdersByDateWindow(\$search: String, \$after: String) {
-  orders(first: 100, after: \$after, query: \$search) {
+Closure<String> buildBulkQueryDocument = { String searchQuery ->
+    return """query DarpanShopifyOrdersByDateWindow {
+  orders(query: "${ShopifyBulkOperationClient.escapeGraphqlString(searchQuery)}", sortKey: CREATED_AT) {
     edges {
-      cursor
       node {
         ${shopifyOrderSelection.call()}
       }
     }
-    pageInfo {
-      hasNextPage
-      endCursor
-    }
   }
 }"""
 }
-Closure<Map<String, Object>> executeGraphql = { def config, String queryDocument, Map<String, Object> variables ->
-    Map<String, Object> authConfigMap = [
+Closure<Map<String, Object>> authConfigForTransport = { def config ->
+    return [
             shopApiUrl : config.shopApiUrl,
             apiVersion : config.apiVersion,
             accessToken: config.accessToken,
     ]
-    return ShopifyGraphqlTransport.execute(authConfigMap, queryDocument, variables, [
-            connectTimeoutMillis: connectTimeoutMillis,
-            readTimeoutMillis   : readTimeoutMillis,
-            maxAttempts         : maxAttempts,
-    ])
 }
 
 String configIdValue = normalize(shopifyAuthConfigId)
@@ -197,46 +196,32 @@ Timestamp sourceWindowStart = (Timestamp) sourceWindow.windowStartDate
 Timestamp sourceWindowEnd = (Timestamp) sourceWindow.windowEndDate
 String windowStartText = formatWindow(sourceWindowStart)
 String windowEndText = formatWindow(sourceWindowEnd)
-String queryDocument = buildQueryDocument.call()
-String searchQuery = "created_at:>=${windowStartText} created_at:<${windowEndText}"
-Integer maxPageCount = Math.max(1, FacadeSupport.normalizeInt(maxPages, 20))
+String searchQuery = "created_at:>=${renderSearchDateTime.call(windowStartText)} created_at:<${renderSearchDateTime.call(windowEndText)}"
+String bulkQueryDocument = buildBulkQueryDocument.call(searchQuery)
+Integer bulkMaxPollAttempts = Math.max(1, FacadeSupport.normalizeInt(maxBulkPollAttempts, ShopifyBulkOperationClient.DEFAULT_MAX_POLL_ATTEMPTS))
+Integer bulkPollDelayMillis = Math.max(0, FacadeSupport.normalizeInt(bulkPollIntervalMillis, ShopifyBulkOperationClient.DEFAULT_POLL_INTERVAL_MILLIS))
+Integer bulkStartRetryAttemptCount = Math.max(0, FacadeSupport.normalizeInt(bulkStartRetryAttempts, ShopifyBulkOperationClient.DEFAULT_START_RETRY_ATTEMPTS))
+Integer bulkStartRetryDelayMillisValue = Math.max(0, FacadeSupport.normalizeInt(bulkStartRetryDelayMillis, ShopifyBulkOperationClient.DEFAULT_START_RETRY_DELAY_MILLIS))
+
+Map<String, Object> bulkOperationResult = ShopifyBulkOperationClient.runQuery(authConfigForTransport.call(authConfig), bulkQueryDocument, [
+        connectTimeoutMillis: connectTimeoutMillis,
+        readTimeoutMillis   : readTimeoutMillis,
+        maxAttempts         : maxAttempts,
+        maxPollAttempts     : bulkMaxPollAttempts,
+        pollIntervalMillis  : bulkPollDelayMillis,
+        startRetryAttempts  : bulkStartRetryAttemptCount,
+        startRetryDelayMillis: bulkStartRetryDelayMillisValue,
+])
 
 List<Map<String, Object>> records = []
-List<String> searchQueries = []
-String afterCursor = null
-boolean hasMorePages = false
-int pageCount = 0
-while (pageCount < maxPageCount) {
-    pageCount++
-    searchQueries.add(searchQuery)
-    Map<String, Object> graphqlResult = executeGraphql.call(authConfig, queryDocument, [
-            search: searchQuery,
-            after : afterCursor,
-    ])
-    if (graphqlResult.ok == false) {
-        outputErrors.addAll(((List) (graphqlResult.errors ?: ["Shopify GraphQL request failed."]))
-                .collect { Object error -> normalize(error) }
-                .findAll { String error -> error })
-        break
-    }
-
-    Map data = graphqlResult.data instanceof Map ? (Map) graphqlResult.data : [:]
-    Map orders = data.orders instanceof Map ? (Map) data.orders : [:]
-    List edges = orders.edges instanceof Collection ? (List) orders.edges : []
-    edges.each { Object edge ->
-        Object node = edge instanceof Map ? ((Map) edge).node : null
-        if (node instanceof Map) records.add(normalizeShopifyOrderRecord.call((Map<String, Object>) node))
-    }
-
-    Map pageInfo = orders.pageInfo instanceof Map ? (Map) orders.pageInfo : [:]
-    hasMorePages = pageInfo.hasNextPage == true
-    if (!hasMorePages) break
-    afterCursor = normalize(pageInfo.endCursor)
-    if (!afterCursor) break
-}
-
-if (hasMorePages && pageCount >= maxPageCount) {
-    outputErrors.add("Shopify API returned more than ${maxPageCount} pages in the automation window. Use a smaller window.")
+if (bulkOperationResult.ok == false) {
+    outputErrors.addAll(((List) (bulkOperationResult.errors ?: ["Shopify bulk operation request failed."]))
+            .collect { Object error -> normalize(error) }
+            .findAll { String error -> error })
+} else {
+    records = ((List) (bulkOperationResult.records ?: []))
+            .findAll { Object record -> record instanceof Map }
+            .collect { Object record -> normalizeShopifyOrderRecord.call((Map<String, Object>) record) } as List<Map<String, Object>>
 }
 if (outputErrors) {
     errors = outputErrors
@@ -256,6 +241,14 @@ String outputFileName = safeFileName(
         fileName ?: "shopify-orders-${sourceWindowStart.time}-${sourceWindowEnd.time}.json",
         "shopify-orders.json"
 )
+String rawJsonlText = bulkOperationResult?.jsonlText?.toString() ?: ""
+String rawJsonlLocation = null
+String rawJsonlFileName = null
+if (rawJsonlText) {
+    rawJsonlFileName = safeJsonlFileName(outputFileName, "shopify-orders.jsonl")
+    rawJsonlLocation = DataManagerSupport.childLocation(outputBaseLocation, rawJsonlFileName)
+    DataManagerSupport.writeText(ec, rawJsonlLocation, rawJsonlText)
+}
 fileName = outputFileName
 fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
 fileTypeEnumId = "DftJson"
@@ -263,7 +256,8 @@ recordCount = records.size()
 dataAvailable = records.size() > 0
 requestMetadata = [
         sourceType            : "SHOPIFY_GRAPHQL_ORDERS",
-        extractionMode        : "DATE_FILTER",
+        extractionMode        : "BULK_OPERATION_DATE_FILTER",
+        graphqlExecutionMode  : "BULK_OPERATION",
         shopifyAuthConfigId   : configIdValue,
         automationId          : normalize(automationId),
         fileSide              : normalize(fileSide),
@@ -272,10 +266,17 @@ requestMetadata = [
         sourceTimeZone        : sourceWindow.timeZone,
         calendarDateNormalized: sourceWindow.calendarDateNormalized,
         filterFields          : ["created_at"],
-        searchQueries         : searchQueries.unique(),
+        searchQueries         : [searchQuery],
         windowStartUtc        : windowStartText,
         windowEndUtc          : windowEndText,
-        pageCount             : pageCount,
+        bulkOperation         : bulkOperationResult.bulkOperation,
+        bulkPollCount         : bulkOperationResult.pollCount,
+        bulkStatusHistory     : bulkOperationResult.statusHistory,
+        bulkStartRetryCount   : bulkOperationResult.startRetryCount,
+        bulkStartRetryHistory : bulkOperationResult.startRetryHistory,
+        bulkJsonlLineCount    : bulkOperationResult.jsonlLineCount,
+        rawJsonlFileName      : rawJsonlFileName,
+        rawJsonlLocation      : rawJsonlLocation,
         extractedRecordCount  : records.size(),
 ].findAll { it.value != null } as Map<String, Object>
 DataManagerSupport.writeText(ec, fileLocation as String, JsonOutput.toJson([
