@@ -1,18 +1,19 @@
 package shopify.facade.settings
 
+import darpan.common.ValueSupport
 import darpan.facade.common.FacadeSupport
 import darpan.facade.common.TenantAccessSupport
+import org.moqui.entity.EntityCondition
 
 import java.net.URI
 
 class ShopifyAuthConfigSupport {
     static final String ENTITY_NAME = "darpan.shopify.ShopifyAuthConfig"
     static final String DEFAULT_ACTIVE_FLAG = "Y"
-    static final String DEFAULT_ORDER_READ_FLAG = "N"
     static final String DEFAULT_TIME_ZONE = TenantAccessSupport.DEFAULT_TIME_ZONE
 
     static String normalize(Object value) {
-        return FacadeSupport.normalize(value)
+        return ValueSupport.normalize(value)
     }
 
     static String normalizeShopApiUrl(Object value) {
@@ -29,12 +30,8 @@ class ShopifyAuthConfigSupport {
         return normalize(value) ?: DEFAULT_TIME_ZONE
     }
 
-    static String validateTimeZone(String timeZone) {
-        return TenantAccessSupport.validateTimeZone(timeZone)
-    }
-
     static String normalizeIndicator(Object value, boolean defaultValue) {
-        return FacadeSupport.normalizeBool(value, defaultValue) ? "Y" : "N"
+        return ValueSupport.normalizeBool(value, defaultValue) ? "Y" : "N"
     }
 
     static boolean isValidShopApiUrl(String shopApiUrl) {
@@ -51,71 +48,223 @@ class ShopifyAuthConfigSupport {
         return apiVersion == "unstable" || apiVersion ==~ /\d{4}-\d{2}/
     }
 
-    static Map<String, Object> safeConfig(def ec, def config) {
+    static Map<String, Object> safeConfig(def ec, def config, String companyLabel = null) {
         if (config == null) return null
         String companyUserGroupId = readString(config, "companyUserGroupId")
         return [
             shopifyAuthConfigId: readString(config, "shopifyAuthConfigId"),
             description        : readString(config, "description"),
             companyUserGroupId : companyUserGroupId,
-            companyLabel       : TenantAccessSupport.resolveTenantLabelForUserGroupId(ec, companyUserGroupId),
+            companyLabel       : companyLabel ?: TenantAccessSupport.resolveTenantLabelForUserGroupId(ec, companyUserGroupId),
             createdByUserId    : readString(config, "createdByUserId"),
             shopApiUrl         : readString(config, "shopApiUrl"),
             apiVersion         : readString(config, "apiVersion"),
             timeZone           : normalizeTimeZone(readValue(config, "timeZone")),
             isActive           : readString(config, "isActive") ?: DEFAULT_ACTIVE_FLAG,
-            canReadOrders      : FacadeSupport.normalizeBool(readString(config, "canReadOrders"), false),
+            canReadOrders      : ValueSupport.normalizeBool(readString(config, "canReadOrders"), false),
             hasAccessToken     : !!normalize(readValue(config, "accessToken")),
         ]
     }
 
-    static Map<String, Object> paginate(List<Map<String, Object>> rows, int pageIndex, int pageSize) {
-        int totalCount = rows.size()
-        int fromIndex = Math.min(pageIndex * pageSize, totalCount)
-        int toIndex = Math.min(fromIndex + pageSize, totalCount)
+    static def findAuthConfig(def ec, Object shopifyAuthConfigId) {
+        String configId = normalize(shopifyAuthConfigId)
+        if (!configId) return null
+        return ec.entity.find(ENTITY_NAME)
+                .condition("shopifyAuthConfigId", configId)
+                .useCache(false)
+                .one()
+    }
+
+    static void requireTenantAuthConfigAccess(def ec, def config, String configId) {
+        TenantAccessSupport.requireTenantRecordAccess(
+                ec,
+                config,
+                "Shopify auth config '${configId}' was not found.",
+                "Shopify auth config '${configId}' is not available in your active tenant."
+        )
+    }
+
+    static Map<String, Object> listAuthConfigs(def ec, Object query, Object pageIndex, Object pageSize) {
+        int page = Math.max(0, ValueSupport.normalizeInt(pageIndex, 0))
+        int size = Math.max(1, Math.min(200, ValueSupport.normalizeInt(pageSize, 20)))
+        String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
+
+        List<Map<String, Object>> rows = []
+        int totalCount = 0
+        if (activeTenantUserGroupId) {
+            def finder = authConfigFinder(ec, activeTenantUserGroupId, query)
+            totalCount = Math.min(Integer.MAX_VALUE, finder.count()) as int
+            if (totalCount > 0) {
+                String companyLabel = TenantAccessSupport.resolveTenantLabelForUserGroupId(ec, activeTenantUserGroupId)
+                (finder.offset(page, size).limit(size).list() ?: []).each { cfg ->
+                    rows.add(safeConfig(ec, cfg, companyLabel))
+                }
+            }
+        }
+
+        return withEnvelope(ec, [
+                shopifyAuthConfigs: rows,
+                pagination        : pagination(page, size, totalCount),
+        ])
+    }
+
+    static Map<String, Object> getAuthConfig(def ec, Object shopifyAuthConfigId) {
+        String configId = normalize(shopifyAuthConfigId)
+        if (!configId) {
+            ec.message.addError("Shopify auth config ID is required.")
+        }
+
+        Map<String, Object> output = [:]
+        if (!ec.message.hasError()) {
+            def config = findAuthConfig(ec, configId)
+            requireTenantAuthConfigAccess(ec, config, configId)
+            if (!ec.message.hasError()) output.shopifyAuthConfig = safeConfig(ec, config)
+        }
+        return withEnvelope(ec, output)
+    }
+
+    static Map<String, Object> saveAuthConfig(def ec, Object serviceContext) {
+        String configId = normalize(serviceContext?.shopifyAuthConfigId)
+        String descriptionValue = normalize(serviceContext?.description)
+        String shopApiUrlValue = normalizeShopApiUrl(serviceContext?.shopApiUrl)
+        String apiVersionValue = normalizeApiVersion(serviceContext?.apiVersion)
+        String requestedTimeZoneValue = normalize(serviceContext?.timeZone)
+        String accessTokenValue = normalize(serviceContext?.accessToken)
+        String isActiveValue = normalizeIndicator(serviceContext?.isActive, true)
+        String canReadOrdersValue = normalizeIndicator(serviceContext?.canReadOrders, false)
+
+        if (!configId) ec.message.addError("Shopify auth config ID is required.")
+        if (!shopApiUrlValue) ec.message.addError("Shop/API URL is required.")
+        if (shopApiUrlValue && !isValidShopApiUrl(shopApiUrlValue)) {
+            ec.message.addError("Shop/API URL must be an absolute http or https URL.")
+        }
+        if (!apiVersionValue) ec.message.addError("API version is required.")
+        if (apiVersionValue && !isValidApiVersion(apiVersionValue)) {
+            ec.message.addError("API version must use YYYY-MM format or unstable.")
+        }
+
+        def existingConfig = null
+        if (!ec.message.hasError()) {
+            existingConfig = findAuthConfig(ec, configId)
+            if (existingConfig) requireTenantAuthConfigAccess(ec, existingConfig, configId)
+        }
+
+        if (!ec.message.hasError()) {
+            TenantAccessSupport.requireActiveTenantWriteAccess(
+                    ec,
+                    "Your active tenant only has view access for Shopify auth settings."
+            )
+        }
+
+        String timeZoneValue = normalizeTimeZone(requestedTimeZoneValue ?: existingConfig?.timeZone)
+        String timeZoneValidationError = TenantAccessSupport.validateTimeZone(timeZoneValue)
+        if (timeZoneValidationError) ec.message.addError(timeZoneValidationError.replace("Timezone", "Shopify timezone"))
+
+        if (!ec.message.hasError() && existingConfig == null && !accessTokenValue) {
+            ec.message.addError("Access token is required for new Shopify auth configs.")
+        }
+
+        Map<String, Object> output = [:]
+        if (!ec.message.hasError()) {
+            Map<String, Object> storeMap = [
+                    shopifyAuthConfigId: configId,
+                    description        : descriptionValue,
+                    companyUserGroupId : existingConfig?.companyUserGroupId,
+                    createdByUserId    : existingConfig?.createdByUserId,
+                    shopApiUrl         : shopApiUrlValue,
+                    apiVersion         : apiVersionValue,
+                    timeZone           : timeZoneValue,
+                    accessToken        : accessTokenValue ?: existingConfig?.accessToken,
+                    isActive           : isActiveValue,
+                    canReadOrders      : canReadOrdersValue,
+            ]
+
+            if (existingConfig == null || !existingConfig.companyUserGroupId) {
+                TenantAccessSupport.assignTenantOwnershipOnCreate(storeMap, ec)
+            }
+
+            if (!ec.message.hasError()) {
+                ec.service.sync().name("store#${ENTITY_NAME}").parameters(storeMap).call()
+                output.savedShopifyAuthConfig = safeConfig(ec, storeMap)
+                if (!ec.message.hasError()) {
+                    ec.message.addMessage("Saved Shopify auth config ${configId}.")
+                }
+            }
+        }
+        return withEnvelope(ec, output)
+    }
+
+    static Map<String, Object> deleteAuthConfig(def ec, Object shopifyAuthConfigId) {
+        String configId = normalize(shopifyAuthConfigId)
+        boolean deleted = false
+
+        if (!configId) {
+            ec.message.addError("Shopify auth config ID is required.")
+        }
+
+        if (!ec.message.hasError()) {
+            def config = findAuthConfig(ec, configId)
+            requireTenantAuthConfigAccess(ec, config, configId)
+        }
+
+        if (!ec.message.hasError()) {
+            TenantAccessSupport.requireActiveTenantWriteAccess(
+                    ec,
+                    "Your active tenant only has view access for Shopify auth settings."
+            )
+        }
+
+        if (!ec.message.hasError()) {
+            ec.service.sync()
+                    .name("delete#${ENTITY_NAME}")
+                    .parameters([shopifyAuthConfigId: configId])
+                    .disableAuthz()
+                    .call()
+            deleted = true
+            ec.message.addMessage("Deleted Shopify auth config ${configId}.")
+        }
+
+        return withEnvelope(ec, [
+                deleted                    : deleted,
+                deletedShopifyAuthConfigId : deleted ? configId : null,
+        ].findAll { entry -> entry.value != null } as Map<String, Object>)
+    }
+
+    private static def authConfigFinder(def ec, String companyUserGroupId, Object query) {
+        def finder = ec.entity.find(ENTITY_NAME)
+                .condition("companyUserGroupId", companyUserGroupId)
+                .useCache(false)
+                .orderBy("description,shopifyAuthConfigId")
+        String search = normalize(query)
+        if (search) {
+            List searchConditions = ["shopifyAuthConfigId", "description", "shopApiUrl", "apiVersion", "timeZone"].collect { String fieldName ->
+                ec.entity.conditionFactory.makeCondition(fieldName, EntityCondition.LIKE, "%${search}%").ignoreCase()
+            }
+            finder.condition(ec.entity.conditionFactory.makeCondition(searchConditions, EntityCondition.OR))
+        }
+        return finder
+    }
+
+    private static Map<String, Object> pagination(int pageIndex, int pageSize, int totalCount) {
         return [
-            rows      : rows.subList(fromIndex, toIndex),
-            pagination: [
-                pageIndex : pageIndex,
-                pageSize  : pageSize,
-                totalCount: totalCount,
-                pageCount : Math.max(1, Math.ceil(totalCount / (double) pageSize) as int),
-            ],
+            pageIndex : pageIndex,
+            pageSize  : pageSize,
+            totalCount: totalCount,
+            pageCount : Math.max(1, Math.ceil(totalCount / (double) pageSize) as int),
         ]
     }
 
-    static boolean matchesSearch(Map<String, Object> row, String searchLower) {
-        if (!searchLower) return true
-        return [
-            row.shopifyAuthConfigId,
-            row.description,
-            row.shopApiUrl,
-            row.apiVersion,
-            row.timeZone,
-        ].any { value -> value?.toString()?.toLowerCase()?.contains(searchLower) }
-    }
-
-    static Map<String, Object> buildStoreMap(def existingConfig, Map<String, Object> values) {
-        Map<String, Object> storeMap = [
-            shopifyAuthConfigId: values.shopifyAuthConfigId,
-            description        : values.description,
-            companyUserGroupId : existingConfig?.companyUserGroupId,
-            createdByUserId    : existingConfig?.createdByUserId,
-            shopApiUrl         : values.shopApiUrl,
-            apiVersion         : values.apiVersion,
-            timeZone           : values.timeZone,
-            accessToken        : values.accessToken ?: existingConfig?.accessToken,
-            isActive           : values.isActive,
-            canReadOrders      : values.canReadOrders,
+    private static Map<String, Object> withEnvelope(def ec, Map<String, Object> output = [:]) {
+        Map envelope = FacadeSupport.envelope(ec)
+        return (output ?: [:]) + [
+                ok      : envelope.ok,
+                messages: envelope.messages,
+                errors  : envelope.errors,
         ]
-        return storeMap
     }
 
     private static Object readValue(def record, String fieldName) {
-        if (record == null) return null
-        if (record instanceof Map) return record[fieldName]
-        if (record.metaClass.respondsTo(record, "get", String)) return record.get(fieldName)
-        return record."${fieldName}"
+        return record instanceof Map ? ((Map) record)[fieldName] : null
     }
 
     private static String readString(def record, String fieldName) {

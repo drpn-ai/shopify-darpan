@@ -1,12 +1,14 @@
 package shopify.graphql
 
-import darpan.facade.common.FacadeSupport
-
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
+
+import static darpan.common.ValueSupport.normalize
+import static darpan.common.ValueSupport.normalizeBool
+import static darpan.common.ValueSupport.normalizeInt
 
 class ShopifyGraphqlQueryBuilder {
     static final String DEFAULT_SOURCE_DEFINITION_ID = ShopifySourceCatalog.SHOPIFY_ORDERS
@@ -15,21 +17,22 @@ class ShopifyGraphqlQueryBuilder {
         String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
         String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
         Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
+        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
 
         List<String> selectedFieldPaths = resolveSelectedFieldPaths(source, requirements?.selectedFieldPaths as Collection)
-        List<String> invalidFields = ShopifySourceCatalog.validateSelectedFields(source, selectedFieldPaths)
+        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
         if (invalidFields) {
             throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
         }
 
         Map<String, Object> filters = normalizeFilters(source, requirements?.filters as Map)
         Integer pageSize = clampPageSize(requirements?.pageSize, source.defaultPageSize as Integer, source.maxPageSize as Integer)
-        String afterCursor = FacadeSupport.normalize(requirements?.afterCursor)
-        Boolean reverse = FacadeSupport.normalizeBool(requirements?.reverse, false)
-        Map<String, Object> connectionPageSizes = resolveConnectionPageSizes(source, selectedFieldPaths, requirements?.connectionPageSizes as Map)
+        String afterCursor = normalize(requirements?.afterCursor)
+        Boolean reverse = normalizeBool(requirements?.reverse, false)
+        Map<String, Object> connectionPageSizes = resolveConnectionPageSizes(fieldsByPath, selectedFieldPaths, requirements?.connectionPageSizes as Map)
         String sortKey = resolveSortKey(source, filters, requirements?.sortKey)
 
-        Map<String, Map> selectionTree = buildSelectionTree(source, selectedFieldPaths)
+        Map<String, Map> selectionTree = buildSelectionTree(fieldsByPath, selectedFieldPaths)
         Map<String, Object> variables = [
             first  : pageSize,
             after  : afterCursor,
@@ -75,8 +78,8 @@ class ShopifyGraphqlQueryBuilder {
         Map<String, Map<String, Object>> supportedFilters = (Map<String, Map<String, Object>>) (source.supportedFilters ?: [:])
         Map<String, Object> filters = [:]
         (rawFilters ?: [:]).each { Object key, Object value ->
-            String filterKey = FacadeSupport.normalize(key)
-            String filterValue = FacadeSupport.normalize(value)
+            String filterKey = normalize(key)
+            String filterValue = normalize(value)
             if (!filterKey || !filterValue) return
             if (!supportedFilters.containsKey(filterKey)) {
                 throw new IllegalArgumentException("Unsupported Shopify filter '${filterKey}' for ${source.sourceDefinitionId}.")
@@ -133,28 +136,28 @@ class ShopifyGraphqlQueryBuilder {
     }
 
     private static String resolveSortKey(Map<String, Object> source, Map<String, Object> filters, Object rawSortKey) {
-        String requestedSortKey = FacadeSupport.normalize(rawSortKey)?.toUpperCase()
+        String requestedSortKey = normalize(rawSortKey)?.toUpperCase()
         if (requestedSortKey) return requestedSortKey
 
         Map<String, Map<String, Object>> supportedFilters = (Map<String, Map<String, Object>>) (source.supportedFilters ?: [:])
         for (String filterKey : filters.keySet()) {
-            String filterSortKey = FacadeSupport.normalize(supportedFilters[filterKey]?.sortKey)?.toUpperCase()
+            String filterSortKey = normalize(supportedFilters[filterKey]?.sortKey)?.toUpperCase()
             if (filterSortKey) return filterSortKey
         }
-        return FacadeSupport.normalize(source.defaultSortKey)?.toUpperCase() ?: "UPDATED_AT"
+        return normalize(source.defaultSortKey)?.toUpperCase() ?: "UPDATED_AT"
     }
 
     private static Integer clampPageSize(Object rawPageSize, Integer defaultPageSize, Integer maxPageSize) {
-        Integer pageSize = FacadeSupport.normalizeInt(rawPageSize, defaultPageSize ?: 100)
+        Integer pageSize = normalizeInt(rawPageSize, defaultPageSize ?: 100)
         return Math.max(1, Math.min(maxPageSize ?: 250, pageSize))
     }
 
-    private static Map<String, Object> resolveConnectionPageSizes(Map<String, Object> source, List<String> selectedFieldPaths, Map rawConnectionPageSizes) {
-        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
+    private static Map<String, Object> resolveConnectionPageSizes(Map<String, Map<String, Object>> fieldsByPath,
+            List<String> selectedFieldPaths, Map rawConnectionPageSizes) {
         Map<String, Object> pageSizes = [:]
         selectedFieldPaths.each { String fieldPath ->
             Map<String, Object> field = fieldsByPath[fieldPath]
-            String connectionRoot = FacadeSupport.normalize(field?.connectionRoot)
+            String connectionRoot = normalize(field?.connectionRoot)
             if (!connectionRoot) return
 
             String variableName = "${connectionRoot}First"
@@ -165,8 +168,7 @@ class ShopifyGraphqlQueryBuilder {
         return pageSizes
     }
 
-    private static Map<String, Map> buildSelectionTree(Map<String, Object> source, List<String> selectedFieldPaths) {
-        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
+    private static Map<String, Map> buildSelectionTree(Map<String, Map<String, Object>> fieldsByPath, List<String> selectedFieldPaths) {
         Map<String, Map> tree = [:]
         selectedFieldPaths.each { String fieldPath ->
             String selectionPath = fieldsByPath[fieldPath]?.selectionPath
@@ -177,10 +179,10 @@ class ShopifyGraphqlQueryBuilder {
     }
 
     private static void addSelectionPath(Map<String, Map> tree, List<String> segments) {
-        if (!segments) return
-        String segment = segments.first()
-        Map<String, Map> childTree = (Map<String, Map>) tree.computeIfAbsent(segment) { [:] }
-        addSelectionPath(childTree, segments.tail())
+        Map<String, Map> currentTree = tree
+        segments.each { String segment ->
+            currentTree = (Map<String, Map>) currentTree.computeIfAbsent(segment) { [:] }
+        }
     }
 
     private static String renderQueryDocument(Map<String, Object> source, Map<String, Map> selectionTree, String operationName,

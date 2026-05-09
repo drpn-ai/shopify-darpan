@@ -2,8 +2,7 @@
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
-    <service verb="list" noun="ShopifyAuthConfigs" type="script" allow-remote="true" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/listShopifyAuthConfigs.groovy">
+    <service verb="list" noun="ShopifyAuthConfigs" allow-remote="true" authenticate="true">
         <description>List Shopify auth configs for the active tenant with secret redaction indicators.</description>
         <in-parameters>
             <parameter name="query"/>
@@ -34,10 +33,12 @@
                 <parameter name="hasAccessToken" type="Boolean"/>
             </parameter>
         </out-parameters>
+        <actions>
+            <script>context.putAll(shopify.facade.settings.ShopifyAuthConfigSupport.listAuthConfigs(ec, query, pageIndex, pageSize))</script>
+        </actions>
     </service>
 
-    <service verb="get" noun="ShopifyAuthConfig" type="script" allow-remote="true" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/getShopifyAuthConfig.groovy">
+    <service verb="get" noun="ShopifyAuthConfig" allow-remote="true" authenticate="true">
         <description>Get one Shopify auth config for the active tenant with the access token redacted.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true"/>
@@ -60,10 +61,12 @@
                 <parameter name="hasAccessToken" type="Boolean"/>
             </parameter>
         </out-parameters>
+        <actions>
+            <script>context.putAll(shopify.facade.settings.ShopifyAuthConfigSupport.getAuthConfig(ec, shopifyAuthConfigId))</script>
+        </actions>
     </service>
 
-    <service verb="save" noun="ShopifyAuthConfig" type="script" allow-remote="true" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/saveShopifyAuthConfig.groovy">
+    <service verb="save" noun="ShopifyAuthConfig" allow-remote="true" authenticate="true">
         <description>Create or update a tenant-owned Shopify auth config, preserving the stored token when no replacement is provided.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true"/>
@@ -93,10 +96,12 @@
                 <parameter name="hasAccessToken" type="Boolean"/>
             </parameter>
         </out-parameters>
+        <actions>
+            <script>context.putAll(shopify.facade.settings.ShopifyAuthConfigSupport.saveAuthConfig(ec, context))</script>
+        </actions>
     </service>
 
-    <service verb="delete" noun="ShopifyAuthConfig" type="script" allow-remote="true" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/settings/deleteShopifyAuthConfig.groovy">
+    <service verb="delete" noun="ShopifyAuthConfig" allow-remote="true" authenticate="true">
         <description>Delete one tenant-owned Shopify auth config.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true"/>
@@ -108,10 +113,12 @@
             <parameter name="deleted" type="Boolean"/>
             <parameter name="deletedShopifyAuthConfigId"/>
         </out-parameters>
+        <actions>
+            <script>context.putAll(shopify.facade.settings.ShopifyAuthConfigSupport.deleteAuthConfig(ec, shopifyAuthConfigId))</script>
+        </actions>
     </service>
 
-    <service verb="list" noun="ShopifySourceDefinitions" type="script" allow-remote="true" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/listShopifySourceDefinitions.groovy">
+    <service verb="list" noun="ShopifySourceDefinitions" allow-remote="true" authenticate="true">
         <description>List Shopify source definitions and selectable field catalogs for setup flows.</description>
         <in-parameters>
             <parameter name="apiVersion"/>
@@ -122,10 +129,15 @@
             <parameter name="errors"><parameter name="error"/></parameter>
             <parameter name="sourceDefinitions" type="List"/>
         </out-parameters>
+        <actions>
+            <set field="sourceDefinitions" from="shopify.graphql.ShopifySourceCatalog.listSources(apiVersion)"/>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="messages" from="darpan.facade.common.FacadeSupport.getMessages(ec)"/>
+            <set field="errors" from="darpan.facade.common.FacadeSupport.getErrors(ec)"/>
+        </actions>
     </service>
 
-    <service verb="get" noun="ShopifySourceDefinition" type="script" allow-remote="true" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/getShopifySourceDefinition.groovy">
+    <service verb="get" noun="ShopifySourceDefinition" allow-remote="true" authenticate="true">
         <description>Get one Shopify source definition and its selectable fields for an API version.</description>
         <in-parameters>
             <parameter name="sourceDefinitionId" required="true"/>
@@ -137,10 +149,25 @@
             <parameter name="errors"><parameter name="error"/></parameter>
             <parameter name="sourceDefinition" type="Map"/>
         </out-parameters>
+        <actions>
+            <set field="sourceId" from="shopify.graphql.ShopifySourceCatalog.normalizeSourceDefinitionId(sourceDefinitionId)"/>
+            <if condition="!sourceId">
+                <message error="true">Shopify source definition ID is required.</message>
+            </if>
+            <if condition="!ec.message.hasError()">
+                <set field="sourceDefinition" from="shopify.graphql.ShopifySourceCatalog.getSource(sourceId, apiVersion)"/>
+                <if condition="sourceDefinition == null">
+                    <set field="apiVersionValue" from="shopify.graphql.ShopifySourceCatalog.normalizeApiVersion(apiVersion)"/>
+                    <message error="true">${apiVersionValue ? 'Shopify source ' + sourceId + ' is not available for API version ' + apiVersionValue + '.' : 'Shopify source ' + sourceId + ' was not found.'}</message>
+                </if>
+            </if>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="messages" from="darpan.facade.common.FacadeSupport.getMessages(ec)"/>
+            <set field="errors" from="darpan.facade.common.FacadeSupport.getErrors(ec)"/>
+        </actions>
     </service>
 
-    <service verb="build" noun="ShopifyGraphqlQuery" type="script" allow-remote="false" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/buildShopifyGraphqlQuery.groovy">
+    <service verb="build" noun="ShopifyGraphqlQuery" allow-remote="false" authenticate="true">
         <description>Build a Shopify Admin GraphQL query from structured source, field, filter, and pagination requirements.</description>
         <in-parameters>
             <parameter name="sourceDefinitionId" required="true"/>
@@ -158,14 +185,19 @@
             <parameter name="errors"><parameter name="error"/></parameter>
             <parameter name="builtQuery" type="Map"/>
         </out-parameters>
+        <actions>
+            <set field="builtQuery" from="shopify.facade.graphql.ShopifyGraphqlFacadeSupport.buildGraphqlQuery(ec, context)"/>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="messages" from="darpan.facade.common.FacadeSupport.getMessages(ec)"/>
+            <set field="errors" from="darpan.facade.common.FacadeSupport.getErrors(ec)"/>
+        </actions>
     </service>
 
-    <service verb="execute" noun="ShopifyGraphql" type="script" allow-remote="false" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/facade/graphql/executeShopifyGraphql.groovy">
+    <service verb="execute" noun="ShopifyGraphql" allow-remote="false" authenticate="true">
         <description>Execute a generated Shopify Admin GraphQL query through a tenant-owned auth config.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true"/>
-            <parameter name="queryDocument" required="true" allow-html="true"/>
+            <parameter name="queryDocument" required="true" allow-html="any"/>
             <parameter name="variables" type="Map"/>
             <parameter name="connectTimeoutMillis" type="Integer" default-value="30000"/>
             <parameter name="readTimeoutMillis" type="Integer" default-value="60000"/>
@@ -177,6 +209,12 @@
             <parameter name="errors"><parameter name="error"/></parameter>
             <parameter name="graphqlResult" type="Map"/>
         </out-parameters>
+        <actions>
+            <set field="graphqlResult" from="shopify.facade.graphql.ShopifyGraphqlFacadeSupport.executeGraphql(ec, context)"/>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="messages" from="darpan.facade.common.FacadeSupport.getMessages(ec)"/>
+            <set field="errors" from="darpan.facade.common.FacadeSupport.getErrors(ec)"/>
+        </actions>
     </service>
 
 </services>

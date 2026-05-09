@@ -76,6 +76,8 @@ query ShopifyOrders($first: Int!, $after: String, $query: String, $reverse: Bool
 
 `facade.ShopifyFacadeServices.execute#ShopifyGraphql` is internal-only. It executes generated GraphQL documents through a tenant-owned Shopify auth config, using the configured shop/API URL, API version, and encrypted access token.
 
+The raw `queryDocument` service parameter allows literal GraphQL/search characters such as `<` and `>` because generated date-window queries embed Shopify search bounds inside the GraphQL document.
+
 The transport:
 
 - builds `/admin/api/{apiVersion}/graphql.json`

@@ -1,5 +1,5 @@
+import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
-import darpan.facade.common.FacadeSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
 import groovy.json.JsonOutput
@@ -17,7 +17,7 @@ import java.time.ZonedDateTime
 List<String> outputErrors = []
 List<String> outputWarnings = []
 
-Closure<String> normalize = { Object value -> FacadeSupport.normalize(value) }
+Closure<String> normalize = { Object value -> ValueSupport.normalize(value) }
 Closure<Timestamp> toTimestamp = { Object rawValue, String label ->
     if (rawValue == null) {
         outputErrors.add("${label} is required.")
@@ -66,10 +66,6 @@ Closure<String> safeJsonlFileName = { Object rawName, String fallback ->
     if (safeName.toLowerCase(Locale.ROOT).endsWith(".jsonl")) return safeName
     return safeName.replaceFirst(/(?i)\.json$/, "") + ".jsonl"
 }
-Closure<String> renderSearchDateTime = { Object value ->
-    String text = normalize(value)
-    return "'${text.replace("'", "\\'")}'"
-}
 Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object> record ->
     Map<String, Object> normalizedRecord = new LinkedHashMap<>(record ?: [:])
     String gid = normalize(normalizedRecord.id)
@@ -85,8 +81,7 @@ Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object>
     }
     return normalizedRecord
 }
-Closure<String> shopifyOrderSelection = {
-    return """id
+String shopifyOrderSelection = """id
       legacyResourceId
       name
       createdAt
@@ -122,26 +117,17 @@ Closure<String> shopifyOrderSelection = {
           currencyCode
         }
       }"""
-}
 Closure<String> buildBulkQueryDocument = { String searchQuery ->
     return """query DarpanShopifyOrdersByDateWindow {
   orders(query: "${ShopifyBulkOperationClient.escapeGraphqlString(searchQuery)}", sortKey: CREATED_AT) {
     edges {
       node {
-        ${shopifyOrderSelection.call()}
+        ${shopifyOrderSelection}
       }
     }
   }
 }"""
 }
-Closure<Map<String, Object>> authConfigForTransport = { def config ->
-    return [
-            shopApiUrl : config.shopApiUrl,
-            apiVersion : config.apiVersion,
-            accessToken: config.accessToken,
-    ]
-}
-
 String configIdValue = normalize(shopifyAuthConfigId)
 String companyUserGroupIdValue = normalize(companyUserGroupId)
 Timestamp windowStartValue = toTimestamp(windowStart, "windowStart")
@@ -187,8 +173,7 @@ if (outputErrors) {
 }
 
 String sourceTimeZone = normalize(authConfig?.timeZone) ?: TenantAccessSupport.resolveActiveTenantTimeZone(ec)
-boolean preserveWindowInstantsValue = preserveWindowInstants instanceof Boolean ? preserveWindowInstants :
-        ["Y", "YES", "TRUE", "1", "ON"].contains(normalize(preserveWindowInstants)?.toUpperCase(Locale.ROOT))
+boolean preserveWindowInstantsValue = ValueSupport.normalizeBool(preserveWindowInstants, false)
 Map<String, Object> sourceWindow = preserveWindowInstantsValue ?
         ReconciliationApiWindowSupport.preserveExactWindow(windowStartValue, windowEndValue, sourceTimeZone) :
         ReconciliationApiWindowSupport.normalizeCalendarWindow(windowStartValue, windowEndValue, sourceTimeZone)
@@ -196,14 +181,18 @@ Timestamp sourceWindowStart = (Timestamp) sourceWindow.windowStartDate
 Timestamp sourceWindowEnd = (Timestamp) sourceWindow.windowEndDate
 String windowStartText = formatWindow(sourceWindowStart)
 String windowEndText = formatWindow(sourceWindowEnd)
-String searchQuery = "created_at:>=${renderSearchDateTime.call(windowStartText)} created_at:<${renderSearchDateTime.call(windowEndText)}"
+String searchQuery = "created_at:>='${windowStartText}' created_at:<'${windowEndText}'"
 String bulkQueryDocument = buildBulkQueryDocument.call(searchQuery)
-Integer bulkMaxPollAttempts = Math.max(1, FacadeSupport.normalizeInt(maxBulkPollAttempts, ShopifyBulkOperationClient.DEFAULT_MAX_POLL_ATTEMPTS))
-Integer bulkPollDelayMillis = Math.max(0, FacadeSupport.normalizeInt(bulkPollIntervalMillis, ShopifyBulkOperationClient.DEFAULT_POLL_INTERVAL_MILLIS))
-Integer bulkStartRetryAttemptCount = Math.max(0, FacadeSupport.normalizeInt(bulkStartRetryAttempts, ShopifyBulkOperationClient.DEFAULT_START_RETRY_ATTEMPTS))
-Integer bulkStartRetryDelayMillisValue = Math.max(0, FacadeSupport.normalizeInt(bulkStartRetryDelayMillis, ShopifyBulkOperationClient.DEFAULT_START_RETRY_DELAY_MILLIS))
+Integer bulkMaxPollAttempts = Math.max(1, ValueSupport.normalizeInt(maxBulkPollAttempts, ShopifyBulkOperationClient.DEFAULT_MAX_POLL_ATTEMPTS))
+Integer bulkPollDelayMillis = Math.max(0, ValueSupport.normalizeInt(bulkPollIntervalMillis, ShopifyBulkOperationClient.DEFAULT_POLL_INTERVAL_MILLIS))
+Integer bulkStartRetryAttemptCount = Math.max(0, ValueSupport.normalizeInt(bulkStartRetryAttempts, ShopifyBulkOperationClient.DEFAULT_START_RETRY_ATTEMPTS))
+Integer bulkStartRetryDelayMillisValue = Math.max(0, ValueSupport.normalizeInt(bulkStartRetryDelayMillis, ShopifyBulkOperationClient.DEFAULT_START_RETRY_DELAY_MILLIS))
 
-Map<String, Object> bulkOperationResult = ShopifyBulkOperationClient.runQuery(authConfigForTransport.call(authConfig), bulkQueryDocument, [
+Map<String, Object> bulkOperationResult = ShopifyBulkOperationClient.runQuery([
+        shopApiUrl : authConfig.shopApiUrl,
+        apiVersion : authConfig.apiVersion,
+        accessToken: authConfig.accessToken,
+], bulkQueryDocument, [
         connectTimeoutMillis: connectTimeoutMillis,
         readTimeoutMillis   : readTimeoutMillis,
         maxAttempts         : maxAttempts,

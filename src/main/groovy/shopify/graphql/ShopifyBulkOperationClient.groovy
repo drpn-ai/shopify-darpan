@@ -1,6 +1,6 @@
 package shopify.graphql
 
-import darpan.facade.common.FacadeSupport
+import darpan.common.ValueSupport
 import groovy.json.JsonSlurper
 
 import java.net.HttpURLConnection
@@ -55,7 +55,7 @@ class ShopifyBulkOperationClient {
 }'''
 
     static Map<String, Object> runQuery(Map authConfig, String bulkQueryDocument, Map options = [:]) {
-        String normalizedQuery = FacadeSupport.normalize(bulkQueryDocument)
+        String normalizedQuery = ValueSupport.normalize(bulkQueryDocument)
         if (!normalizedQuery) return safeFailure("Shopify bulk operation query document is required.")
 
         Map<String, Object> runOptions = options ?: [:]
@@ -98,7 +98,7 @@ class ShopifyBulkOperationClient {
 
         Map<String, Object> operation = startResult.bulkOperation instanceof Map ?
                 (Map<String, Object>) startResult.bulkOperation : [:]
-        String operationId = FacadeSupport.normalize(operation.id)
+        String operationId = ValueSupport.normalize(operation.id)
         if (!operationId) return safeFailure("Shopify bulk operation did not return an operation id.")
 
         int maxPollAttempts = Math.max(1, normalizeInt(options?.maxPollAttempts, DEFAULT_MAX_POLL_ATTEMPTS))
@@ -106,7 +106,7 @@ class ShopifyBulkOperationClient {
         List<Map<String, Object>> statusHistory = [safeOperationMetadata(operation)]
 
         for (int pollAttempt = 0; pollAttempt <= maxPollAttempts; pollAttempt++) {
-            String status = FacadeSupport.normalize(operation.status)?.toUpperCase()
+            String status = ValueSupport.normalize(operation.status)?.toUpperCase()
             if (status == "COMPLETED") {
                 return completeOperation(operation, statusHistory, runOptions) + retryMetadata(startRetryHistory)
             }
@@ -131,7 +131,7 @@ class ShopifyBulkOperationClient {
             Map<String, Object> statusResult = pollOperation(authConfig, operationId, runOptions)
             if (statusResult.ok == false) return statusResult
             operation = statusResult.bulkOperation instanceof Map ? (Map<String, Object>) statusResult.bulkOperation : [:]
-            if (!FacadeSupport.normalize(operation.id)) operation.id = operationId
+            if (!ValueSupport.normalize(operation.id)) operation.id = operationId
             statusHistory.add(safeOperationMetadata(operation))
         }
 
@@ -145,7 +145,7 @@ class ShopifyBulkOperationClient {
         int lineCount = 0
         JsonSlurper slurper = new JsonSlurper()
 
-        (jsonlText ?: "").readLines().each { String line ->
+        (jsonlText ?: "").eachLine { String line ->
             lineCount++
             String trimmed = line?.trim()
             if (!trimmed) return
@@ -192,7 +192,7 @@ class ShopifyBulkOperationClient {
         }
 
         Map operation = payload.bulkOperation instanceof Map ? (Map) payload.bulkOperation : [:]
-        if (!FacadeSupport.normalize(operation.id)) {
+        if (!ValueSupport.normalize(operation.id)) {
             return safeFailure("Shopify bulk operation could not start.")
         }
 
@@ -226,7 +226,7 @@ class ShopifyBulkOperationClient {
     }
 
     private static Map<String, Object> completeOperation(Map<String, Object> operation, List<Map<String, Object>> statusHistory, Map options) {
-        String downloadUrl = FacadeSupport.normalize(operation.url)
+        String downloadUrl = ValueSupport.normalize(operation.url)
         Map<String, Object> operationMetadata = safeOperationMetadata(operation)
         Map<String, Object> baseResult = [
                 ok           : true,
@@ -311,13 +311,13 @@ class ShopifyBulkOperationClient {
 
     private static Map<String, Object> safeOperationMetadata(Map operation) {
         return [
-                id         : FacadeSupport.normalize(operation?.id),
-                status     : FacadeSupport.normalize(operation?.status),
-                errorCode  : FacadeSupport.normalize(operation?.errorCode),
-                createdAt  : FacadeSupport.normalize(operation?.createdAt),
-                completedAt: FacadeSupport.normalize(operation?.completedAt),
-                objectCount: FacadeSupport.normalize(operation?.objectCount),
-                fileSize   : FacadeSupport.normalize(operation?.fileSize),
+                id         : ValueSupport.normalize(operation?.id),
+                status     : ValueSupport.normalize(operation?.status),
+                errorCode  : ValueSupport.normalize(operation?.errorCode),
+                createdAt  : ValueSupport.normalize(operation?.createdAt),
+                completedAt: ValueSupport.normalize(operation?.completedAt),
+                objectCount: ValueSupport.normalize(operation?.objectCount),
+                fileSize   : ValueSupport.normalize(operation?.fileSize),
         ].findAll { entry -> entry.value != null } as Map<String, Object>
     }
 
@@ -326,12 +326,12 @@ class ShopifyBulkOperationClient {
         return ((Collection) rawUserErrors).collect { Object rawError ->
             if (rawError instanceof Map) {
                 String field = rawError.field instanceof Collection ?
-                        ((Collection) rawError.field).collect { Object item -> FacadeSupport.normalize(item) }.findAll { it }.join(".") :
-                        FacadeSupport.normalize(rawError.field)
-                String message = FacadeSupport.normalize(rawError.message)
+                        ((Collection) rawError.field).collect { Object item -> ValueSupport.normalize(item) }.findAll { it }.join(".") :
+                        ValueSupport.normalize(rawError.field)
+                String message = ValueSupport.normalize(rawError.message)
                 return field && message ? "${field}: ${message}" : message ?: field
             }
-            return FacadeSupport.normalize(rawError)
+            return ValueSupport.normalize(rawError)
         }.findAll { String error -> error } as List<String>
     }
 
@@ -344,7 +344,7 @@ class ShopifyBulkOperationClient {
     private static boolean isConcurrentBulkOperationMessage(Object rawMessages) {
         if (!(rawMessages instanceof Collection)) return false
         return ((Collection) rawMessages).any { Object rawMessage ->
-            String message = FacadeSupport.normalize(rawMessage)?.toLowerCase()
+            String message = ValueSupport.normalize(rawMessage)?.toLowerCase()
             message?.contains("bulk operation") && (
                     message.contains("already in progress") ||
                             message.contains("already running") ||
@@ -357,7 +357,7 @@ class ShopifyBulkOperationClient {
     private static List<String> sanitizeErrorList(Object rawErrors) {
         if (!(rawErrors instanceof Collection)) return []
         return ((Collection) rawErrors)
-                .collect { Object error -> FacadeSupport.normalize(error instanceof Map ? error.message : error) }
+                .collect { Object error -> ValueSupport.normalize(error instanceof Map ? error.message : error) }
                 .findAll { String error -> error } as List<String>
     }
 
@@ -370,7 +370,7 @@ class ShopifyBulkOperationClient {
     }
 
     private static boolean supportsBulkOperationById(Object apiVersion) {
-        String version = FacadeSupport.normalize(apiVersion)?.toLowerCase()
+        String version = ValueSupport.normalize(apiVersion)?.toLowerCase()
         if (!version || version == "unstable") return true
         def matcher = version =~ /^(\d{4})-(\d{2})$/
         if (!matcher.matches()) return true
@@ -388,7 +388,7 @@ class ShopifyBulkOperationClient {
     }
 
     private static int normalizeInt(Object value, int defaultValue) {
-        Integer normalized = FacadeSupport.normalizeInt(value, defaultValue)
+        Integer normalized = ValueSupport.normalizeInt(value, defaultValue)
         return normalized == null ? defaultValue : normalized
     }
 }

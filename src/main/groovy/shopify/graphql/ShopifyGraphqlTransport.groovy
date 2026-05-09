@@ -1,11 +1,13 @@
 package shopify.graphql
 
-import darpan.facade.common.FacadeSupport
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 
 import java.net.HttpURLConnection
 import java.nio.charset.StandardCharsets
+
+import static darpan.common.ValueSupport.normalize
+import static darpan.common.ValueSupport.normalizeInt
 
 class ShopifyGraphqlTransport {
     static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30000
@@ -13,9 +15,9 @@ class ShopifyGraphqlTransport {
     static final int DEFAULT_MAX_ATTEMPTS = 2
 
     static Map<String, Object> execute(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
-        String normalizedQuery = FacadeSupport.normalize(queryDocument)
+        String normalizedQuery = normalize(queryDocument)
         if (!normalizedQuery) return safeFailure("Shopify GraphQL query document is required.", false)
-        String accessToken = FacadeSupport.normalize(authConfig?.accessToken)
+        String accessToken = normalize(authConfig?.accessToken)
         if (!accessToken) return safeFailure("Shopify access token is not configured.", false)
 
         Map<String, Object> request
@@ -25,8 +27,8 @@ class ShopifyGraphqlTransport {
             return safeFailure(e.message ?: "Shopify GraphQL request could not be built.", false)
         }
         Closure httpExecutor = (Closure) (options.httpExecutor ?: { Map<String, Object> requestMap -> executeHttpRequest(requestMap) })
-        int maxAttempts = Math.max(1, FacadeSupport.normalizeInt(options.maxAttempts, DEFAULT_MAX_ATTEMPTS))
-        long retryDelayMillis = Math.max(0L, (FacadeSupport.normalizeInt(options.retryDelayMillis, 0) ?: 0) as long)
+        int maxAttempts = Math.max(1, normalizeInt(options.maxAttempts, DEFAULT_MAX_ATTEMPTS))
+        long retryDelayMillis = Math.max(0L, (normalizeInt(options.retryDelayMillis, 0) ?: 0) as long)
 
         Map<String, Object> lastResult = null
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -45,14 +47,14 @@ class ShopifyGraphqlTransport {
 
     static Map<String, Object> buildRequest(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
         String endpointUrl = buildAdminGraphqlEndpoint(authConfig?.shopApiUrl, authConfig?.apiVersion)
-        Integer connectTimeoutMillis = FacadeSupport.normalizeInt(options.connectTimeoutMillis, DEFAULT_CONNECT_TIMEOUT_MILLIS)
-        Integer readTimeoutMillis = FacadeSupport.normalizeInt(options.readTimeoutMillis, DEFAULT_READ_TIMEOUT_MILLIS)
+        Integer connectTimeoutMillis = normalizeInt(options.connectTimeoutMillis, DEFAULT_CONNECT_TIMEOUT_MILLIS)
+        Integer readTimeoutMillis = normalizeInt(options.readTimeoutMillis, DEFAULT_READ_TIMEOUT_MILLIS)
         return [
             method              : "POST",
             url                 : endpointUrl,
             headers             : [
                 "Content-Type"          : "application/json",
-                "X-Shopify-Access-Token": FacadeSupport.normalize(authConfig?.accessToken),
+                "X-Shopify-Access-Token": normalize(authConfig?.accessToken),
             ],
             body                : [
                 query    : queryDocument,
@@ -64,8 +66,8 @@ class ShopifyGraphqlTransport {
     }
 
     static String buildAdminGraphqlEndpoint(Object shopApiUrl, Object apiVersion) {
-        String baseUrl = FacadeSupport.normalize(shopApiUrl)
-        String version = FacadeSupport.normalize(apiVersion)
+        String baseUrl = normalize(shopApiUrl)
+        String version = normalize(apiVersion)
         if (!baseUrl) throw new IllegalArgumentException("Shop/API URL is required.")
         if (!version) throw new IllegalArgumentException("Shopify API version is required.")
 
@@ -107,7 +109,7 @@ class ShopifyGraphqlTransport {
         }
 
         List<String> graphqlErrors = ((List) (parsedBody.errors ?: []))
-            .collect { Object error -> FacadeSupport.normalize(error instanceof Map ? error.message : error) }
+            .collect { Object error -> normalize(error instanceof Map ? error.message : error) }
             .findAll { String message -> message }
 
         if (graphqlErrors) {

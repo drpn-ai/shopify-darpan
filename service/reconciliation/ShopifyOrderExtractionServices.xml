@@ -48,6 +48,15 @@
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to shopify-orders-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
+                <description>HTTP connect timeout for Shopify GraphQL and Bulk Operations download requests.</description>
+            </parameter>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
+                <description>HTTP read timeout for Shopify GraphQL and Bulk Operations download requests.</description>
+            </parameter>
+            <parameter name="maxAttempts" type="Integer" default-value="2">
+                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
+            </parameter>
             <parameter name="maxPages" type="Integer" default-value="20">
                 <description>Deprecated cursor-pagination guard retained for existing callers; Bulk Operations extraction uses maxBulkPollAttempts instead.</description>
             </parameter>

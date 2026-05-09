@@ -1,6 +1,6 @@
 package shopify.graphql
 
-import darpan.facade.common.FacadeSupport
+import static darpan.common.ValueSupport.normalize
 
 class ShopifySourceCatalog {
     static final String SHOPIFY_ORDERS = "SHOPIFY_ORDERS"
@@ -106,24 +106,19 @@ class ShopifySourceCatalog {
             .collectEntries { Map<String, Object> field -> [(field.fieldPath.toString()): field] }
     }
 
-    static List<String> validateSelectedFields(Map<String, Object> source, Collection selectedFieldPaths) {
-        Map<String, Map<String, Object>> fieldsByPath = fieldsByPath(source)
-        return normalizeFieldPaths(selectedFieldPaths).findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
-    }
-
     static List<String> normalizeFieldPaths(Collection fieldPaths) {
         return (fieldPaths ?: [])
-            .collect { Object fieldPath -> FacadeSupport.normalize(fieldPath) }
+            .collect { Object fieldPath -> normalize(fieldPath) }
             .findAll { String fieldPath -> fieldPath }
             .unique()
     }
 
     static String normalizeSourceDefinitionId(Object sourceDefinitionId) {
-        return FacadeSupport.normalize(sourceDefinitionId)?.toUpperCase()
+        return normalize(sourceDefinitionId)?.toUpperCase()
     }
 
     static String normalizeApiVersion(Object apiVersion) {
-        return FacadeSupport.normalize(apiVersion)?.toLowerCase()
+        return normalize(apiVersion)?.toLowerCase()
     }
 
     static boolean supportsApiVersion(Map<String, Object> source, String apiVersion) {
