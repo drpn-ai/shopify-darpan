@@ -34,14 +34,21 @@ class ShopifyAuthConfigSupport {
         return ValueSupport.normalizeBool(value, defaultValue) ? "Y" : "N"
     }
 
+    // Allow-list for tenant-supplied shopApiUrl. SHOP_API_URL_HOST_SUFFIXES is checked by
+    // OutboundHttpPolicy.validate, which also forces https and rejects loopback / RFC1918 / link-local
+    // / cloud-metadata. Audit H5.2 / H6.4 (SSRF + access-token exfil to attacker host).
+    private static final List<String> SHOP_API_URL_HOST_SUFFIXES = [".myshopify.com"]
+
     static boolean isValidShopApiUrl(String shopApiUrl) {
         if (!shopApiUrl) return false
-        try {
-            URI uri = new URI(shopApiUrl)
-            return uri.scheme in ["http", "https"] && !!uri.host
-        } catch (Exception ignored) {
-            return false
-        }
+        return darpan.facade.common.OutboundHttpPolicy.validate(shopApiUrl, SHOP_API_URL_HOST_SUFFIXES).ok
+    }
+
+    /** Returns null if the URL is acceptable, else a human-readable error suitable for ec.message.addError. */
+    static String describeShopApiUrlError(String shopApiUrl) {
+        if (!shopApiUrl) return "Shop API URL is required."
+        def result = darpan.facade.common.OutboundHttpPolicy.validate(shopApiUrl, SHOP_API_URL_HOST_SUFFIXES)
+        return result.ok ? null : result.error
     }
 
     static boolean isValidApiVersion(String apiVersion) {
