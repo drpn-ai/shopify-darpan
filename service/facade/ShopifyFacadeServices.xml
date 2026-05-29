@@ -2,7 +2,7 @@
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
-    <service verb="list" noun="ShopifyAuthConfigs" allow-remote="true" authenticate="true">
+    <service verb="list" noun="ShopifyAuthConfigs" authz-action="view" allow-remote="true" authenticate="true">
         <description>List Shopify auth configs for the active tenant with secret redaction indicators.</description>
         <in-parameters>
             <parameter name="query"/>
@@ -38,7 +38,7 @@
         </actions>
     </service>
 
-    <service verb="get" noun="ShopifyAuthConfig" allow-remote="true" authenticate="true">
+    <service verb="get" noun="ShopifyAuthConfig" authz-action="view" allow-remote="true" authenticate="true">
         <description>Get one Shopify auth config for the active tenant with the access token redacted.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true"/>
@@ -118,7 +118,7 @@
         </actions>
     </service>
 
-    <service verb="list" noun="ShopifySourceDefinitions" allow-remote="true" authenticate="true">
+    <service verb="list" noun="ShopifySourceDefinitions" authz-action="view" allow-remote="true" authenticate="true">
         <description>List Shopify source definitions and selectable field catalogs for setup flows.</description>
         <in-parameters>
             <parameter name="apiVersion"/>
@@ -137,7 +137,7 @@
         </actions>
     </service>
 
-    <service verb="get" noun="ShopifySourceDefinition" allow-remote="true" authenticate="true">
+    <service verb="get" noun="ShopifySourceDefinition" authz-action="view" allow-remote="true" authenticate="true">
         <description>Get one Shopify source definition and its selectable fields for an API version.</description>
         <in-parameters>
             <parameter name="sourceDefinitionId" required="true"/>
