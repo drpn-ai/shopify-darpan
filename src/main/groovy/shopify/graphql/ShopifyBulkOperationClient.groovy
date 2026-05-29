@@ -177,10 +177,17 @@ class ShopifyBulkOperationClient {
     }
 
     private static Map<String, Object> startQuery(Map authConfig, String bulkQueryDocument, Map options) {
+        // Audit H6.5 — bulkOperationRunQuery is a NON-idempotent mutation. If the first attempt
+        // reaches Shopify and the response or socket drops, Shopify accepts the start; a retry then
+        // races with the concurrent-bulk-operation check ('another bulk operation is running').
+        // Hard-cap mutation retries to 1 attempt here, then rely on the caller's outer concurrent-
+        // retry loop in runBulkQueryWithConcurrentRetry to back off and re-poll, which IS safe.
+        Map<String, Object> mutationOptions = new LinkedHashMap<String, Object>(options ?: [:])
+        mutationOptions.maxAttempts = 1
         Map<String, Object> graphqlResult = ShopifyGraphqlTransport.execute(authConfig, RUN_QUERY_MUTATION, [
                 query       : bulkQueryDocument,
                 groupObjects: false,
-        ], options ?: [:])
+        ], mutationOptions)
         if (graphqlResult.ok == false) return graphqlResult
 
         Map data = graphqlResult.data instanceof Map ? (Map) graphqlResult.data : [:]

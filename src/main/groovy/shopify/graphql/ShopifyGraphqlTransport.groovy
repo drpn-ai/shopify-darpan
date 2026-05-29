@@ -112,7 +112,16 @@ class ShopifyGraphqlTransport {
             .collect { Object error -> normalize(error instanceof Map ? error.message : error) }
             .findAll { String message -> message }
 
+        // Audit H6.6 — Shopify GraphQL returns HTTP 200 with errors[].extensions.code == 'THROTTLED'
+        // (or 'MAX_COST_EXCEEDED') as a soft rate-limit signal, not a permanent failure. Previously
+        // every GraphQL error was treated as retryable=false, so the caller surfaced 'throttled' as
+        // a user error. Now we detect throttle codes and mark the call retryable until maxAttempts.
         if (graphqlErrors) {
+            List<Map> errorObjs = ((List) parsedBody.errors).findAll { it instanceof Map } as List<Map>
+            boolean throttled = errorObjs.any { Map err ->
+                String code = err?.extensions instanceof Map ? normalize((err.extensions as Map).code) : null
+                return code in ["THROTTLED", "MAX_COST_EXCEEDED"]
+            }
             return [
                 ok            : false,
                 errors        : graphqlErrors.collect { String message -> "Shopify GraphQL error: ${message}" },
@@ -120,7 +129,8 @@ class ShopifyGraphqlTransport {
                 cost          : parsedBody.extensions?.cost,
                 extensions    : parsedBody.extensions,
                 statusCode    : statusCode,
-                retryable     : false,
+                retryable     : throttled && attempt < maxAttempts,
+                throttled     : throttled,
             ]
         }
 
