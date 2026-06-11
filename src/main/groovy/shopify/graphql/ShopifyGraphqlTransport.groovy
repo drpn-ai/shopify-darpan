@@ -144,7 +144,15 @@ class ShopifyGraphqlTransport {
         ]
     }
 
+    // Audit 2026-06-11 #15: re-validate the resolved Shopify endpoint against the outbound policy at
+    // request time (not only at config-save time), so a shopApiUrl mutated out-of-band cannot make the
+    // server fetch loopback / link-local / RFC1918 / cloud-metadata targets (SSRF). Same suffix the
+    // save path enforces. Runs only on the real network path; tests inject their own httpExecutor.
+    private static final List<String> OUTBOUND_HOST_SUFFIXES = [".myshopify.com"]
+
     private static Map<String, Object> executeHttpRequest(Map<String, Object> request) {
+        def __urlCheck = darpan.facade.common.OutboundHttpPolicy.validate(request.url?.toString(), OUTBOUND_HOST_SUFFIXES)
+        if (!__urlCheck.ok) throw new IllegalStateException("Shopify endpoint URL blocked by outbound policy: ${__urlCheck.error}")
         HttpURLConnection connection = (HttpURLConnection) new URL(request.url.toString()).openConnection()
         connection.requestMethod = "POST"
         connection.doOutput = true
