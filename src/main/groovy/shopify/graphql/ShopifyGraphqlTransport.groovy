@@ -2,6 +2,8 @@ package shopify.graphql
 
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 import java.net.HttpURLConnection
 import java.nio.charset.StandardCharsets
@@ -10,9 +12,18 @@ import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeInt
 
 class ShopifyGraphqlTransport {
+    private static final Logger logger = LoggerFactory.getLogger(ShopifyGraphqlTransport)
+
     static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 30000
     static final int DEFAULT_READ_TIMEOUT_MILLIS = 60000
     static final int DEFAULT_MAX_ATTEMPTS = 2
+    static final long DEFAULT_THROTTLE_DELAY_MILLIS = 1000L
+    static final long MAX_THROTTLE_DELAY_MILLIS = 10000L
+
+    /** Marker for requests rejected by the outbound URL policy — never retryable. */
+    static class OutboundPolicyBlockedException extends IllegalStateException {
+        OutboundPolicyBlockedException(String message) { super(message) }
+    }
 
     static Map<String, Object> execute(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
         String normalizedQuery = normalize(queryDocument)
@@ -27,7 +38,9 @@ class ShopifyGraphqlTransport {
             return safeFailure(e.message ?: "Shopify GraphQL request could not be built.", false)
         }
         Closure httpExecutor = (Closure) (options.httpExecutor ?: { Map<String, Object> requestMap -> executeHttpRequest(requestMap) })
-        int maxAttempts = Math.max(1, normalizeInt(options.maxAttempts, DEFAULT_MAX_ATTEMPTS))
+        // Audit H6.5 parity: GraphQL mutations are non-idempotent and per the spec must begin with the
+        // 'mutation' keyword (shorthand documents are always queries), so never re-send them.
+        int maxAttempts = isMutationDocument(normalizedQuery) ? 1 : Math.max(1, normalizeInt(options.maxAttempts, DEFAULT_MAX_ATTEMPTS))
         long retryDelayMillis = Math.max(0L, (normalizeInt(options.retryDelayMillis, 0) ?: 0) as long)
 
         Map<String, Object> lastResult = null
@@ -35,14 +48,46 @@ class ShopifyGraphqlTransport {
             try {
                 Map<String, Object> response = (Map<String, Object>) httpExecutor.call(request)
                 lastResult = parseResponse(response, attempt, maxAttempts)
-            } catch (Exception ignored) {
+            } catch (OutboundPolicyBlockedException policyBlocked) {
+                logger.warn("Shopify GraphQL request blocked by outbound policy (attempt ${attempt}/${maxAttempts}): ${policyBlocked.message}")
+                lastResult = safeFailure(policyBlocked.message, false)
+            } catch (Exception e) {
+                logger.warn("Shopify GraphQL request attempt ${attempt}/${maxAttempts} failed: ${e.class.simpleName}: ${e.message}")
                 lastResult = safeFailure("Shopify GraphQL request failed before a valid response was received.", attempt < maxAttempts)
             }
 
             if (lastResult.ok || !lastResult.retryable || attempt >= maxAttempts) return lastResult
-            if (retryDelayMillis > 0L) Thread.sleep(retryDelayMillis)
+            long delayMillis = retryDelayMillis
+            // Audit H6.6 follow-up: a THROTTLED/429 retry with no pause just re-spends the same cost
+            // budget. Derive the wait from extensions.cost.throttleStatus when present, else 1s.
+            if (delayMillis <= 0L && (lastResult.throttled || (lastResult.statusCode as Integer) == 429)) {
+                delayMillis = throttleDelayMillis(lastResult)
+            }
+            if (delayMillis > 0L) Thread.sleep(delayMillis)
         }
         return lastResult ?: safeFailure("Shopify GraphQL request did not return a response.", false)
+    }
+
+    static boolean isMutationDocument(String queryDocument) {
+        String stripped = (queryDocument ?: "").replaceAll(/(?m)^\s*#[^\n]*$/, "").trim()
+        return stripped.toLowerCase(Locale.ROOT) ==~ /(?s)mutation\b.*/
+    }
+
+    static long throttleDelayMillis(Map<String, Object> result) {
+        try {
+            Map cost = result?.cost instanceof Map ? (Map) result.cost : null
+            Map throttleStatus = cost?.get('throttleStatus') instanceof Map ? (Map) cost.get('throttleStatus') : null
+            BigDecimal requested = cost?.get('requestedQueryCost') != null ? new BigDecimal(cost.get('requestedQueryCost').toString()) : null
+            BigDecimal available = throttleStatus?.get('currentlyAvailable') != null ? new BigDecimal(throttleStatus.get('currentlyAvailable').toString()) : null
+            BigDecimal restoreRate = throttleStatus?.get('restoreRate') != null ? new BigDecimal(throttleStatus.get('restoreRate').toString()) : null
+            if (requested == null || available == null || restoreRate == null || restoreRate <= 0G) return DEFAULT_THROTTLE_DELAY_MILLIS
+            BigDecimal missing = requested.subtract(available)
+            if (missing <= 0G) return DEFAULT_THROTTLE_DELAY_MILLIS
+            long millis = missing.divide(restoreRate, 3, java.math.RoundingMode.CEILING).multiply(1000G).longValue()
+            return Math.min(MAX_THROTTLE_DELAY_MILLIS, Math.max(DEFAULT_THROTTLE_DELAY_MILLIS, millis))
+        } catch (Exception ignored) {
+            return DEFAULT_THROTTLE_DELAY_MILLIS
+        }
     }
 
     static Map<String, Object> buildRequest(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
@@ -152,7 +197,7 @@ class ShopifyGraphqlTransport {
 
     private static Map<String, Object> executeHttpRequest(Map<String, Object> request) {
         def __urlCheck = darpan.facade.common.OutboundHttpPolicy.validate(request.url?.toString(), OUTBOUND_HOST_SUFFIXES)
-        if (!__urlCheck.ok) throw new IllegalStateException("Shopify endpoint URL blocked by outbound policy: ${__urlCheck.error}")
+        if (!__urlCheck.ok) throw new OutboundPolicyBlockedException("Shopify endpoint URL blocked by outbound policy: ${__urlCheck.error}")
         HttpURLConnection connection = (HttpURLConnection) new URL(request.url.toString()).openConnection()
         connection.requestMethod = "POST"
         connection.doOutput = true

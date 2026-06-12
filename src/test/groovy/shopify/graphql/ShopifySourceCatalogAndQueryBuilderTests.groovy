@@ -110,6 +110,59 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
+    void bulkQueryBuilderReproducesLegacyExtractionDocument() {
+        Map<String, Object> result = ShopifyGraphqlQueryBuilder.buildBulkQuery([
+            sourceDefinitionId: "SHOPIFY_ORDERS",
+            operationName     : "DarpanShopifyOrdersByDateWindow",
+            filters           : [
+                createdAtFrom: "2026-04-01T00:00:00Z",
+                createdAtTo  : "2026-04-02T00:00:00Z",
+            ],
+        ])
+
+        assertEquals("created_at:>='2026-04-01T00:00:00Z' created_at:<'2026-04-02T00:00:00Z'", result.searchQuery)
+        assertEquals("CREATED_AT", result.sortKey)
+
+        // The exact field set the pre-unification extraction selected; the JSONL record shape is a
+        // downstream contract for reconciliation schemas and $.records[*] rules.
+        Set<String> legacyBulkSelection = [
+            "id", "legacyResourceId", "name", "createdAt", "updatedAt", "processedAt", "email",
+            "cancelledAt", "totalPrice", "displayFinancialStatus", "displayFulfillmentStatus", "currencyCode",
+            "currentTotalPriceSet.shopMoney.amount", "currentTotalPriceSet.shopMoney.currencyCode",
+            "currentTotalTaxSet.shopMoney.amount", "currentTotalTaxSet.shopMoney.currencyCode",
+            "totalPriceSet.shopMoney.amount", "totalPriceSet.shopMoney.currencyCode",
+            "subtotalPriceSet.shopMoney.amount", "subtotalPriceSet.shopMoney.currencyCode",
+        ] as Set
+        assertEquals(legacyBulkSelection, ((List<String>) result.selectedFieldPaths) as Set)
+
+        String queryDocument = result.queryDocument as String
+        assertTrue(queryDocument.contains("query DarpanShopifyOrdersByDateWindow {"))
+        assertTrue(queryDocument.contains("orders(query: \"created_at:>='2026-04-01T00:00:00Z' created_at:<'2026-04-02T00:00:00Z'\", sortKey: CREATED_AT)"))
+        assertTrue(queryDocument.contains("legacyResourceId"))
+        assertTrue(queryDocument.contains("cancelledAt"))
+        assertTrue(queryDocument.contains("currentTotalTaxSet {"))
+        assertTrue(queryDocument.contains("subtotalPriceSet {"))
+        assertTrue(queryDocument.contains("shopMoney {"))
+        // bulkOperationRunQuery rejects variables; bulk documents carry no pagination artifacts
+        assertFalse(queryDocument.contains('$'))
+        assertFalse(queryDocument.contains("pageInfo"))
+        assertFalse(queryDocument.contains("cursor"))
+    }
+
+    @Test
+    void bulkQueryBuilderRejectsConnectionFields() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException) {
+            ShopifyGraphqlQueryBuilder.buildBulkQuery([
+                sourceDefinitionId: "SHOPIFY_ORDERS",
+                selectedFieldPaths: ["id", "lineItems.sku"],
+            ])
+        }
+
+        assertTrue(error.message.contains("does not support connection field"))
+        assertTrue(error.message.contains("lineItems.sku"))
+    }
+
+    @Test
     void queryBuilderRejectsUnsupportedFilters() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException) {
             ShopifyGraphqlQueryBuilder.buildQuery([

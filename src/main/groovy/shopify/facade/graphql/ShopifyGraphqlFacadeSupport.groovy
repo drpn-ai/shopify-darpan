@@ -1,5 +1,7 @@
 package shopify.facade.graphql
 
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyGraphqlQueryBuilder
 import shopify.graphql.ShopifyGraphqlTransport
@@ -7,6 +9,8 @@ import shopify.graphql.ShopifyGraphqlTransport
 import static darpan.common.ValueSupport.normalize
 
 class ShopifyGraphqlFacadeSupport {
+    private static final Logger logger = LoggerFactory.getLogger(ShopifyGraphqlFacadeSupport)
+
     static Map<String, Object> buildGraphqlQuery(def ec, Object serviceContext) {
         try {
             return ShopifyGraphqlQueryBuilder.buildQuery([
@@ -20,7 +24,8 @@ class ShopifyGraphqlFacadeSupport {
                     connectionPageSizes: serviceContext?.connectionPageSizes,
             ])
         } catch (Exception e) {
-            ec.message.addError(e.message)
+            logger.warn("Shopify GraphQL query build failed", e)
+            ec.message.addError(e.message ?: "Shopify GraphQL query could not be built.")
         }
         return null
     }
@@ -35,11 +40,9 @@ class ShopifyGraphqlFacadeSupport {
 
         def authConfig = null
         if (!ec.message.hasError()) {
-            authConfig = ShopifyAuthConfigSupport.findAuthConfig(ec, configId)
-            ShopifyAuthConfigSupport.requireTenantAuthConfigAccess(ec, authConfig, configId)
-            if (authConfig && (authConfig.isActive ?: "Y").toString().equalsIgnoreCase("N")) {
-                ec.message.addError("Shopify auth config ${configId} is inactive.")
-            }
+            // canReadOrders is enforced here too: this service is the registered orders endpoint
+            // (SHOPIFY_REMOTE sendServiceName) and must match the bulk extraction path's contract.
+            authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
         }
 
         if (!ec.message.hasError()) {
@@ -52,6 +55,7 @@ class ShopifyGraphqlFacadeSupport {
                     connectTimeoutMillis: serviceContext?.connectTimeoutMillis,
                     readTimeoutMillis   : serviceContext?.readTimeoutMillis,
                     maxAttempts         : serviceContext?.maxAttempts,
+                    retryDelayMillis    : serviceContext?.retryDelayMillis,
             ])
             if (graphqlResult.ok == false) {
                 (graphqlResult.errors ?: []).each { String error -> ec.message.addError(error) }

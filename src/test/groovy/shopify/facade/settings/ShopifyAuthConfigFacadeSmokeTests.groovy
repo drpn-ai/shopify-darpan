@@ -127,6 +127,34 @@ class ShopifyAuthConfigFacadeSmokeTests {
     }
 
     @Test
+    void saveRejectsShopApiUrlsOutsideTheOutboundPolicy() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+
+        Map<String, Object> nonPartnerResult = saveFacade([
+            shopifyAuthConfigId: "GORJANA_BAD_HOST",
+            description        : "Non-partner host",
+            shopApiUrl         : "https://example.com/admin/api",
+            apiVersion         : "2025-10",
+            accessToken        : "blocked-token",
+        ])
+        assertFalse((Boolean) nonPartnerResult.ok)
+        assertTrue((nonPartnerResult.errors ?: []).join(" ").contains("allow-list"))
+        assertNull(findOne([shopifyAuthConfigId: "GORJANA_BAD_HOST"]))
+
+        ec.message.clearErrors()
+        Map<String, Object> httpResult = saveFacade([
+            shopifyAuthConfigId: "GORJANA_HTTP",
+            description        : "Plain http",
+            shopApiUrl         : "http://gorjana.myshopify.com/admin/api",
+            apiVersion         : "2025-10",
+            accessToken        : "blocked-token",
+        ])
+        assertFalse((Boolean) httpResult.ok)
+        assertTrue((httpResult.errors ?: []).join(" ").contains("https"))
+        assertNull(findOne([shopifyAuthConfigId: "GORJANA_HTTP"]))
+    }
+
+    @Test
     void savingWithoutReplacementTokenPreservesStoredToken() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
 

@@ -10,6 +10,8 @@ class ShopifyBulkOperationClient {
     static final int DEFAULT_POLL_INTERVAL_MILLIS = 5000
     static final int DEFAULT_START_RETRY_ATTEMPTS = 10
     static final int DEFAULT_START_RETRY_DELAY_MILLIS = 120000
+    static final int DEFAULT_DOWNLOAD_MAX_ATTEMPTS = 3
+    static final int DEFAULT_DOWNLOAD_RETRY_DELAY_MILLIS = 1000
 
     private static final Set<String> FAILED_STATUSES = ["FAILED", "CANCELED", "CANCELLED", "EXPIRED"] as Set
 
@@ -180,8 +182,8 @@ class ShopifyBulkOperationClient {
         // Audit H6.5 — bulkOperationRunQuery is a NON-idempotent mutation. If the first attempt
         // reaches Shopify and the response or socket drops, Shopify accepts the start; a retry then
         // races with the concurrent-bulk-operation check ('another bulk operation is running').
-        // Hard-cap mutation retries to 1 attempt here, then rely on the caller's outer concurrent-
-        // retry loop in runBulkQueryWithConcurrentRetry to back off and re-poll, which IS safe.
+        // Hard-cap mutation retries to 1 attempt here, then rely on the outer concurrent-start retry
+        // loop in runQuery to back off and re-issue the start, which IS safe.
         Map<String, Object> mutationOptions = new LinkedHashMap<String, Object>(options ?: [:])
         mutationOptions.maxAttempts = 1
         Map<String, Object> graphqlResult = ShopifyGraphqlTransport.execute(authConfig, RUN_QUERY_MUTATION, [
@@ -235,6 +237,12 @@ class ShopifyBulkOperationClient {
     private static Map<String, Object> completeOperation(Map<String, Object> operation, List<Map<String, Object>> statusHistory, Map options) {
         String downloadUrl = ValueSupport.normalize(operation.url)
         Map<String, Object> operationMetadata = safeOperationMetadata(operation)
+        Map<String, Object> failureContext = [
+                bulkOperation: operationMetadata,
+                pollCount    : Math.max(0, statusHistory.size() - 1),
+                statusHistory: statusHistory,
+        ] as Map<String, Object>
+        Long expectedCount = parseObjectCount(operation.objectCount)
         Map<String, Object> baseResult = [
                 ok           : true,
                 bulkOperation: operationMetadata,
@@ -244,20 +252,38 @@ class ShopifyBulkOperationClient {
                 jsonlText    : "",
                 jsonlLineCount: 0,
         ] as Map<String, Object>
-        if (!downloadUrl) return baseResult
+        if (!downloadUrl) {
+            // A COMPLETED operation that reports objects but no result URL would otherwise look like
+            // a legitimately empty extraction and silently drop every record.
+            if (expectedCount != null && expectedCount > 0L) {
+                return safeFailure("Shopify bulk operation completed with ${expectedCount} object(s) but returned no result download URL.", failureContext)
+            }
+            return baseResult
+        }
 
-        Map<String, Object> downloadResult = downloadText(downloadUrl, options ?: [:])
+        Map<String, Object> downloadResult = downloadTextWithRetry(downloadUrl, options ?: [:])
         if (downloadResult.ok == false) {
-            return safeFailure(((List) downloadResult.errors)?.join("; ") ?: "Shopify bulk operation result could not be downloaded.",
-                    [bulkOperation: operationMetadata, pollCount: Math.max(0, statusHistory.size() - 1), statusHistory: statusHistory])
+            Map<String, Object> downloadFailureContext = new LinkedHashMap<String, Object>(failureContext)
+            if (downloadResult.statusCode != null) downloadFailureContext.statusCode = downloadResult.statusCode
+            if (downloadResult.retryable != null) downloadFailureContext.retryable = downloadResult.retryable
+            if (downloadResult.downloadAttemptCount != null) downloadFailureContext.downloadAttemptCount = downloadResult.downloadAttemptCount
+            return safeFailure(((List) downloadResult.errors)?.join("; ") ?: "Shopify bulk operation result could not be downloaded.", downloadFailureContext)
         }
 
         String jsonlText = downloadResult.body?.toString() ?: ""
         Map<String, Object> parsed = parseJsonlRecords(jsonlText)
         List<String> parseErrors = (List<String>) (parsed.errors ?: [])
         if (parseErrors) {
-            return safeFailure("Shopify bulk operation result could not be parsed: ${parseErrors.join('; ')}.",
-                    [bulkOperation: operationMetadata, pollCount: Math.max(0, statusHistory.size() - 1), statusHistory: statusHistory])
+            return safeFailure("Shopify bulk operation result could not be parsed: ${parseErrors.join('; ')}.", failureContext)
+        }
+
+        int parsedCount = ((List) (parsed.records ?: [])).size()
+        // The client always starts the bulk query with groupObjects: false, so objectCount is exactly
+        // one JSONL object per line; a download truncated at a newline boundary parses cleanly and
+        // would otherwise feed reconciliation a silently incomplete record set.
+        if (expectedCount != null && expectedCount != (parsedCount as long)) {
+            return safeFailure("Shopify bulk operation result was incomplete: expected ${expectedCount} record(s) but parsed ${parsedCount}.",
+                    (failureContext + [retryable: true]) as Map<String, Object>)
         }
 
         return baseResult + [
@@ -265,6 +291,36 @@ class ShopifyBulkOperationClient {
                 jsonlText     : jsonlText,
                 jsonlLineCount: parsed.lineCount ?: 0,
         ]
+    }
+
+    private static Long parseObjectCount(Object rawValue) {
+        String text = ValueSupport.normalize(rawValue)
+        if (!text?.isLong()) return null
+        return text.toLong()
+    }
+
+    private static Map<String, Object> downloadTextWithRetry(String url, Map options) {
+        int maxAttempts = Math.max(1, normalizeInt(options.downloadMaxAttempts, DEFAULT_DOWNLOAD_MAX_ATTEMPTS))
+        long retryDelayMillis = Math.max(0L, normalizeInt(options.downloadRetryDelayMillis, DEFAULT_DOWNLOAD_RETRY_DELAY_MILLIS) as long)
+        Map<String, Object> result = null
+        // The result download is an idempotent GET (unlike the H6.5-capped start mutation), so
+        // transient 429/5xx failures retry instead of hard-failing a completed long-running operation.
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            result = downloadText(url, options)
+            if (result.ok != false || result.retryable != true || attempt >= maxAttempts) {
+                if (result.ok == false) result.downloadAttemptCount = attempt
+                return result
+            }
+            if (retryDelayMillis > 0L) {
+                try {
+                    Thread.sleep(retryDelayMillis)
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt()
+                    return safeFailure("Shopify bulk operation result download retry was interrupted.", [downloadAttemptCount: attempt] as Map<String, Object>)
+                }
+            }
+        }
+        return result ?: safeFailure("Shopify bulk operation result download did not return a response.")
     }
 
     private static Map<String, Object> downloadText(String url, Map options) {
@@ -279,6 +335,8 @@ class ShopifyBulkOperationClient {
         Map<String, Object> response
         try {
             response = (Map<String, Object>) downloadExecutor.call(request)
+        } catch (ShopifyGraphqlTransport.OutboundPolicyBlockedException policyBlocked) {
+            return safeFailure(policyBlocked.message)
         } catch (Exception ignored) {
             return safeFailure("Shopify bulk operation result download failed before a valid response was received.")
         }
@@ -302,8 +360,15 @@ class ShopifyBulkOperationClient {
     }
 
     private static Map<String, Object> executeDownloadRequest(Map<String, Object> request) {
+        // Audit #15 parity: the bulk-result URL comes from the GraphQL response body and is served
+        // off-domain (a signed storage URL), so re-validate it with no host allow-list — https is
+        // still forced and loopback/link-local/RFC1918/cloud-metadata targets are blocked.
+        def __urlCheck = darpan.facade.common.OutboundHttpPolicy.validate(request.url?.toString(), null)
+        if (!__urlCheck.ok) throw new ShopifyGraphqlTransport.OutboundPolicyBlockedException("Shopify bulk result URL blocked by outbound policy: ${__urlCheck.error}")
         HttpURLConnection connection = (HttpURLConnection) new URL(request.url.toString()).openConnection()
         connection.requestMethod = "GET"
+        // The signed result URL is a direct download; never auto-follow a redirect past the policy check.
+        connection.instanceFollowRedirects = false
         connection.connectTimeout = (request.connectTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_CONNECT_TIMEOUT_MILLIS) as int
         connection.readTimeout = (request.readTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_READ_TIMEOUT_MILLIS) as int
 

@@ -57,9 +57,6 @@
             <parameter name="maxAttempts" type="Integer" default-value="2">
                 <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
             </parameter>
-            <parameter name="maxPages" type="Integer" default-value="20">
-                <description>Deprecated cursor-pagination guard retained for existing callers; Bulk Operations extraction uses maxBulkPollAttempts instead.</description>
-            </parameter>
             <parameter name="maxBulkPollAttempts" type="Integer" default-value="60">
                 <description>Maximum Shopify Bulk Operations status polls before the extraction fails.</description>
             </parameter>

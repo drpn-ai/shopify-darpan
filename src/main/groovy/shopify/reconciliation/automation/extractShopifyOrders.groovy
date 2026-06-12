@@ -5,6 +5,8 @@ import darpan.facade.reconciliation.ReconciliationApiWindowSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
+import shopify.graphql.ShopifyGraphqlQueryBuilder
+import shopify.graphql.ShopifySourceCatalog
 
 import java.sql.Timestamp
 import java.time.Instant
@@ -81,53 +83,6 @@ Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object>
     }
     return normalizedRecord
 }
-String shopifyOrderSelection = """id
-      legacyResourceId
-      name
-      createdAt
-      updatedAt
-      processedAt
-      email
-      cancelledAt
-      totalPrice
-      displayFinancialStatus
-      displayFulfillmentStatus
-      currencyCode
-      currentTotalPriceSet {
-        shopMoney {
-          amount
-          currencyCode
-        }
-      }
-      currentTotalTaxSet {
-        shopMoney {
-          amount
-          currencyCode
-        }
-      }
-      totalPriceSet {
-        shopMoney {
-          amount
-          currencyCode
-        }
-      }
-      subtotalPriceSet {
-        shopMoney {
-          amount
-          currencyCode
-        }
-      }"""
-Closure<String> buildBulkQueryDocument = { String searchQuery ->
-    return """query DarpanShopifyOrdersByDateWindow {
-  orders(query: "${ShopifyBulkOperationClient.escapeGraphqlString(searchQuery)}", sortKey: CREATED_AT) {
-    edges {
-      node {
-        ${shopifyOrderSelection}
-      }
-    }
-  }
-}"""
-}
 String configIdValue = normalize(shopifyAuthConfigId)
 String companyUserGroupIdValue = normalize(companyUserGroupId)
 Timestamp windowStartValue = toTimestamp(windowStart, "windowStart")
@@ -136,31 +91,10 @@ if (!configIdValue) outputErrors.add("Shopify auth config ID is required.")
 
 def authConfig = null
 if (!outputErrors) {
-    authConfig = ec.entity.find(ShopifyAuthConfigSupport.ENTITY_NAME)
-            .condition("shopifyAuthConfigId", configIdValue)
-            .disableAuthz()
-            .useCache(false)
-            .one()
-    if (companyUserGroupIdValue) {
-        if (!authConfig) {
-            ec.message.addError("Shopify auth config '${configIdValue}' was not found.")
-        } else if (normalize(authConfig.companyUserGroupId) != companyUserGroupIdValue) {
-            ec.message.addError("Shopify auth config '${configIdValue}' is not available in this automation tenant.")
-        }
-    } else {
-        TenantAccessSupport.requireTenantRecordAccess(
-                ec,
-                authConfig,
-                "Shopify auth config '${configIdValue}' was not found.",
-                "Shopify auth config '${configIdValue}' is not available in your active tenant."
-        )
-    }
-    if (authConfig && (authConfig.isActive ?: "Y").toString().equalsIgnoreCase("N")) {
-        ec.message.addError("Shopify auth config ${configIdValue} is inactive.")
-    }
-    if (authConfig && (authConfig.canReadOrders ?: "N").toString().equalsIgnoreCase("N")) {
-        ec.message.addError("Shopify auth config ${configIdValue} is not enabled for order reads.")
-    }
+    authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configIdValue, [
+            disableAuthz      : true,
+            companyUserGroupId: companyUserGroupIdValue,
+    ])
     if (ec.message.hasError()) outputErrors.addAll((ec.message.getErrors() ?: []) as List<String>)
 }
 
@@ -181,8 +115,25 @@ Timestamp sourceWindowStart = (Timestamp) sourceWindow.windowStartDate
 Timestamp sourceWindowEnd = (Timestamp) sourceWindow.windowEndDate
 String windowStartText = formatWindow(sourceWindowStart)
 String windowEndText = formatWindow(sourceWindowEnd)
-String searchQuery = "created_at:>='${windowStartText}' created_at:<'${windowEndText}'"
-String bulkQueryDocument = buildBulkQueryDocument.call(searchQuery)
+// The field selection and search syntax come from the shared source catalog / query builder so the
+// bulk extraction cannot drift from the catalog contract. apiVersion is intentionally not passed:
+// extraction must keep working for configs saved with versions outside the catalog's setup list.
+Map<String, Object> builtBulkQuery
+try {
+    builtBulkQuery = ShopifyGraphqlQueryBuilder.buildBulkQuery([
+            sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDERS,
+            operationName     : "DarpanShopifyOrdersByDateWindow",
+            filters           : [createdAtFrom: windowStartText, createdAtTo: windowEndText],
+    ])
+} catch (Exception e) {
+    errors = [normalize(e.message) ?: "Shopify bulk query could not be built."]
+    warnings = outputWarnings
+    dataAvailable = false
+    recordCount = 0
+    return
+}
+String searchQuery = (String) builtBulkQuery.searchQuery
+String bulkQueryDocument = (String) builtBulkQuery.queryDocument
 Integer bulkMaxPollAttempts = Math.max(1, ValueSupport.normalizeInt(maxBulkPollAttempts, ShopifyBulkOperationClient.DEFAULT_MAX_POLL_ATTEMPTS))
 Integer bulkPollDelayMillis = Math.max(0, ValueSupport.normalizeInt(bulkPollIntervalMillis, ShopifyBulkOperationClient.DEFAULT_POLL_INTERVAL_MILLIS))
 Integer bulkStartRetryAttemptCount = Math.max(0, ValueSupport.normalizeInt(bulkStartRetryAttempts, ShopifyBulkOperationClient.DEFAULT_START_RETRY_ATTEMPTS))

@@ -30,7 +30,7 @@ class ShopifyGraphqlQueryBuilder {
         String afterCursor = normalize(requirements?.afterCursor)
         Boolean reverse = normalizeBool(requirements?.reverse, false)
         Map<String, Object> connectionPageSizes = resolveConnectionPageSizes(fieldsByPath, selectedFieldPaths, requirements?.connectionPageSizes as Map)
-        String sortKey = resolveSortKey(source, filters, requirements?.sortKey)
+        String sortKey = resolveSortKey(source, filters)
 
         Map<String, Map> selectionTree = buildSelectionTree(fieldsByPath, selectedFieldPaths)
         Map<String, Object> variables = [
@@ -64,14 +64,61 @@ class ShopifyGraphqlQueryBuilder {
     }
 
     static List<String> resolveSelectedFieldPaths(Map<String, Object> source, Collection requestedFieldPaths) {
+        return resolveFieldPaths(source, requestedFieldPaths, source.defaultSelectedFieldPaths as List)
+    }
+
+    private static List<String> resolveFieldPaths(Map<String, Object> source, Collection requestedFieldPaths, List defaultFieldPaths) {
         List<String> requested = ShopifySourceCatalog.normalizeFieldPaths(requestedFieldPaths)
-        if (!requested) requested = new ArrayList(source.defaultSelectedFieldPaths as List)
+        if (!requested) requested = new ArrayList(defaultFieldPaths ?: [])
 
         List<String> required = ((List<Map<String, Object>>) (source.fields ?: []))
             .findAll { Map<String, Object> field -> field.required == true }
             .collect { Map<String, Object> field -> field.fieldPath.toString() }
 
         return (required + requested).findAll { it }.unique()
+    }
+
+    /**
+     * Build a Shopify Bulk Operations query document from the same source catalog the cursor
+     * builder uses. bulkOperationRunQuery rejects variable definitions, so the search query is
+     * embedded literally (escaped) and no pagination, cursor, or pageInfo artifacts are emitted —
+     * Shopify streams the complete result set to JSONL.
+     */
+    static Map<String, Object> buildBulkQuery(Map<String, Object> requirements) {
+        String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
+        String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
+        Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
+        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
+
+        List<String> selectedFieldPaths = resolveFieldPaths(source, requirements?.selectedFieldPaths as Collection,
+                (source.defaultBulkSelectedFieldPaths ?: source.defaultSelectedFieldPaths) as List)
+        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
+        if (invalidFields) {
+            throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
+        }
+        // Bulk JSONL returns nested-connection children as separate __parentId lines that the order
+        // record parser would misread as orders, so connection-bearing fields are rejected here.
+        List<String> connectionFields = selectedFieldPaths.findAll { String fieldPath -> normalize(fieldsByPath[fieldPath]?.connectionRoot) }
+        if (connectionFields) {
+            throw new IllegalArgumentException("Shopify bulk extraction does not support connection field(s): ${connectionFields.join(', ')}.")
+        }
+
+        Map<String, Object> filters = normalizeFilters(source, requirements?.filters as Map)
+        String searchQuery = buildSearchQuery(source, filters)
+        String sortKey = resolveSortKey(source, filters)
+        Map<String, Map> selectionTree = buildSelectionTree(fieldsByPath, selectedFieldPaths)
+        String operationName = normalize(requirements?.operationName) ?: "${operationNameFor(source.sourceDefinitionId as String)}BulkExtract"
+        String queryDocument = renderBulkQueryDocument(source, selectionTree, operationName, searchQuery, sortKey)
+
+        return [
+            sourceDefinitionId: source.sourceDefinitionId,
+            operationName     : operationName,
+            queryDocument     : queryDocument,
+            searchQuery       : searchQuery,
+            sortKey           : sortKey,
+            selectedFieldPaths: selectedFieldPaths,
+            filters           : filters,
+        ]
     }
 
     static Map<String, Object> normalizeFilters(Map<String, Object> source, Map rawFilters) {
@@ -135,10 +182,7 @@ class ShopifyGraphqlQueryBuilder {
         return value
     }
 
-    private static String resolveSortKey(Map<String, Object> source, Map<String, Object> filters, Object rawSortKey) {
-        String requestedSortKey = normalize(rawSortKey)?.toUpperCase()
-        if (requestedSortKey) return requestedSortKey
-
+    private static String resolveSortKey(Map<String, Object> source, Map<String, Object> filters) {
         Map<String, Map<String, Object>> supportedFilters = (Map<String, Map<String, Object>>) (source.supportedFilters ?: [:])
         for (String filterKey : filters.keySet()) {
             String filterSortKey = normalize(supportedFilters[filterKey]?.sortKey)?.toUpperCase()
@@ -210,6 +254,21 @@ ${nodeSelections}
     pageInfo {
       hasNextPage
       endCursor
+    }
+  }
+}"""
+    }
+
+    private static String renderBulkQueryDocument(Map<String, Object> source, Map<String, Map> selectionTree, String operationName,
+            String searchQuery, String sortKey) {
+        String nodeSelections = renderSelectionTree(selectionTree, 4, Collections.<String>emptySet())
+        String escapedSearchQuery = ShopifyBulkOperationClient.escapeGraphqlString(searchQuery ?: "")
+        return """query ${operationName} {
+  ${source.queryRoot}(query: "${escapedSearchQuery}", sortKey: ${sortKey}) {
+    edges {
+      node {
+${nodeSelections}
+      }
     }
   }
 }"""

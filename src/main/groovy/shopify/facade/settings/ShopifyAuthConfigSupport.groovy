@@ -2,10 +2,9 @@ package shopify.facade.settings
 
 import darpan.common.ValueSupport
 import darpan.facade.common.FacadeSupport
+import darpan.facade.common.PaginationSupport
 import darpan.facade.common.TenantAccessSupport
 import org.moqui.entity.EntityCondition
-
-import java.net.URI
 
 class ShopifyAuthConfigSupport {
     static final String ENTITY_NAME = "darpan.shopify.ShopifyAuthConfig"
@@ -38,11 +37,6 @@ class ShopifyAuthConfigSupport {
     // OutboundHttpPolicy.validate, which also forces https and rejects loopback / RFC1918 / link-local
     // / cloud-metadata. Audit H5.2 / H6.4 (SSRF + access-token exfil to attacker host).
     private static final List<String> SHOP_API_URL_HOST_SUFFIXES = [".myshopify.com"]
-
-    static boolean isValidShopApiUrl(String shopApiUrl) {
-        if (!shopApiUrl) return false
-        return darpan.facade.common.OutboundHttpPolicy.validate(shopApiUrl, SHOP_API_URL_HOST_SUFFIXES).ok
-    }
 
     /** Returns null if the URL is acceptable, else a human-readable error suitable for ec.message.addError. */
     static String describeShopApiUrlError(String shopApiUrl) {
@@ -91,6 +85,55 @@ class ShopifyAuthConfigSupport {
         )
     }
 
+    /**
+     * Resolve a Shopify auth config and enforce the shared usability contract in one place:
+     * record exists, the caller's tenant may use it, isActive=Y, and the source permission flag
+     * is enabled. Errors go to ec.message; the found record (or null) is returned either way.
+     *
+     * opts.companyUserGroupId — trusted automation owner tenant; checked instead of the user's
+     *     active tenant (automation executions run without a user session tenant).
+     * opts.requiredPermissionFlag — indicator field that must not be 'N' (default canReadOrders,
+     *     matching ShopifySourceCatalog's requiredPermissionFlag for SHOPIFY_ORDERS).
+     * opts.disableAuthz — resolve the record with entity authz disabled (default false).
+     */
+    static def requireUsableAuthConfig(def ec, Object shopifyAuthConfigId, Map opts = [:]) {
+        String configId = normalize(shopifyAuthConfigId)
+        if (!configId) {
+            ec.message.addError("Shopify auth config ID is required.")
+            return null
+        }
+
+        def finder = ec.entity.find(ENTITY_NAME)
+                .condition("shopifyAuthConfigId", configId)
+                .useCache(false)
+        if (ValueSupport.normalizeBool(opts?.disableAuthz, false)) finder.disableAuthz()
+        def config = finder.one()
+
+        String trustedCompanyUserGroupId = normalize(opts?.companyUserGroupId)
+        if (trustedCompanyUserGroupId) {
+            if (config == null) {
+                ec.message.addError("Shopify auth config '${configId}' was not found.")
+            } else if (normalize(readValue(config, "companyUserGroupId")) != trustedCompanyUserGroupId) {
+                ec.message.addError("Shopify auth config '${configId}' is not available in this automation tenant.")
+            }
+        } else {
+            requireTenantAuthConfigAccess(ec, config, configId)
+        }
+
+        if (config != null && !ec.message.hasError()) {
+            if ((readValue(config, "isActive") ?: "Y").toString().equalsIgnoreCase("N")) {
+                ec.message.addError("Shopify auth config ${configId} is inactive.")
+            }
+            String permissionFlag = opts?.containsKey("requiredPermissionFlag") ?
+                    normalize(opts.requiredPermissionFlag) : "canReadOrders"
+            if (permissionFlag && (readValue(config, permissionFlag) ?: "N").toString().equalsIgnoreCase("N")) {
+                String capability = permissionFlag == "canReadOrders" ? "order reads" : permissionFlag
+                ec.message.addError("Shopify auth config ${configId} is not enabled for ${capability}.")
+            }
+        }
+        return config
+    }
+
     static Map<String, Object> listAuthConfigs(def ec, Object query, Object pageIndex, Object pageSize) {
         int page = Math.max(0, ValueSupport.normalizeInt(pageIndex, 0))
         int size = Math.max(1, Math.min(200, ValueSupport.normalizeInt(pageSize, 20)))
@@ -111,7 +154,7 @@ class ShopifyAuthConfigSupport {
 
         return withEnvelope(ec, [
                 shopifyAuthConfigs: rows,
-                pagination        : pagination(page, size, totalCount),
+                pagination        : PaginationSupport.pagination(page, size, totalCount),
         ])
     }
 
@@ -142,8 +185,9 @@ class ShopifyAuthConfigSupport {
 
         if (!configId) ec.message.addError("Shopify auth config ID is required.")
         if (!shopApiUrlValue) ec.message.addError("Shop/API URL is required.")
-        if (shopApiUrlValue && !isValidShopApiUrl(shopApiUrlValue)) {
-            ec.message.addError("Shop/API URL must be an absolute http or https URL.")
+        if (shopApiUrlValue) {
+            String shopApiUrlError = describeShopApiUrlError(shopApiUrlValue)
+            if (shopApiUrlError) ec.message.addError("Shop/API URL: ${shopApiUrlError}".toString())
         }
         if (!apiVersionValue) ec.message.addError("API version is required.")
         if (apiVersionValue && !isValidApiVersion(apiVersionValue)) {
@@ -250,15 +294,6 @@ class ShopifyAuthConfigSupport {
             finder.condition(ec.entity.conditionFactory.makeCondition(searchConditions, EntityCondition.OR))
         }
         return finder
-    }
-
-    private static Map<String, Object> pagination(int pageIndex, int pageSize, int totalCount) {
-        return [
-            pageIndex : pageIndex,
-            pageSize  : pageSize,
-            totalCount: totalCount,
-            pageCount : Math.max(1, Math.ceil(totalCount / (double) pageSize) as int),
-        ]
     }
 
     private static Map<String, Object> withEnvelope(def ec, Map<String, Object> output = [:]) {

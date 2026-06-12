@@ -210,6 +210,116 @@ class ShopifyBulkOperationClientTests {
         assertTrue(((List<String>) result.errors).any { String error -> error.contains("did not complete") })
     }
 
+    @Test
+    void bulkOperationFailsWhenCompletedReportsObjectsButNoDownloadUrl() {
+        Map<String, Object> result = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                pollIntervalMillis: 0,
+                maxPollAttempts   : 1,
+                httpExecutor      : completedOperationExecutor([id: "gid://shopify/BulkOperation/1", status: "COMPLETED", objectCount: "5"]),
+        ])
+
+        assertFalse((Boolean) result.ok)
+        assertTrue(((List<String>) result.errors).any { String error -> error.contains("no result download URL") })
+    }
+
+    @Test
+    void bulkOperationSucceedsWhenCompletedWithZeroObjectsAndNoUrl() {
+        Map<String, Object> result = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                pollIntervalMillis: 0,
+                maxPollAttempts   : 1,
+                httpExecutor      : completedOperationExecutor([id: "gid://shopify/BulkOperation/1", status: "COMPLETED", objectCount: "0"]),
+        ])
+
+        assertTrue((Boolean) result.ok, result.errors?.toString())
+        assertEquals(0, ((List) result.records).size())
+    }
+
+    @Test
+    void bulkOperationFailsWhenDownloadParsesFewerRecordsThanObjectCount() {
+        Map<String, Object> result = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                pollIntervalMillis      : 0,
+                maxPollAttempts         : 1,
+                downloadRetryDelayMillis: 0,
+                httpExecutor            : completedOperationExecutor([
+                        id: "gid://shopify/BulkOperation/1", status: "COMPLETED", objectCount: "3",
+                        url: "https://bulk.example.test/orders.jsonl",
+                ]),
+                downloadExecutor        : { Map<String, Object> request ->
+                    return [statusCode: 200, body: '{"id":"1001"}\n{"id":"1002"}\n']
+                },
+        ])
+
+        assertFalse((Boolean) result.ok)
+        assertTrue(((List<String>) result.errors).any { String error -> error.contains("expected 3 record(s) but parsed 2") })
+        assertEquals(true, result.retryable)
+        assertFalse(result.toString().contains("orders.jsonl"))
+    }
+
+    @Test
+    void bulkOperationRetriesTransientDownloadFailures() {
+        int downloadCalls = 0
+        Map<String, Object> result = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                pollIntervalMillis      : 0,
+                maxPollAttempts         : 1,
+                downloadRetryDelayMillis: 0,
+                httpExecutor            : completedOperationExecutor([
+                        id: "gid://shopify/BulkOperation/1", status: "COMPLETED", objectCount: "1",
+                        url: "https://bulk.example.test/orders.jsonl",
+                ]),
+                downloadExecutor        : { Map<String, Object> request ->
+                    downloadCalls++
+                    if (downloadCalls == 1) return [statusCode: 500, body: "temporary failure"]
+                    return [statusCode: 200, body: '{"id":"1001"}\n']
+                },
+        ])
+
+        assertTrue((Boolean) result.ok, result.errors?.toString())
+        assertEquals(2, downloadCalls)
+        assertEquals(1, ((List) result.records).size())
+    }
+
+    @Test
+    void bulkOperationDoesNotRetryClientErrorDownloads() {
+        int downloadCalls = 0
+        Map<String, Object> result = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                pollIntervalMillis      : 0,
+                maxPollAttempts         : 1,
+                downloadRetryDelayMillis: 0,
+                httpExecutor            : completedOperationExecutor([
+                        id: "gid://shopify/BulkOperation/1", status: "COMPLETED", objectCount: "1",
+                        url: "https://bulk.example.test/orders.jsonl",
+                ]),
+                downloadExecutor        : { Map<String, Object> request ->
+                    downloadCalls++
+                    return [statusCode: 404, body: "gone"]
+                },
+        ])
+
+        assertFalse((Boolean) result.ok)
+        assertEquals(1, downloadCalls)
+        assertEquals(404, result.statusCode)
+        assertEquals(1, result.downloadAttemptCount)
+        assertFalse(result.toString().contains("orders.jsonl"))
+    }
+
+    /** Start succeeds, then every status poll reports the supplied completed operation. */
+    private static Closure completedOperationExecutor(Map operation) {
+        return { Map<String, Object> request ->
+            String query = ((Map) request.body).query as String
+            if (query.contains("bulkOperationRunQuery")) {
+                return jsonResponse([
+                        data: [
+                                bulkOperationRunQuery: [
+                                        bulkOperation: [id: operation.id, status: "CREATED"],
+                                        userErrors   : [],
+                                ],
+                        ],
+                ])
+            }
+            return jsonResponse([data: [bulkOperation: operation]])
+        }
+    }
+
     private static Map<String, Object> authConfig() {
         return [
                 shopApiUrl : "https://example.myshopify.com/admin/api",
