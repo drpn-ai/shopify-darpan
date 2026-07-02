@@ -11,15 +11,15 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
-            <parameter name="pagination">
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="pagination" type="Map">
                 <parameter name="pageIndex" type="Integer"/>
                 <parameter name="pageSize" type="Integer"/>
                 <parameter name="totalCount" type="Integer"/>
                 <parameter name="pageCount" type="Integer"/>
             </parameter>
-            <parameter name="shopifyAuthConfigs">
+            <parameter name="shopifyAuthConfigs" type="List">
                 <parameter name="shopifyAuthConfigId"/>
                 <parameter name="description"/>
                 <parameter name="companyUserGroupId"/>
@@ -45,9 +45,9 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
-            <parameter name="shopifyAuthConfig">
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="shopifyAuthConfig" type="Map">
                 <parameter name="shopifyAuthConfigId"/>
                 <parameter name="description"/>
                 <parameter name="companyUserGroupId"/>
@@ -80,9 +80,9 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
-            <parameter name="savedShopifyAuthConfig">
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="savedShopifyAuthConfig" type="Map">
                 <parameter name="shopifyAuthConfigId"/>
                 <parameter name="description"/>
                 <parameter name="companyUserGroupId"/>
@@ -108,8 +108,8 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
             <parameter name="deleted" type="Boolean"/>
             <parameter name="deletedShopifyAuthConfigId"/>
         </out-parameters>
@@ -127,8 +127,8 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
             <parameter name="sourceDefinitions" type="List"/>
         </out-parameters>
         <actions>
@@ -147,8 +147,8 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
             <parameter name="sourceDefinition" type="Map"/>
         </out-parameters>
         <actions>
@@ -183,8 +183,8 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
             <parameter name="builtQuery" type="Map"/>
         </out-parameters>
         <actions>
@@ -210,8 +210,8 @@
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
-            <parameter name="messages"><parameter name="message"/></parameter>
-            <parameter name="errors"><parameter name="error"/></parameter>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
             <parameter name="graphqlResult" type="Map"/>
         </out-parameters>
         <actions>
