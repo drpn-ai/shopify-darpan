@@ -48,6 +48,14 @@
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to shopify-orders-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id for live extract progress. Accepted for
+                    dispatch-contract symmetry with the OMS extractor; Shopify progress emission
+                    (bulk-operation objectCount heartbeats) is a planned follow-up.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total for progress percent. Accepted, not yet used.</description>
+            </parameter>
             <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
                 <description>HTTP connect timeout for Shopify GraphQL and Bulk Operations download requests.</description>
             </parameter>
@@ -78,6 +86,41 @@
             <parameter name="recordCount" type="Integer"/>
             <parameter name="requestMetadata" type="Map"/>
             <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
+    <service verb="lookup" noun="ShopifyOrderIds" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyOrderIds.groovy">
+        <description>Point-existence check for Shopify order ids against the primary datastore via nodes(ids:).
+            The bulk extraction's orders(query:) filter is served by Shopify's search index, which can omit a
+            small number of real orders; the saved-run verification pass calls this to confirm or refute
+            "missing in SHOPIFY" differences. A failed lookup returns ok=false with both id lists empty —
+            it never classifies an order as missing.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true">
+                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
+            </parameter>
+            <parameter name="orderIds" type="List" required="true">
+                <description>Shopify order ids to check; numeric ids or gid://shopify/Order/... values.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
+                <description>HTTP connect timeout for Shopify GraphQL requests.</description>
+            </parameter>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
+                <description>HTTP read timeout for Shopify GraphQL requests.</description>
+            </parameter>
+            <parameter name="maxAttempts" type="Integer" default-value="2">
+                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="foundIds" type="List"/>
+            <parameter name="missingIds" type="List"/>
             <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
