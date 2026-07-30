@@ -125,4 +125,28 @@
         </out-parameters>
     </service>
 
+    <service verb="lookup" noun="ShopifyOrderExchangeState" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyOrderExchangeState.groovy">
+        <description>Exchange-state point lookup for the exchange pair verify stage: per order, the
+            returns containing exchange line items plus current totals, via nodes(ids:) with an Order
+            fragment. Requires the token to carry the read_returns scope. A failed lookup returns
+            ok=false with an empty map — it never classifies anything.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+            <parameter name="orderIds" type="List" required="true">
+                <description>Shopify order ids; numeric ids or gid://shopify/Order/... values.</description>
+            </parameter>
+            <parameter name="companyUserGroupId"/>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000"/>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000"/>
+            <parameter name="maxAttempts" type="Integer" default-value="2"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="statesByOrderId" type="Map"/>
+            <parameter name="errors" type="List"/>
+            <parameter name="lineItemsShape"/>
+        </out-parameters>
+    </service>
+
 </services>
