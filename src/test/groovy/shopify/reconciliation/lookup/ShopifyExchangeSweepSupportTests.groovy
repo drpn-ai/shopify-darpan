@@ -80,6 +80,26 @@ class ShopifyExchangeSweepSupportTests {
     }
 
     @Test
+    void canceledExchangeReturnsNeitherIncludeNorCount() {
+        // User-verified 2026-07-31: canceled exchange returns never produce an OMS exchange order.
+        // A canceled in-window return must not seed inclusion, and canceled returns must not
+        // inflate the expected count on orders included via a live return.
+        Map canceledReturn = [id: "gid://shopify/Return/rc", name: "R-rc", status: "CANCELED",
+                createdAt: "2026-07-28T09:00:00Z", exchangeLineItems: [nodes: [[id: "gid://shopify/ExchangeLineItem/9"]]]]
+        def executor = { Map cfg, String q, Map v, Map o ->
+            page([
+                orderNode("111", [canceledReturn], "c1"),                                          // only canceled -> excluded entirely
+                orderNode("222", [exchangeReturn("r2", "2026-07-28T10:00:00Z"), canceledReturn], "c2"), // live + canceled -> count 1
+            ], false)
+        }
+        Map result = ShopifyExchangeSweepSupport.sweepExchanges([:], WINDOW_START, WINDOW_END, [:], executor)
+        List exchanges = (List) result.exchanges
+        assertEquals(1, exchanges.size())
+        assertEquals("222", exchanges[0].externalId)
+        assertEquals(1, exchanges[0].exchangeReturnCount)
+    }
+
+    @Test
     void transportFailureIsConservative() {
         def executor = { Map cfg, String q, Map v, Map o -> [ok: false, errors: ["HTTP 500"], graphqlErrors: []] }
         Map result = ShopifyExchangeSweepSupport.sweepExchanges([:], WINDOW_START, WINDOW_END, [:], executor)

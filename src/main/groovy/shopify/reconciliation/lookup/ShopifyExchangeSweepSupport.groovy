@@ -103,6 +103,7 @@ class ShopifyExchangeSweepSupport {
             Map returnNode = (Map) rawReturn
             List exchangeItems = (List) (((Map) (returnNode.get('exchangeLineItems') ?: [:])).get('nodes') ?: [])
             if (!exchangeItems) continue
+            if (isCanceledReturn(returnNode)) continue
             Long createdAt = parseIsoMillis(returnNode.get('createdAt'))
             if (createdAt == null || createdAt < windowStartMillis || createdAt >= windowEndMillis) continue
             return returnNode
@@ -116,9 +117,17 @@ class ShopifyExchangeSweepSupport {
         for (Object rawReturn : returnsNodes) {
             if (!(rawReturn instanceof Map)) continue
             List exchangeItems = (List) (((Map) (((Map) rawReturn).get('exchangeLineItems') ?: [:])).get('nodes') ?: [])
-            if (exchangeItems) count++
+            if (exchangeItems && !isCanceledReturn((Map) rawReturn)) count++
         }
         return count
+    }
+
+    /** Canceled exchange returns never produce an OMS exchange order (user-verified 2026-07-31:
+     *  M761755/M760737 were the live -1 orders; the flagged "missing" ones were canceled seconds).
+     *  Excluded from both window inclusion and the expected count, per the forum contract's
+     *  "non-cancelled" scope. */
+    protected static boolean isCanceledReturn(Map returnNode) {
+        return "CANCELED".equalsIgnoreCase(returnNode.get('status')?.toString()?.trim() ?: "")
     }
 
     protected static Long parseIsoMillis(Object rawValue) {
