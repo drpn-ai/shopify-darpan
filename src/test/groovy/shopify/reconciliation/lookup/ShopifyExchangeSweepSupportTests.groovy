@@ -99,14 +99,19 @@ class ShopifyExchangeSweepSupportTests {
     }
 
     @Test
-    void oneExchangePerOrderEvenWithMultipleInWindowReturns() {
+    void oneEntryPerOrderCarryingTheTotalExchangeReturnCount() {
+        // Per-exchange presence: an order with an old imported exchange and a new missing one must
+        // not read as present. The entry counts ALL exchange returns on the order (in-window or
+        // not) so the verify stage can compare against OMS's exchange-order count.
         def executor = { Map cfg, String q, Map v, Map o ->
-            page([orderNode("111", [exchangeReturn("r1", "2026-07-28T10:00:00Z"),
+            page([orderNode("111", [exchangeReturn("r0", "2026-07-01T10:00:00Z"),               // old exchange
+                                    exchangeReturn("r1", "2026-07-28T10:00:00Z"),               // in window
                                     exchangeReturn("r2", "2026-07-28T12:00:00Z")], "c1")], false)
         }
         Map result = ShopifyExchangeSweepSupport.sweepExchanges([:], WINDOW_START, WINDOW_END, [:], executor)
         List exchanges = (List) result.exchanges
-        assertEquals(1, exchanges.size())   // presence semantics: the ORDER's exchange must exist in OMS once
+        assertEquals(1, exchanges.size())
         assertEquals("111", exchanges[0].externalId)
+        assertEquals(3, exchanges[0].exchangeReturnCount)
     }
 }

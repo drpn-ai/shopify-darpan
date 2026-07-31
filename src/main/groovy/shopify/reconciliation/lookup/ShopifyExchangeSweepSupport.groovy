@@ -80,6 +80,10 @@ class ShopifyExchangeSweepSupport {
                         returnName          : inWindowExchange.get('name'),
                         returnStatus        : inWindowExchange.get('status'),
                         returnCreatedAtMillis: parseIsoMillis(inWindowExchange.get('createdAt')),
+                        // ALL exchange returns on the order (any date): the verify stage compares
+                        // this against OMS's exchange-order count so a missing repeat exchange
+                        // cannot hide behind an earlier imported one.
+                        exchangeReturnCount : countExchangeReturns(node),
                 ])
             }
             Map pageInfo = (Map) (ordersConnection.get('pageInfo') ?: [:])
@@ -104,6 +108,17 @@ class ShopifyExchangeSweepSupport {
             return returnNode
         }
         return null
+    }
+
+    protected static int countExchangeReturns(Map orderNode) {
+        List returnsNodes = (List) (((Map) (orderNode.get('returns') ?: [:])).get('nodes') ?: [])
+        int count = 0
+        for (Object rawReturn : returnsNodes) {
+            if (!(rawReturn instanceof Map)) continue
+            List exchangeItems = (List) (((Map) (((Map) rawReturn).get('exchangeLineItems') ?: [:])).get('nodes') ?: [])
+            if (exchangeItems) count++
+        }
+        return count
     }
 
     protected static Long parseIsoMillis(Object rawValue) {
