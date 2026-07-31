@@ -125,6 +125,30 @@
         </out-parameters>
     </service>
 
+    <service verb="lookup" noun="ShopifyExchangeSweep" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyExchangeSweep.groovy">
+        <description>Enumerate exchanges created in Shopify whose return date falls inside the run
+            window (product contract 2026-07-31: every Shopify exchange must have been imported into
+            OMS). Sweeps updated_at with no upper bound and filters Return.createdAt client-side.
+            Requires the read_returns scope. A failed sweep returns ok=false with an empty list — it
+            never classifies anything.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+            <parameter name="windowStartMillis" type="Long" required="true"/>
+            <parameter name="windowEndMillis" type="Long" required="true"/>
+            <parameter name="companyUserGroupId"/>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000"/>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000"/>
+            <parameter name="maxAttempts" type="Integer" default-value="2"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="exchanges" type="List"/>
+            <parameter name="truncated" type="Boolean"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="ShopifyOrderExchangeState" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyOrderExchangeState.groovy">
         <description>Exchange-state point lookup for the exchange pair verify stage: per order, the
