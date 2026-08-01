@@ -222,4 +222,29 @@
         </actions>
     </service>
 
+    <service verb="probe" noun="ShopifyAuthConnection" allow-remote="false" authenticate="true">
+        <description>Connection diagnostics for a saved Shopify auth config. Registered on the
+            SourceSystemConnector SHOPIFY row as healthCheckServiceName and invoked only through
+            facade.SettingsFacadeServices.test#SourceConnection, which owns the permission gate.
+            Read-only, single order, no retries. Never writes to ec.message: a rejected credential
+            is a check row, not a service error.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="checks" type="List">
+                <parameter name="check" type="Map">
+                    <parameter name="key"/>
+                    <parameter name="label"/>
+                    <parameter name="status"/>
+                    <parameter name="detail"/>
+                    <parameter name="durationMillis" type="Long"/>
+                </parameter>
+            </parameter>
+        </out-parameters>
+        <actions>
+            <script>context.putAll(shopify.facade.settings.ShopifyConnectionProbe.probeConnection(ec, shopifyAuthConfigId))</script>
+        </actions>
+    </service>
+
 </services>
