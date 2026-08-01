@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNotNull
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -180,5 +181,69 @@ class ShopifyConnectionProbeTests {
             String rendered = ((List<Map<String, Object>>) result.checks)*.detail.join(" | ")
             assertFalse(rendered.contains(secret), "a check detail leaked the access token: ${rendered}")
         }
+    }
+    @Test
+    void stagesRunOneAtATimeAndChainViaNextStage() {
+        // Each stage returns only its own rows, so a caller can render them as the server finishes.
+        List<String> queries = []
+        Map<String, Object> options = byQuery { String query ->
+            queries.add(query)
+            return query.contains("orders(")
+                    ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
+                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+        }
+
+        Map<String, Object> one = ShopifyConnectionProbe.probeStage(config(), options,
+                darpan.facade.settings.SourceConnectionDiagnosticsSupport.STAGE_FIRST)
+        assertEquals(["credential"], ((List<Map>) one.checks)*.key)
+        assertEquals("connect", one.nextStage)
+        assertEquals(0, queries.size(), "the credential stage must not touch the network")
+
+        Map<String, Object> two = ShopifyConnectionProbe.probeStage(config(), options, (String) one.nextStage)
+        assertEquals(["reachable", "apiVersion"], ((List<Map>) two.checks)*.key)
+        assertEquals("orders", two.nextStage)
+        assertEquals(1, queries.size())
+
+        Map<String, Object> three = ShopifyConnectionProbe.probeStage(config(), options, (String) two.nextStage)
+        assertEquals(["ordersRead"], ((List<Map>) three.checks)*.key)
+        assertNull(three.nextStage, "the last stage must end the walk")
+        assertEquals(2, queries.size())
+    }
+
+    @Test
+    void aTerminalFailureEndsTheWalkImmediately() {
+        // An unreadable credential makes every later stage meaningless, so stage one returns the
+        // skip rows itself and reports no next stage — the UI never calls again.
+        Map<String, Object> result = ShopifyConnectionProbe.probeStage(
+                config([accessToken: null, credentialError: "The stored access token could not be decrypted."]),
+                [:], darpan.facade.settings.SourceConnectionDiagnosticsSupport.STAGE_FIRST)
+
+        assertNull(result.nextStage)
+        assertEquals(["credential", "reachable", "apiVersion", "ordersRead"], ((List<Map>) result.checks)*.key)
+        assertStatus(result, "credential", "FAIL")
+        assertStatus(result, "ordersRead", "SKIP")
+    }
+
+    @Test
+    void walkingTheStagesMatchesRunningThemAllAtOnce() {
+        // The staged path and the one-shot path must not drift apart.
+        Closure<Map<String, Object>> responder = { String query ->
+            query.contains("orders(")
+                    ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
+                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+        }
+
+        Map<String, Object> oneShot = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery(responder))
+
+        List<Map> walked = []
+        String stage = darpan.facade.settings.SourceConnectionDiagnosticsSupport.STAGE_FIRST
+        while (stage) {
+            Map<String, Object> step = ShopifyConnectionProbe.probeStage(config(), byQuery(responder), stage)
+            walked.addAll((List<Map>) step.checks)
+            stage = (String) step.nextStage
+        }
+
+        assertEquals(((List<Map>) oneShot.checks)*.key, walked*.key)
+        assertEquals(((List<Map>) oneShot.checks)*.status, walked*.status)
     }
 }
