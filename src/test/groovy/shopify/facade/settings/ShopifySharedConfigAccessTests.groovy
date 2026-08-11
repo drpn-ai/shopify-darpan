@@ -38,6 +38,7 @@ class ShopifySharedConfigAccessTests {
     private static final String TEST_USER_ID = "TEST_CUSTOMER_USER"
     private static final String OWNER = "SHOPIFY_SHARE_OWNER"
     private static final String MEMBER = "SHOPIFY_SHARE_MEMBER"
+    private static final String STRANGER = "SHOPIFY_SHARE_STRANGER"
     private static final Timestamp TEST_FROM_DATE = Timestamp.valueOf("2026-05-01 00:00:00")
 
     // Distinct config ids per test so tests remain order-independent under
@@ -57,6 +58,7 @@ class ShopifySharedConfigAccessTests {
         seedPermissionGroup(TenantAccessSupport.DARPAN_TENANT_ADMIN_GROUP_ID, "Can manage tenant-scoped Darpan settings")
         seedTenant(OWNER, "Share Owner")
         seedTenant(MEMBER, "Share Member")
+        seedTenant(STRANGER, "Share Stranger")
         seedConfigTypeEnumeration()
 
         seedShopifyFixture(LIST_CONFIG_ID, "List fixture")
@@ -112,6 +114,34 @@ class ShopifySharedConfigAccessTests {
         assertTrue(config.isShared as boolean)
     }
 
+    /**
+     * DAR-BE-005 Task 7 review finding: getAuthConfig is the highest-risk surface per the brief
+     * (caller-supplied id), but no test proved a genuine STRANGER — owns nothing, holds no grant —
+     * gets identical text for a real foreign config as for a nonexistent one. Uses the SAME literal
+     * configId for both calls (sequenced: first while the id does not exist, then again once a
+     * real row exists under that exact id) — the "was not found" message echoes the caller-supplied
+     * id, so two different ids would trivially produce different text regardless of whether the
+     * collapse holds. This is the exact leak class Task 6 accidentally reopened one task before this.
+     */
+    @Test
+    void getAuthConfigGivesAStrangerTheIdenticalMessageForARealAndANonexistentConfigId() {
+        String targetConfigId = "SHOPIFY_STRANGER_GET_TARGET"
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, STRANGER)
+
+        Map<String, Object> missingResult = getFacade(targetConfigId)
+        assertFalse((Boolean) missingResult.ok)
+
+        ec.message.clearErrors()
+        seedShopifyFixture(targetConfigId, "Stranger get target")
+        Map<String, Object> foreignResult = getFacade(targetConfigId)
+        assertFalse((Boolean) foreignResult.ok)
+
+        assertEquals(missingResult.errors, foreignResult.errors,
+                "a stranger (no ownership, no grant) must get byte-identical text whether the " +
+                "config id is real-but-foreign or does not exist at all — divergence here is a " +
+                "cross-tenant existence oracle")
+    }
+
     @Test
     void saveAcceptsAMemberEditOfEveryFieldAndNeverTransfersOwnership() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, MEMBER)
@@ -151,6 +181,34 @@ class ShopifySharedConfigAccessTests {
         assertTrue((Boolean) ownerResult.ok, ownerResult.errors?.toString())
         assertEquals(true, ownerResult.deleted)
         assertNull(findOne(DELETE_CONFIG_ID), "the owner must still be able to delete its own shared config")
+    }
+
+    /**
+     * DAR-BE-005 Task 7 review finding: the pre-existing coverage of deleteAuthConfig's no-standing
+     * branch used a stranger against a NONEXISTENT id only, or a read-only OWNER (not a stranger).
+     * Neither proves a genuine stranger gets identical text for a real foreign config as for a
+     * nonexistent one. Same SAME-literal-id sequencing as getAuthConfig's stranger test above, for
+     * the same reason (the message echoes the caller-supplied id).
+     */
+    @Test
+    void deleteGivesAStrangerTheIdenticalMessageForARealAndANonexistentConfigId() {
+        String targetConfigId = "SHOPIFY_STRANGER_DELETE_TARGET"
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, STRANGER)
+
+        Map<String, Object> missingResult = deleteFacade(targetConfigId)
+        assertFalse((Boolean) missingResult.ok)
+
+        ec.message.clearErrors()
+        seedShopifyFixture(targetConfigId, "Stranger delete target")
+        Map<String, Object> foreignResult = deleteFacade(targetConfigId)
+        assertFalse((Boolean) foreignResult.ok)
+        assertNotNull(findOne(targetConfigId),
+                "a stranger's delete attempt on a real foreign config must not delete it")
+
+        assertEquals(missingResult.errors, foreignResult.errors,
+                "a stranger (no ownership, no grant) must get byte-identical text whether the " +
+                "config id is real-but-foreign or does not exist at all — divergence here is a " +
+                "cross-tenant existence oracle")
     }
 
     private Map<String, Object> listFacade() {
