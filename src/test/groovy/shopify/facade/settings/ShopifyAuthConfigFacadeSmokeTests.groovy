@@ -122,7 +122,12 @@ class ShopifyAuthConfigFacadeSmokeTests {
         ])
 
         assertFalse((Boolean) result.ok)
-        assertTrue((result.errors ?: []).join(" ").contains("not available in your active tenant"))
+        // DAR-BE-005 (Task 7): collapsed to the same "was not found" text a nonexistent id would
+        // produce. GORJANA has no standing on KREWE_SHOPIFY at all (not owner, not a shared peer),
+        // so the old distinguishing "is not available in your active tenant" message would have
+        // let any authenticated caller probe arbitrary ids for existence — the exact oracle class
+        // Task 4 closed for grants and Task 6 closed for the reference validators.
+        assertTrue((result.errors ?: []).join(" ").contains("was not found"))
         assertEquals("Krewe Shopify", findOne([shopifyAuthConfigId: "KREWE_SHOPIFY"]).description)
     }
 

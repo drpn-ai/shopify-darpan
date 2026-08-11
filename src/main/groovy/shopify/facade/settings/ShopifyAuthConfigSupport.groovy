@@ -3,8 +3,8 @@ package shopify.facade.settings
 import darpan.common.ValueSupport
 import darpan.facade.common.FacadeSupport
 import darpan.facade.common.PaginationSupport
+import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.TenantAccessSupport
-import org.moqui.entity.EntityCondition
 
 class ShopifyAuthConfigSupport {
     static final String ENTITY_NAME = "darpan.shopify.ShopifyAuthConfig"
@@ -76,13 +76,21 @@ class ShopifyAuthConfigSupport {
                 .one()
     }
 
+    /**
+     * DAR-BE-005 read/edit standing: owner OR shared peer, both allowed — a member tenant may see
+     * and edit every field of a config shared with it (decision 3). Used by get and save, NOT by
+     * delete (delete stays owner-only; see deleteAuthConfig's own three-way check).
+     *
+     * <p>Collapsed per the oracle-closing pattern Task 6 established for the reference validators:
+     * a caller with no legitimate standing (not owner, not a peer) gets the SAME "was not found"
+     * text whether the config is missing or foreign, instead of the old two distinguishable
+     * messages that let any authenticated caller probe arbitrary ids for existence.</p>
+     */
     static void requireTenantAuthConfigAccess(def ec, def config, String configId) {
-        TenantAccessSupport.requireTenantRecordAccess(
-                ec,
-                config,
-                "Shopify auth config '${configId}' was not found.",
-                "Shopify auth config '${configId}' is not available in your active tenant."
-        )
+        if (config == null || !SharedConfigAccessSupport.canActiveTenantUseConfig(ec,
+                SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, config)) {
+            ec.message.addError("Shopify auth config '${configId}' was not found.")
+        }
     }
 
     /**
@@ -139,21 +147,28 @@ class ShopifyAuthConfigSupport {
         int size = Math.max(1, Math.min(200, ValueSupport.normalizeInt(pageSize, 20)))
         String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
 
+        // DAR-BE-005: owned rows plus rows shared to this tenant. listAccessibleConfigRows has no
+        // server-side search/pagination (it returns every accessible row, owned and shared alike),
+        // so both are applied here in Groovy — the same shape listOmsRestSourceConfigs.groovy uses.
         List<Map<String, Object>> rows = []
-        int totalCount = 0
         if (activeTenantUserGroupId) {
-            def finder = authConfigFinder(ec, activeTenantUserGroupId, query)
-            totalCount = Math.min(Integer.MAX_VALUE, finder.count()) as int
-            if (totalCount > 0) {
-                String companyLabel = TenantAccessSupport.resolveTenantLabelForUserGroupId(ec, activeTenantUserGroupId)
-                (finder.offset(page, size).limit(size).list() ?: []).each { cfg ->
-                    rows.add(safeConfig(ec, cfg, companyLabel))
-                }
+            List configs = SharedConfigAccessSupport.listAccessibleConfigRows(ec,
+                    SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH)
+            rows = configs.collect { cfg ->
+                safeConfig(ec, cfg) + [isShared: readValue(cfg, "companyUserGroupId") != activeTenantUserGroupId]
             }
         }
 
+        String search = normalize(query)?.toLowerCase()
+        List<Map<String, Object>> filtered = search ? rows.findAll { Map<String, Object> row ->
+            [row.shopifyAuthConfigId, row.description, row.shopApiUrl, row.apiVersion, row.timeZone].any {
+                it?.toString()?.toLowerCase()?.contains(search)
+            }
+        } : rows
+
+        int totalCount = filtered.size()
         return withEnvelope(ec, [
-                shopifyAuthConfigs: rows,
+                shopifyAuthConfigs: PaginationSupport.pageRows(filtered, page, size),
                 pagination        : PaginationSupport.pagination(page, size, totalCount),
         ])
     }
@@ -168,7 +183,11 @@ class ShopifyAuthConfigSupport {
         if (!ec.message.hasError()) {
             def config = findAuthConfig(ec, configId)
             requireTenantAuthConfigAccess(ec, config, configId)
-            if (!ec.message.hasError()) output.shopifyAuthConfig = safeConfig(ec, config)
+            if (!ec.message.hasError()) {
+                String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
+                output.shopifyAuthConfig = safeConfig(ec, config) +
+                        [isShared: readValue(config, "companyUserGroupId") != activeTenantUserGroupId]
+            }
         }
         return withEnvelope(ec, output)
     }
@@ -236,7 +255,9 @@ class ShopifyAuthConfigSupport {
 
             if (!ec.message.hasError()) {
                 ec.service.sync().name("store#${ENTITY_NAME}").parameters(storeMap).call()
-                output.savedShopifyAuthConfig = safeConfig(ec, storeMap)
+                String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
+                output.savedShopifyAuthConfig = safeConfig(ec, storeMap) +
+                        [isShared: normalize(readValue(storeMap, "companyUserGroupId")) != activeTenantUserGroupId]
                 if (!ec.message.hasError()) {
                     ec.message.addMessage("Saved Shopify auth config ${configId}.")
                 }
@@ -255,7 +276,23 @@ class ShopifyAuthConfigSupport {
 
         if (!ec.message.hasError()) {
             def config = findAuthConfig(ec, configId)
-            requireTenantAuthConfigAccess(ec, config, configId)
+            boolean isOwner = config != null && TenantAccessSupport.canAccessTenantRecord(ec, config)
+
+            // Delete stays owner-only (decision 3's asymmetry): a peer may edit every field of a
+            // shared config but must not delete the row its peers depend on — shopifyAuthConfigId
+            // has no DB FK for ConfigTenantAccess to cascade through. A peer who wants out uses
+            // revoke#ConfigTenantAccess instead.
+            if (config != null && !isOwner && SharedConfigAccessSupport.canActiveTenantUseConfig(ec,
+                    SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, config)) {
+                ec.message.addError("Shopify auth config '${configId}' is shared from another " +
+                        "tenant. Stop sharing it instead of deleting it.")
+            } else if (!isOwner) {
+                // DAR-BE-005 oracle collapse: a nonexistent config and one this tenant has no
+                // standing on (not owner, not a peer) must be indistinguishable to the caller —
+                // the pre-Task-7 behavior threw a distinguishing "not available in your active
+                // tenant" message for the foreign-owned case here.
+                ec.message.addError("Shopify auth config '${configId}' was not found.")
+            }
         }
 
         if (!ec.message.hasError()) {
@@ -279,21 +316,6 @@ class ShopifyAuthConfigSupport {
                 deleted                    : deleted,
                 deletedShopifyAuthConfigId : deleted ? configId : null,
         ].findAll { entry -> entry.value != null } as Map<String, Object>)
-    }
-
-    private static def authConfigFinder(def ec, String companyUserGroupId, Object query) {
-        def finder = ec.entity.find(ENTITY_NAME)
-                .condition("companyUserGroupId", companyUserGroupId)
-                .useCache(false)
-                .orderBy("description,shopifyAuthConfigId")
-        String search = normalize(query)
-        if (search) {
-            List searchConditions = ["shopifyAuthConfigId", "description", "shopApiUrl", "apiVersion", "timeZone"].collect { String fieldName ->
-                ec.entity.conditionFactory.makeCondition(fieldName, EntityCondition.LIKE, "%${search}%").ignoreCase()
-            }
-            finder.condition(ec.entity.conditionFactory.makeCondition(searchConditions, EntityCondition.OR))
-        }
-        return finder
     }
 
     private static Map<String, Object> withEnvelope(def ec, Map<String, Object> output = [:]) {
