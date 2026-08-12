@@ -6,6 +6,7 @@ import darpan.facade.common.PaginationSupport
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.SharedConfigGrantSupport
 import darpan.facade.common.TenantAccessSupport
+import darpan.facade.common.TenantScopedFinder
 
 class ShopifyAuthConfigSupport {
     static final String ENTITY_NAME = "darpan.shopify.ShopifyAuthConfig"
@@ -68,10 +69,24 @@ class ShopifyAuthConfigSupport {
         ]
     }
 
+    // DAR-BE-005 seam C: a bare ec.entity.find here is silently filtered by
+    // DARPAN_ACTIVE_COMPANY_SCOPE (SecuritySeedData.xml DARPAN_SCOPE_SHOPIFY_AUTH), so a
+    // foreign-owned row (shared or not) would be invisible before any access check runs. That
+    // silence is exactly what let saveAuthConfig's null-existingConfig branch reassign a foreign
+    // row's ownership to the caller's own tenant (a live cross-tenant credential hijack).
+    // findGlobalUnscoped bypasses that filter; every caller below gates the returned record with
+    // requireTenantAuthConfigAccess / SharedConfigAccessSupport.canActiveTenantUseConfig before
+    // using it — the read and the gate are two different steps, and skipping either reopens the
+    // hole. Do not revert this to a bare ec.entity.find.
+    private static final String FIND_AUTH_CONFIG_REASON =
+            "findAuthConfig existence check; every caller gates the result with " +
+            "requireTenantAuthConfigAccess / SharedConfigAccessSupport.canActiveTenantUseConfig " +
+            "before use (DAR-BE-005)"
+
     static def findAuthConfig(def ec, Object shopifyAuthConfigId) {
         String configId = normalize(shopifyAuthConfigId)
         if (!configId) return null
-        return ec.entity.find(ENTITY_NAME)
+        return TenantScopedFinder.findGlobalUnscoped(ec, ENTITY_NAME, FIND_AUTH_CONFIG_REASON)
                 .condition("shopifyAuthConfigId", configId)
                 .useCache(false)
                 .one()

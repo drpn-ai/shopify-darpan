@@ -167,6 +167,61 @@ class ShopifySharedConfigAccessTests {
     }
 
     /**
+     * DAR-BE-005 review finding (b2) — the highest-risk claim in the whole feature: a stranger who
+     * knows a real, foreign, un-shared shopifyAuthConfigId must be denied by save# the SAME way
+     * get# denies it, and must never be able to reassign the row's ownership or overwrite its
+     * accessToken. This is the runtime-provable half of the fix to
+     * ShopifyAuthConfigSupport.findAuthConfig (a bare ec.entity.find there was silently filtered by
+     * DARPAN_ACTIVE_COMPANY_SCOPE, so a foreign row came back null and saveAuthConfig's
+     * null-existingConfig branch treated it as free-to-create, reassigning ownership to the caller
+     * — a live cross-tenant credential hijack). The vulnerable read path itself cannot be exercised
+     * by a runtime test (see ShopifyAuthConfigEntityContractTests' Javadoc for why — every facade
+     * call here goes through disableAuthz(), which the production callers of save#ShopifyAuthConfig
+     * do not); this test instead pins the invariant that must hold once findAuthConfig correctly
+     * makes the foreign row visible: the downstream owner-or-shared gate still blocks a stranger.
+     *
+     * <p>Unlike get#/delete#, save# is create-or-update, so a genuinely UNUSED id is a legitimate
+     * create for whoever saves it first (not a denial) — this test therefore targets a REAL,
+     * foreign, un-shared row, the one case where save#'s own primary existence-or-create branch
+     * must deny rather than create.</p>
+     */
+    @Test
+    void saveByAStrangerOnARealForeignConfigMatchesGetsDenialAndLeavesOwnershipAndTokenUntouched() {
+        String targetConfigId = "OWNER_STRANGER_SAVE_TARGET_SHOPIFY"
+        seedShopifyFixture(targetConfigId, "Stranger save target")
+
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, STRANGER)
+
+        Map<String, Object> getResult = getFacade(targetConfigId)
+        assertFalse((Boolean) getResult.ok)
+
+        ec.message.clearErrors()
+        Map<String, Object> saveResult = saveFacade([
+            shopifyAuthConfigId: targetConfigId,
+            description        : "Hijacked by stranger",
+            shopApiUrl         : "https://hijacked.myshopify.com/admin/api",
+            apiVersion         : "2025-10",
+            accessToken        : "stranger-supplied-token",
+            canReadOrders      : true,
+        ])
+        assertFalse((Boolean) saveResult.ok,
+                "a stranger with no ownership and no grant must not be able to save a real foreign config")
+
+        assertEquals(getResult.errors, saveResult.errors,
+                "save# must deny a real foreign config with the SAME collapsed text get# uses — " +
+                "divergence here is a cross-tenant existence oracle")
+
+        def stored = findOne(targetConfigId)
+        assertEquals(OWNER, stored.companyUserGroupId,
+                "a stranger's save must never reassign ownership of a foreign config — this is the " +
+                "live cross-tenant credential hijack this fix closes")
+        assertEquals("shared-shopify-token", stored.accessToken,
+                "a stranger's save must never overwrite a foreign config's accessToken")
+        assertEquals("Stranger save target", stored.description,
+                "a stranger's rejected save must not mutate any field of the foreign row")
+    }
+
+    /**
      * DAR-BE-005 Task 9: a config with an active grant cannot be deleted by ANYONE, including its
      * owner — configId is polymorphic with no DB FK, so a delete would cascade nothing and leave
      * the peer's automation failing at run time with a confusing "not found" instead of failing
