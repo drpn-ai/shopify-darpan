@@ -146,6 +146,74 @@ class ShopifySharedConfigRuntimeAccessTests {
         assertNotNull(resolved)
     }
 
+    // --- DAR-BE-005 B3 — the GraphQL caller's EXACT opts shape ------------
+    //
+    // ShopifyGraphqlFacadeSupport.executeGraphql calls requireUsableAuthConfig(ec, configId, [:]) —
+    // no disableAuthz key at all, unlike every test above. The gate-decision behavior below is
+    // identical to the disableAuthz:true tests (this ExecutionContext harness runs with authz
+    // permanently disabled per ShopifyAuthConfigEntityContractTests' Javadoc, so the two opts shapes
+    // cannot diverge here); the value of these tests is pinning the REAL caller's call shape
+    // specifically, alongside the static source assertion in ShopifyAuthConfigEntityContractTests
+    // that proves the underlying read no longer takes the bare, authz-enabled ec.entity.find path
+    // that made this caller shape lose a shared config in production.
+
+    @Test
+    void graphqlCallerShapeAllowsAPeerTenantWithAnActiveGrant() {
+        String configId = "RUNTIME_GRAPHQL_SHAPE_MEMBER_SHOPIFY"
+        seedShopifyFixture(configId, "GraphQL caller shape member fixture")
+        seedGrant(configId, MEMBER)
+
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, MEMBER)
+        def resolved = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
+        assertFalse(ec.message.hasError(), ec.message.getErrors()?.toString())
+        assertNotNull(resolved,
+                "the GraphQL execute path must resolve a config shared with the active tenant, not " +
+                "just a config the active tenant owns outright")
+    }
+
+    @Test
+    void graphqlCallerShapeDeniesAStrangerWithTheSameTextForARealAndNonexistentConfig() {
+        String configId = "RUNTIME_GRAPHQL_SHAPE_STRANGER_TARGET_SHOPIFY"
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, STRANGER)
+
+        ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
+        List<String> missingErrors = (ec.message.getErrors() ?: []) as List<String>
+        assertFalse(missingErrors.isEmpty())
+
+        ec.message.clearErrors()
+        seedShopifyFixture(configId, "GraphQL caller shape stranger target")
+        ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
+        List<String> foreignErrors = (ec.message.getErrors() ?: []) as List<String>
+        assertFalse(foreignErrors.isEmpty())
+
+        assertEquals(missingErrors, foreignErrors,
+                "a stranger tenant (no ownership, no grant) must get byte-identical text through the " +
+                "GraphQL caller shape whether the config id is real-but-foreign or does not exist at " +
+                "all — divergence here is a cross-tenant existence oracle")
+        assertTrue(foreignErrors.join(" ").contains("was not found"),
+                "denial text must collapse to the plain not-found message: ${foreignErrors}")
+    }
+
+    @Test
+    void graphqlCallerShapeZeroGrantsPreservesOwnerAcceptAndForeignReject() {
+        String configId = "RUNTIME_GRAPHQL_SHAPE_ZERO_GRANT_SHOPIFY"
+        seedShopifyFixture(configId, "Zero grant GraphQL shape fixture")
+        // Deliberately no seedGrant call — proves behavior is unchanged from pre-DAR-BE-005 with an
+        // empty ConfigTenantAccess table.
+
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, OWNER)
+        def ownerResolved = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
+        assertFalse(ec.message.hasError(), ec.message.getErrors()?.toString())
+        assertNotNull(ownerResolved)
+
+        ec.message.clearErrors()
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, STRANGER)
+        ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
+        assertTrue(ec.message.hasError(),
+                "with zero grants a foreign tenant through the GraphQL caller shape must still be " +
+                "rejected exactly as before")
+    }
+
     // --- helpers -----------------------------------------------------------
 
     private void seedTenant(String tenantId, String label) {

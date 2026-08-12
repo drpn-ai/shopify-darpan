@@ -118,7 +118,9 @@ class ShopifyAuthConfigSupport {
      *     active tenant (automation executions run without a user session tenant).
      * opts.requiredPermissionFlag — indicator field that must not be 'N' (default canReadOrders,
      *     matching ShopifySourceCatalog's requiredPermissionFlag for SHOPIFY_ORDERS).
-     * opts.disableAuthz — resolve the record with entity authz disabled (default false).
+     * opts.disableAuthz — accepted for source-compatibility with existing automation callers, but
+     *     has no effect: the read now always goes through TenantScopedFinder.findGlobalUnscoped
+     *     (DAR-BE-005 B3), which disables authz unconditionally. A caller may still pass it.
      */
     static def requireUsableAuthConfig(def ec, Object shopifyAuthConfigId, Map opts = [:]) {
         String configId = normalize(shopifyAuthConfigId)
@@ -127,11 +129,20 @@ class ShopifyAuthConfigSupport {
             return null
         }
 
-        def finder = ec.entity.find(ENTITY_NAME)
+        // DAR-BE-005 B3 — was the last bare ec.entity.find in this file (findAuthConfig above was
+        // already fixed). Same seam C hazard: a bare find is authz-enabled and silently filtered by
+        // DARPAN_ACTIVE_COMPANY_SCOPE, so a peer's shared config (or the GraphQL path calling this
+        // with configId only) would be invisible before either gate below ever runs.
+        // findGlobalUnscoped bypasses that filter; both branches below already gate the result
+        // correctly (automation branch via canTenantUseConfig, interactive branch via
+        // requireTenantAuthConfigAccess) — only the read needed to change.
+        def config = TenantScopedFinder.findGlobalUnscoped(ec, ENTITY_NAME,
+                        "requireUsableAuthConfig existence check; canTenantUseConfig / " +
+                        "requireTenantAuthConfigAccess gates owner-or-shared access immediately " +
+                        "after (DAR-BE-005)")
                 .condition("shopifyAuthConfigId", configId)
                 .useCache(false)
-        if (ValueSupport.normalizeBool(opts?.disableAuthz, false)) finder.disableAuthz()
-        def config = finder.one()
+                .one()
 
         String trustedCompanyUserGroupId = normalize(opts?.companyUserGroupId)
         if (trustedCompanyUserGroupId) {
