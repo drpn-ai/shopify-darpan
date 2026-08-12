@@ -4,6 +4,7 @@ import darpan.common.ValueSupport
 import darpan.facade.common.FacadeSupport
 import darpan.facade.common.PaginationSupport
 import darpan.facade.common.SharedConfigAccessSupport
+import darpan.facade.common.SharedConfigGrantSupport
 import darpan.facade.common.TenantAccessSupport
 
 class ShopifyAuthConfigSupport {
@@ -292,6 +293,15 @@ class ShopifyAuthConfigSupport {
                 // the pre-Task-7 behavior threw a distinguishing "not available in your active
                 // tenant" message for the foreign-owned case here.
                 ec.message.addError("Shopify auth config '${configId}' was not found.")
+            } else if (SharedConfigGrantSupport.hasActiveGrants(ec,
+                    SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, configId)) {
+                // Task 9: even the owner cannot delete a config that still has active grants.
+                // configId is polymorphic with no DB FK, so a delete cascades nothing and every
+                // peer tenant's automation would break at run time with a confusing "not found"
+                // instead of failing loudly here. This branch is only reachable when isOwner is
+                // true — it runs strictly AFTER the standing check above.
+                ec.message.addError("Shopify auth config '${configId}' is shared with other tenants. " +
+                        "Stop sharing it with every tenant before deleting it.")
             }
         }
 
