@@ -135,10 +135,18 @@ class ShopifyAuthConfigSupport {
 
         String trustedCompanyUserGroupId = normalize(opts?.companyUserGroupId)
         if (trustedCompanyUserGroupId) {
-            if (config == null) {
+            // DAR-BE-005 B1 — was strict owner-only (a straight companyUserGroupId != trustedTenant
+            // comparison), so a peer tenant could see and select a shared config from the settings
+            // list (Task 7) and then have every automation run against it fail here. Widened to the
+            // same owner-or-shared decision the interactive branch below already uses, via the
+            // explicit-tenant overload (the automation tenant is server-derived from the
+            // already-gated automation record, not a session's active tenant, so it cannot call
+            // canActiveTenantUseConfig). Collapsed onto requireTenantAuthConfigAccess's identical
+            // "was not found" text — a caller with no standing must not be able to tell a missing
+            // config from a foreign, un-shared one.
+            if (config == null || !SharedConfigAccessSupport.canTenantUseConfig(ec,
+                    SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, config, trustedCompanyUserGroupId)) {
                 ec.message.addError("Shopify auth config '${configId}' was not found.")
-            } else if (normalize(readValue(config, "companyUserGroupId")) != trustedCompanyUserGroupId) {
-                ec.message.addError("Shopify auth config '${configId}' is not available in this automation tenant.")
             }
         } else {
             requireTenantAuthConfigAccess(ec, config, configId)
