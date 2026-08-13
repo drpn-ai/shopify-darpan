@@ -90,6 +90,67 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="ShopifyOrderReturnRefs" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyReturnRefs.groovy">
+        <description>Extract per-order Shopify refund ids and return ids for a window, for returns
+            reconciliation against the OMS reconciliationReturns extract (DAR-BE-018).
+
+            Uses CURSOR pagination, not Bulk Operations: refunds and returns are GraphQL connections,
+            and the bulk path rejects connection-bearing fields because bulk JSONL emits their children
+            as separate __parentId lines that nothing here re-nests. That is why this service carries no
+            bulk poll/retry parameters.
+
+            Each output record is one order: {orderId, orderName, createdAt, refundIds[], returnIds[]},
+            all ids bare (GID tail stripped) so they land in the same space as the OMS externalId.
+            Orders with neither refunds nor returns are emitted with empty arrays, not omitted — their
+            absence is evidence the reverse pass needs.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true">
+                <description>Tenant-owned Shopify auth config identifier.</description>
+            </parameter>
+            <parameter name="automationId"/>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="fileSide"/>
+            <parameter name="systemEnumId"/>
+            <parameter name="sourceTypeEnumId"/>
+            <parameter name="windowStart" required="true"/>
+            <parameter name="windowEnd" required="true"/>
+            <parameter name="preserveWindowInstants" type="Boolean" default-value="false"/>
+            <parameter name="outputLocation"/>
+            <parameter name="fileName">
+                <description>Optional output file name. Defaults to shopify-return-refs-{fromMillis}-{thruMillis}.json.</description>
+            </parameter>
+            <parameter name="pageSize" type="Integer" default-value="100">
+                <description>Orders per cursor page.</description>
+            </parameter>
+            <parameter name="connectionPageSize" type="Integer" default-value="50">
+                <description>Refunds/returns fetched per order. An order exceeding this emits a warning
+                    naming the order rather than silently truncating its id set.</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId"/>
+            <parameter name="progressStageCode"/>
+            <parameter name="expectedRecordCount" type="Integer"/>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000"/>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000"/>
+            <parameter name="maxAttempts" type="Integer" default-value="2"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="fileTypeEnumId"/>
+            <parameter name="recordCount" type="Integer"/>
+            <parameter name="requestMetadata" type="Map"/>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="ShopifyOrderIds" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyOrderIds.groovy">
         <description>Point-existence check for Shopify order ids against the primary datastore via nodes(ids:).
