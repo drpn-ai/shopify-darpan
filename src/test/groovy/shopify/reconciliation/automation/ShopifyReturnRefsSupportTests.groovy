@@ -182,7 +182,7 @@ class ShopifyReturnRefsSupportTests {
 
         Map record = (Map) ((List) result.records)[0]
         assertEquals([], record.refundIds, "an out-of-window refund must not appear: ${record}")
-        assertEquals([:], record.refundsCreatedAt)
+        assertEquals([], record.refunds)
     }
 
     @Test
@@ -205,7 +205,7 @@ class ShopifyReturnRefsSupportTests {
 
         Map record = (Map) ((List) result.records)[0]
         assertEquals(["81"], record.refundIds)
-        assertEquals("2026-05-01T12:00:00Z", ((Map) record.refundsCreatedAt).get("81"))
+        assertEquals([[id: "81", createdAt: "2026-05-01T12:00:00Z"]], record.refunds)
     }
 
     @Test
@@ -236,9 +236,14 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void emitsParallelCreatedAtMapsForRefundsAndReturnsKeyedByBareId() {
-        // I1 shape: refundsCreatedAt/returnsCreatedAt are parallel to refundIds/returnIds, keyed by
-        // the SAME bare id. This is the exact shape the other repo's reverse-grace fix consumes.
+    void emitsRefundsAndReturnsAsListsOfIdCreatedAtObjectsParallelToTheIdArrays() {
+        // Important #1 (fix-wave-C re-review): refunds/returns are now lists of {id, createdAt}
+        // objects, parallel to refundIds/returnIds, rather than a refundsCreatedAt/returnsCreatedAt
+        // MAP keyed by data-derived ids. A plain (schema-inferring) Spark JSON read turns a JSON
+        // object into a fixed-field StructType, so the old map shape's field count tracked the union
+        // of every distinct id in the whole file — this list has a fixed, small schema regardless of
+        // event count. This is the exact shape the other repo's reverse-grace fix now consumes
+        // (returnsCreatedAt/returns is consumed nowhere today; kept for symmetry and future use).
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("1010",
@@ -254,8 +259,8 @@ class ShopifyReturnRefsSupportTests {
         Map record = (Map) ((List) result.records)[0]
         assertEquals(["11"], record.refundIds)
         assertEquals(["21"], record.returnIds)
-        assertEquals("2026-05-01T09:15:00Z", ((Map) record.refundsCreatedAt).get("11"))
-        assertEquals("2026-05-01T09:30:00Z", ((Map) record.returnsCreatedAt).get("21"))
+        assertEquals([[id: "11", createdAt: "2026-05-01T09:15:00Z"]], record.refunds)
+        assertEquals([[id: "21", createdAt: "2026-05-01T09:30:00Z"]], record.returns)
     }
 
     @Test
@@ -288,7 +293,10 @@ class ShopifyReturnRefsSupportTests {
     @Test
     void buildsTheWidenedLowerBoundOnlySearchQueryWithUpdatedAtSortKey() {
         // Live-verified 2026-08-13 (HTTP 200): the exact search text and sort key C1 requires. No
-        // upper bound — later, unrelated order activity must never hide an in-window event.
+        // upper bound — later, unrelated order activity must never hide an in-window event. The
+        // floor itself is windowStart minus the default 3h lookback (Important #3, fix-wave-C
+        // re-review): OMS lags Shopify by ~38min (RQ-23), so the net must reach back far enough that
+        // a Shopify event just before windowStart is still fetched for the OMS-side forward match.
         Map captured = [:]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             captured.doc = doc
@@ -300,11 +308,72 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
         String query = captured.vars.query as String
-        assertEquals("updated_at:>='2026-05-01T00:00:00Z' AND ((-return_status:no_return) OR " +
+        assertEquals("updated_at:>='2026-04-30T21:00:00Z' AND ((-return_status:no_return) OR " +
                 "(financial_status:refunded) OR (financial_status:partially_refunded))", query)
         assertFalse(query.contains("updated_at:<"), "the net must carry no upper bound: ${query}")
         assertTrue((captured.doc as String).contains("sortKey: UPDATED_AT"),
                 "the rendered document must sort on UPDATED_AT: ${captured.doc}")
+    }
+
+    @Test
+    void lookbackHoursOptionOverridesTheDefaultAndMovesTheNetFloor() {
+        Map captured = [:]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            captured.vars = vars
+            return [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false, endCursor: null]]]]
+        }
+
+        ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [lookbackHours: 1], executor)
+
+        String query = captured.vars.query as String
+        assertTrue(query.startsWith("updated_at:>='2026-04-30T23:00:00Z'"),
+                "a caller-supplied lookbackHours must move the net floor: ${query}")
+    }
+
+    @Test
+    void includesARefundCreatedWithinTheDefaultLookbackBeforeWindowStart() {
+        // Important #3: OMS lags Shopify by ~38min (RQ-23) -- widen the fetch/emit floor by the
+        // default 3h lookback so a refund minted just before windowStart is still available for the
+        // OMS-side forward match once the (later-arriving) OMS return shows up just inside the window.
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("1111",
+                            ["gid://shopify/Refund/111"], [],
+                            "2026-01-01T00:00:00Z",
+                            "2026-04-30T22:00:00Z",   // 2h before windowStart -- inside the 3h lookback
+                            "2026-05-01T10:30:00Z")]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals(["111"], record.refundIds, "a refund within the lookback before windowStart must be included: ${record}")
+    }
+
+    @Test
+    void excludesARefundCreatedBeforeTheLookbackFloor() {
+        // The lookback is bounded -- an event further back than lookbackHours must still be
+        // excluded, exactly like the pre-fix window boundary was.
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("1112",
+                            ["gid://shopify/Refund/112"], [],
+                            "2026-01-01T00:00:00Z",
+                            "2026-04-30T20:00:00Z",   // 4h before windowStart -- outside the 3h lookback
+                            "2026-05-01T10:30:00Z")]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals([], record.refundIds, "a refund before the lookback floor must still be excluded: ${record}")
     }
 
     private static Map authConfig() {

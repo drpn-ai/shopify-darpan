@@ -33,9 +33,10 @@ import static darpan.common.ValueSupport.normalizeInt
  * any return/refund activity bumps updated_at, but later, unrelated activity on the SAME order must
  * not hide an earlier in-window event, so there is deliberately no upper bound to bump past. The
  * actual date is filtered client-side from the event's own createdAt. This class follows the same
- * shape: the Shopify search below is a wide, lower-bound-only NET, and the authoritative
- * [windowStart, windowEnd) filter is applied here, in Groovy, against each refund's and each
- * return's own createdAt (see collectEvents/inWindow).
+ * shape: the Shopify search below is a wide, lower-bound-only NET, and an authoritative
+ * [floor, windowEnd) filter is applied here, in Groovy, against each refund's and each return's own
+ * createdAt (see collectEvents/inWindow) — floor is windowStart WIDENED BACK by a lookback; see the
+ * LOOKBACK section below for why the plain windowStart is not itself the floor.
  *
  * The net's trim is intentionally NOT `-return_status:no_return` alone: live probing (gorjana-
  * sandbox.myshopify.com, Admin API 2026-01, 2026-08-13, HTTP 200) showed that filter alone returns
@@ -43,11 +44,34 @@ import static darpan.common.ValueSupport.normalizeInt
  * attached (a refund-only order) never moves return_status — the filter silently drops the entire
  * refund-only population, gutting the refund match spine. The OR-widened trim below adds
  * financial_status refunded/partially_refunded so refund-only orders survive.
+ *
+ * LOOKBACK (Important #3, fix-wave-C re-review): the design's own measured fact (RQ-23, cited in
+ * ReturnPresenceVerificationSupport's class doc) is that OMS lags Shopify by ~38 minutes. An OMS
+ * return whose entryDate sits just inside windowStart can therefore point at a Shopify refund
+ * created just BEFORE windowStart — with a plain [windowStart, windowEnd) client-side filter that
+ * refund would never be fetched at all, the forward match would fail, and the reverse grace would
+ * not rescue it either (it compares entryDate against now - graceHours, which is false for any run
+ * made more than graceHours after windowStart — i.e. every normal daily run and every backfill).
+ * That manufactures a recurring false missing-in-Shopify cohort, roughly one sync-lag wide, at the
+ * start of every window. Fix: both the Shopify search NET and the client-side inWindow() filter use
+ * a floor of [windowStart - lookback, windowEnd) instead of [windowStart, windowEnd) — lookbackHours
+ * defaults to DEFAULT_LOOKBACK_HOURS (3h, matching ReturnPresenceVerificationSupport's own grace
+ * default) and is threaded from the extract service as an option, not a bare literal. windowEnd is
+ * unaffected — there was never an upper bound on the net to begin with (see above).
+ *
+ * The REPORTING window itself ([windowStart, windowEnd), unwidened) is not this class's concern: the
+ * consumer (ReturnPresenceVerificationSupport) gates its reverse (missing-in-OMS) pass on the plain
+ * windowStart its own caller already has, so a pre-window event fetched only because of this
+ * lookback is available for forward matching but never independently reported missing-in-OMS.
  */
 class ShopifyReturnRefsSupport {
 
     static final int DEFAULT_CONNECTION_PAGE_SIZE = 50
     static final int MAX_PAGE_COUNT = 20000
+    // Important #3: matches ReturnPresenceVerificationSupport.DEFAULT_GRACE_HOURS in the other repo.
+    // Keep the two in sync if either default ever moves — they encode the same RQ-23 sync-lag
+    // assumption from opposite ends of the pipeline.
+    static final int DEFAULT_LOOKBACK_HOURS = 3
 
     private static final Pattern GID_TAIL = Pattern.compile('gid://shopify/[^/]+/(\\d+)(?:\\?.*)?$')
     private static final Pattern TRAILING_DIGITS = Pattern.compile('(\\d+)$')
@@ -106,11 +130,20 @@ class ShopifyReturnRefsSupport {
                     errors: ["Shopify return-refs windowEnd must be an ISO-8601 date-time."]]
         }
 
+        // Important #3: widen the fetch/emit floor by lookbackHours (default DEFAULT_LOOKBACK_HOURS)
+        // BEFORE windowStart — see the class doc's LOOKBACK section. This floor drives both the
+        // Shopify search net below and the client-side inWindow() filter in toRecord(); windowStart
+        // itself (unwidened) plays no further role in this class — the reporting-window gate lives
+        // downstream, in the OMS-side consumer, keyed off its own caller's plain windowStart.
+        int lookbackHours = normalizeInt(options?.lookbackHours, DEFAULT_LOOKBACK_HOURS)
+        long netFloorMillis = windowStartMillis - (lookbackHours * 3600_000L)
+        String netFloorIso = Instant.ofEpochMilli(netFloorMillis).toString()
+
         // The Shopify-side NET (live-verified 2026-08-13, HTTP 200): a wide, lower-bound-only search
         // — see the class doc for why a plain `-return_status:no_return` trim is wrong. The
         // authoritative window filter is applied client-side below, against each event's own
         // createdAt, never against this net.
-        ((Map) built.variables).put("query", ("updated_at:>='${windowStartIso}' AND " +
+        ((Map) built.variables).put("query", ("updated_at:>='${netFloorIso}' AND " +
                 "((-return_status:no_return) OR (financial_status:refunded) OR (financial_status:partially_refunded))").toString())
 
         String queryDocument = built.queryDocument as String
@@ -159,7 +192,7 @@ class ShopifyReturnRefsSupport {
                 Map node = (Map) ((Map) rawEdge)?.get("node")
                 if (node == null) return
                 records.add(toRecord(node, refundsFirstEffective, returnsFirstEffective,
-                        windowStartMillis, windowEndMillis, warnings))
+                        netFloorMillis, windowEndMillis, warnings))
             }
 
             Map pageInfo = (Map) ordersConnection.get("pageInfo")
@@ -191,38 +224,48 @@ class ShopifyReturnRefsSupport {
     }
 
     /**
-     * Builds one order's record. refundIds/returnIds and the parallel refundsCreatedAt/
-     * returnsCreatedAt maps are already filtered to events whose OWN createdAt falls inside
-     * [windowStartMillis, windowEndMillis) — see the class doc. An order can legitimately appear
-     * here with every set empty: it proves Shopify has nothing IN THIS WINDOW to match, which is
-     * itself evidence for the reverse pass (an OMS return pointing at it really is missing).
+     * Builds one order's record. refundIds/returnIds and the parallel refunds/returns lists are
+     * already filtered to events whose OWN createdAt falls inside [floorMillis, windowEndMillis) —
+     * see the class doc's LOOKBACK section (floorMillis is windowStart minus the lookback, not the
+     * plain reporting windowStart). An order can legitimately appear here with every set empty: it
+     * proves Shopify has nothing IN THIS (widened) WINDOW to match, which is itself evidence for the
+     * reverse pass (an OMS return pointing at it really is missing).
      *
-     * refundsCreatedAt / returnsCreatedAt are REQUIRED downstream, not decorative:
-     * ReturnPresenceVerificationSupport's reverse pass needs to key its grace check on each refund's
-     * OWN createdAt (not the order's), so a refund minted five minutes ago on a three-month-old
-     * order still reads as young rather than permanently "old". Exact record shape (consumed by the
-     * other repo's fix wave — do not rename without a migration plan):
+     * refunds / returns are REQUIRED downstream, not decorative: ReturnPresenceVerificationSupport's
+     * reverse pass needs to key its grace check on each refund's OWN createdAt (not the order's), so
+     * a refund minted five minutes ago on a three-month-old order still reads as young rather than
+     * permanently "old". Important #1 (fix-wave-C re-review): this used to be a
+     * `refundsCreatedAt: {id: isoCreatedAt}` MAP keyed by data-derived refund ids — a plain
+     * (schema-inferring) Spark JSON read (ReconciliationServices.ingestFile) turns a JSON object into
+     * a fixed-field StructType, never a MapType, so that map's field count tracked the union of every
+     * refund/return id across the whole file; CompareDatasetSupport.buildJsonDataDf's
+     * `struct(col("*"))` then carried that width straight into the compare dataset — fine for a small
+     * daily window, thousands of nested fields for a large merchant or a backfill. A list of objects
+     * with stable field names has a fixed, small schema regardless of event count. Exact record shape
+     * (consumed by the other repo's fix wave — do not rename without a migration plan):
      *   { orderId, orderName, createdAt, refundIds: [...], returnIds: [...],
-     *     refundsCreatedAt: {id: isoCreatedAt, ...}, returnsCreatedAt: {id: isoCreatedAt, ...} }
+     *     refunds: [{id, createdAt}, ...], returns: [{id, createdAt}, ...] }
+     * returns[] (parallel to returnIds) is consumed nowhere today — kept for symmetry and future use
+     * now that a list costs nothing extra, same as before this fix.
      */
     private static Map<String, Object> toRecord(Map node, int refundsFirst, int returnsFirst,
-                                                long windowStartMillis, long windowEndMillis,
+                                                long floorMillis, long windowEndMillis,
                                                 List<String> warnings) {
         String orderId = bareId(node.get("legacyResourceId") ?: node.get("id"))
         List<Map<String, String>> refundEvents = collectEvents(node.get("refunds"), orderId, "refunds", refundsFirst, warnings)
         List<Map<String, String>> returnEvents = collectEvents(node.get("returns"), orderId, "returns", returnsFirst, warnings)
 
-        List<Map<String, String>> inWindowRefunds = inWindow(refundEvents, orderId, "refund", windowStartMillis, windowEndMillis, warnings)
-        List<Map<String, String>> inWindowReturns = inWindow(returnEvents, orderId, "return", windowStartMillis, windowEndMillis, warnings)
+        List<Map<String, String>> inWindowRefunds = inWindow(refundEvents, orderId, "refund", floorMillis, windowEndMillis, warnings)
+        List<Map<String, String>> inWindowReturns = inWindow(returnEvents, orderId, "return", floorMillis, windowEndMillis, warnings)
 
         return [
-                orderId         : orderId,
-                orderName       : normalize(node.get("name")),
-                createdAt       : normalize(node.get("createdAt")),
-                refundIds       : inWindowRefunds.collect { it.id },
-                returnIds       : inWindowReturns.collect { it.id },
-                refundsCreatedAt: inWindowRefunds.collectEntries { [(it.id): it.createdAt] },
-                returnsCreatedAt: inWindowReturns.collectEntries { [(it.id): it.createdAt] },
+                orderId  : orderId,
+                orderName: normalize(node.get("name")),
+                createdAt: normalize(node.get("createdAt")),
+                refundIds: inWindowRefunds.collect { it.id },
+                returnIds: inWindowReturns.collect { it.id },
+                refunds  : inWindowRefunds.collect { [id: it.id, createdAt: it.createdAt] },
+                returns  : inWindowReturns.collect { [id: it.id, createdAt: it.createdAt] },
         ]
     }
 
@@ -274,15 +317,16 @@ class ShopifyReturnRefsSupport {
     }
 
     /**
-     * Keeps only events whose OWN createdAt falls inside the half-open [windowStartMillis,
-     * windowEndMillis) window — the client-side filter the window-semantics fix requires; the
-     * Shopify search is only a candidate net (see class doc). An event with a missing or
-     * unparseable createdAt is KEPT rather than silently dropped (with a warning): dropping it would
-     * manufacture exactly the false missing-in-Shopify diff this extractor exists to prevent, while
-     * an over-inclusive candidate is, at worst, resolved as a forward match downstream.
+     * Keeps only events whose OWN createdAt falls inside the half-open [floorMillis, windowEndMillis)
+     * range — the client-side filter the window-semantics fix requires; the Shopify search is only a
+     * candidate net (see class doc). floorMillis is windowStart minus the Important #3 lookback, not
+     * the plain reporting windowStart — see the class doc's LOOKBACK section. An event with a missing
+     * or unparseable createdAt is KEPT rather than silently dropped (with a warning): dropping it
+     * would manufacture exactly the false missing-in-Shopify diff this extractor exists to prevent,
+     * while an over-inclusive candidate is, at worst, resolved as a forward match downstream.
      */
     private static List<Map<String, String>> inWindow(List<Map<String, String>> events, String orderId, String label,
-                                                       long windowStartMillis, long windowEndMillis,
+                                                       long floorMillis, long windowEndMillis,
                                                        List<String> warnings) {
         return events.findAll { Map event ->
             Long createdAtMillis = parseIsoMillis(event.createdAt as String)
@@ -290,7 +334,7 @@ class ShopifyReturnRefsSupport {
                 warnings.add("Order ${orderId} ${label} ${event.id} has no parseable createdAt; keeping it rather than silently excluding it from the window.".toString())
                 return true
             }
-            return createdAtMillis >= windowStartMillis && createdAtMillis < windowEndMillis
+            return createdAtMillis >= floorMillis && createdAtMillis < windowEndMillis
         }
     }
 

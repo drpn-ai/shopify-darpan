@@ -113,6 +113,10 @@ Map extraction = ShopifyReturnRefsSupport.extractReturnRefs([
 ], windowStartText, windowEndText, [
         pageSize            : ValueSupport.normalizeInt(pageSize, 100),
         connectionPageSize  : ValueSupport.normalizeInt(connectionPageSize, ShopifyReturnRefsSupport.DEFAULT_CONNECTION_PAGE_SIZE),
+        // Important #3 (fix-wave-C): widens the fetch/emit floor before windowStart so a Shopify
+        // event created just before it is still available for the OMS-side forward match (OMS lags
+        // Shopify by ~38min, RQ-23). See ShopifyReturnRefsSupport's class doc.
+        lookbackHours       : ValueSupport.normalizeInt(lookbackHours, ShopifyReturnRefsSupport.DEFAULT_LOOKBACK_HOURS),
         connectTimeoutMillis: connectTimeoutMillis,
         readTimeoutMillis   : readTimeoutMillis,
         maxAttempts         : maxAttempts,

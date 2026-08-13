@@ -102,17 +102,20 @@
 
             WINDOW SEMANTICS: this windows on the CREATION of the refund/return event itself, not on
             any order-level date (an order can be arbitrarily older than the event). The Shopify search
-            is a wide, lower-bound-only net (updated_at >= windowStart, no upper bound, trimmed to
-            orders that plausibly carry a refund or a return); [windowStart, windowEnd) is then applied
-            client-side against each event's own createdAt. See ShopifyReturnRefsSupport for the full
-            rationale.
+            is a wide, lower-bound-only net (updated_at >= windowStart - lookbackHours, no upper bound,
+            trimmed to orders that plausibly carry a refund or a return); [windowStart - lookbackHours,
+            windowEnd) is then applied client-side against each event's own createdAt. The lookback
+            (default 3h) exists because OMS lags Shopify by ~38min (RQ-23): an OMS return just inside
+            windowStart can point at a Shopify event created just before it, and that event must still
+            be fetched for the OMS-side forward match to see it. See ShopifyReturnRefsSupport for the
+            full rationale.
 
             Each output record is one order: {orderId, orderName, createdAt, refundIds[], returnIds[],
-            refundsCreatedAt: {id: isoCreatedAt}, returnsCreatedAt: {id: isoCreatedAt}}, all ids bare
-            (GID tail stripped) so they land in the same space as the OMS externalId. refundIds/
-            returnIds and their parallel *CreatedAt maps are already filtered to events inside the
-            window. Orders with nothing in-window are emitted with empty arrays, not omitted — their
-            absence is evidence the reverse pass needs.</description>
+            refunds: [{id, createdAt}], returns: [{id, createdAt}]}, all ids bare (GID tail stripped)
+            so they land in the same space as the OMS externalId. refundIds/returnIds and the parallel
+            refunds/returns lists are already filtered to events inside [windowStart - lookbackHours,
+            windowEnd). Orders with nothing in-window are emitted with empty arrays, not omitted —
+            their absence is evidence the reverse pass needs.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
@@ -143,6 +146,13 @@
                     detection reads the clamped value back off the built query, not this raw parameter,
                     so a warning still fires naming the order rather than silently truncating its id
                     set.</description>
+            </parameter>
+            <parameter name="lookbackHours" type="Integer" default-value="3">
+                <description>Hours the fetch/emit floor is widened BEFORE windowStart, so a Shopify
+                    event created just before windowStart is still available for the OMS-side forward
+                    match (OMS lags Shopify by ~38min, RQ-23). Does not change the reporting window
+                    itself — matches ReturnPresenceVerificationSupport.DEFAULT_GRACE_HOURS in the
+                    darpan component by default.</description>
             </parameter>
             <parameter name="reconciliationRunResultId"/>
             <parameter name="progressStageCode"/>
