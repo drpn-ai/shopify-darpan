@@ -4,9 +4,6 @@ import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
-import shopify.graphql.ShopifyBulkOperationClient
-import shopify.graphql.ShopifyGraphqlQueryBuilder
-import shopify.graphql.ShopifySourceCatalog
 import shopify.reconciliation.automation.ShopifyReturnRefsSupport
 
 import java.sql.Timestamp
@@ -63,26 +60,6 @@ Closure<String> formatWindow = { Timestamp timestamp -> timestamp?.toInstant()?.
 Closure<String> safeFileName = { Object rawName, String fallback ->
     String safeName = DataManagerSupport.safeToken(rawName, fallback)
     return safeName.toLowerCase(Locale.ROOT).endsWith(".json") ? safeName : "${safeName}.json"
-}
-Closure<String> safeJsonlFileName = { Object rawName, String fallback ->
-    String safeName = DataManagerSupport.safeToken(rawName, fallback)
-    if (safeName.toLowerCase(Locale.ROOT).endsWith(".jsonl")) return safeName
-    return safeName.replaceFirst(/(?i)\.json$/, "") + ".jsonl"
-}
-Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object> record ->
-    Map<String, Object> normalizedRecord = new LinkedHashMap<>(record ?: [:])
-    String gid = normalize(normalizedRecord.id)
-    String legacyId = normalize(normalizedRecord.legacyResourceId)
-    if (!legacyId && gid) {
-        def matcher = gid =~ /(\d+)$/
-        if (matcher.find()) legacyId = matcher.group(1)
-    }
-    if (gid) normalizedRecord.shopifyGid = gid
-    if (legacyId) {
-        normalizedRecord.legacyResourceId = legacyId
-        normalizedRecord.id = legacyId
-    }
-    return normalizedRecord
 }
 String configIdValue = normalize(shopifyAuthConfigId)
 String companyUserGroupIdValue = normalize(companyUserGroupId)
@@ -157,16 +134,21 @@ if (outputErrors) {
 // Same {records, metadata} envelope and same atomic .partial move as every other extractor, so
 // the compare stage reads this file exactly like an orders extract.
 String timestamp = DataManagerSupport.formatRunTimestamp(ec)
-String outputBaseLocation = outputLocation ?: DataManagerSupport.resolveReconciliationRunLocation(
-        ec, automationExecutionId ?: shopifyAuthConfigId, timestamp)
+String outputBaseLocation = normalize(outputLocation) ?: DataManagerSupport.resolveReconciliationRunLocation(
+        ec, automationExecutionId ?: automationId ?: configIdValue, timestamp)
 File outputDirectory = DataManagerSupport.resolveDirectoryFile(ec, outputBaseLocation, true)
 File workFile = outputDirectory != null
         ? File.createTempFile("shopify-return-refs-", ".partial", outputDirectory)
         : File.createTempFile("shopify-return-refs-", ".partial")
 
 try {
-    workFile.text = groovy.json.JsonOutput.toJson([records: records, metadata: requestMetadata])
-    String outputFileName = fileName ?: "shopify-return-refs-${sourceWindowStart.time}-${sourceWindowEnd.time}.json".toString()
+    workFile.text = JsonOutput.toJson([records: records, metadata: requestMetadata])
+    // safeFileName both sanitizes an operator-supplied fileName (childLocation is plain string
+    // concatenation and moveIntoLocation REPLACE_EXISTINGs with no traversal guard of its own) and
+    // restores the .json suffix fileTypeEnumId="DftJson" asserts.
+    String outputFileName = safeFileName(
+            fileName ?: "shopify-return-refs-${sourceWindowStart.time}-${sourceWindowEnd.time}.json",
+            "shopify-return-refs.json")
     fileName = outputFileName
     fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
     DataManagerSupport.moveIntoLocation(ec, workFile, fileLocation as String)

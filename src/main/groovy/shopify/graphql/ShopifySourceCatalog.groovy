@@ -136,7 +136,9 @@ class ShopifySourceCatalog {
             "name",
             "createdAt",
             "refunds.id",
+            "refunds.createdAt",
             "returns.id",
+            "returns.createdAt",
         ],
         // Bulk is unsupported for this source (see class doc above). This stays an empty list
         // rather than an absent key: copySource() below unconditionally does
