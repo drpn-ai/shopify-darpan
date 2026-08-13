@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNotNull
 import static org.junit.jupiter.api.Assertions.assertThrows
 import static org.junit.jupiter.api.Assertions.assertTrue
 
@@ -174,5 +175,53 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         }
 
         assertTrue(error.message.contains("Unsupported Shopify filter 'customWhere'"))
+    }
+
+    @Test
+    void returnRefsSourceIsRegisteredWithRefundAndReturnIdFields() {
+        Map<String, Object> source = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS)
+
+        assertNotNull(source, "returns/refunds source must be registered")
+        assertEquals("orders", source.queryRoot)
+        List<String> paths = ((List) source.fields).collect { ((Map) it).fieldPath as String }
+        assertTrue(paths.contains("refunds.id"), "refund ids are the match spine: ${paths}")
+        assertTrue(paths.contains("returns.id"), "return ids are the forward backup: ${paths}")
+    }
+
+    @Test
+    void returnRefsSourceIsRejectedByTheBulkBuilder() {
+        // refunds/returns are connections, and bulk JSONL emits connection children as separate
+        // __parentId lines that nothing in this codebase re-nests. The cursor path is mandatory.
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, {
+            ShopifyGraphqlQueryBuilder.buildBulkQuery([
+                    sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+            ])
+        })
+        assertTrue(thrown.message.contains("connection field"),
+                "expected the connection-field rejection, got: ${thrown.message}")
+    }
+
+    @Test
+    void returnRefsCursorQuerySelectsBothIdSetsUnderTheOrder() {
+        Map<String, Object> built = ShopifyGraphqlQueryBuilder.buildQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+                operationName     : "DarpanReturnRefs",
+                filters           : [createdAtFrom: "2026-05-01T00:00:00Z", createdAtTo: "2026-05-02T00:00:00Z"],
+        ])
+
+        String document = built.queryDocument as String
+        assertTrue(document.contains("refunds"), "query must select refunds: ${document}")
+        assertTrue(document.contains("returns"), "query must select returns: ${document}")
+        assertTrue(document.contains("legacyResourceId"), "order identity must be selectable bare")
+    }
+
+    @Test
+    void orderSourceBulkContractIsUnchanged() {
+        // Ratchet: DAR-BE-018 must not perturb the declared bulk field set that existing
+        // reconciliation schemas and $.records[*] rules depend on.
+        Map<String, Object> orderSource = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDERS)
+        List<String> bulkPaths = (List<String>) orderSource.defaultBulkSelectedFieldPaths
+        assertFalse(bulkPaths.any { it.startsWith("refunds") || it.startsWith("returns") },
+                "returns/refunds must not leak into the orders bulk contract: ${bulkPaths}")
     }
 }

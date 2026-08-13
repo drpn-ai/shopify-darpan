@@ -4,6 +4,7 @@ import static darpan.common.ValueSupport.normalize
 
 class ShopifySourceCatalog {
     static final String SHOPIFY_ORDERS = "SHOPIFY_ORDERS"
+    static final String SHOPIFY_ORDER_RETURN_REFS = "SHOPIFY_ORDER_RETURN_REFS"
     static final List<String> SUPPORTED_API_VERSIONS = [
         "2025-07",
         "2025-10",
@@ -100,8 +101,85 @@ class ShopifySourceCatalog {
         ],
     ].asImmutable()
 
+    /**
+     * Per-order refund ids and return ids for returns reconciliation (DAR-BE-018, design §7).
+     *
+     * A SEPARATE source rather than extra fields on ORDER_SOURCE, because ORDER_SOURCE's
+     * defaultBulkSelectedFieldPaths is a declared downstream contract for reconciliation schemas and
+     * $.records[*] rules; widening it would need a migration plan. Nothing here touches that set.
+     *
+     * BULK IS NOT AVAILABLE for this source. Both refunds and returns are connections, and
+     * ShopifyGraphqlQueryBuilder.buildBulkQuery rejects connection-bearing fields outright because
+     * bulk JSONL emits their children as separate __parentId lines that no parser here re-nests.
+     * Extraction uses the cursor path (buildQuery + ShopifyGraphqlTransport); see
+     * ShopifyReturnRefsSupport.
+     *
+     * Shape live-probed against gorjana-sandbox.myshopify.com on Admin GraphQL API 2026-01
+     * (2026-08-13, DAR-BE-018 Task 1): Order.refunds is NON_NULL -> LIST (plain list, `first` arg
+     * only); Order.returns is NON_NULL -> ReturnConnection. See the field-level comments below.
+     */
+    private static final Map<String, Object> ORDER_RETURN_REFS_SOURCE = [
+        sourceDefinitionId       : SHOPIFY_ORDER_RETURN_REFS,
+        label                    : "Shopify Order Return References",
+        description              : "Per-order Shopify refund ids and return ids for returns reconciliation.",
+        requiredPermissionFlag   : "canReadOrders",
+        queryRoot                : "orders",
+        graphqlType              : "Order",
+        defaultSortKey           : "CREATED_AT",
+        paginationStrategy       : "CURSOR",
+        defaultPageSize          : 100,
+        maxPageSize              : 250,
+        supportedApiVersions     : SUPPORTED_API_VERSIONS,
+        defaultSelectedFieldPaths: [
+            "id",
+            "legacyResourceId",
+            "name",
+            "createdAt",
+            "refunds.id",
+            "returns.id",
+        ],
+        // Bulk is unsupported for this source (see class doc above). This stays an empty list
+        // rather than an absent key: copySource() below unconditionally does
+        // `new ArrayList(source.defaultBulkSelectedFieldPaths as List)` for every registered
+        // source, and `new ArrayList(null)` throws NullPointerException. An empty list is Groovy-falsy,
+        // so buildBulkQuery's `source.defaultBulkSelectedFieldPaths ?: source.defaultSelectedFieldPaths`
+        // still falls through to defaultSelectedFieldPaths, whose refunds.id/returns.id entries carry
+        // connectionRoot and trigger the bulk builder's rejection — same effective behavior, no NPE.
+        defaultBulkSelectedFieldPaths: [],
+        supportedFilters         : [
+            createdAtFrom : [queryName: "created_at", comparator: ">=", type: "datetime", sortKey: "CREATED_AT"],
+            createdAtTo   : [queryName: "created_at", comparator: "<", type: "datetime", sortKey: "CREATED_AT"],
+            updatedAtFrom : [queryName: "updated_at", comparator: ">=", type: "datetime", sortKey: "UPDATED_AT"],
+            updatedAtTo   : [queryName: "updated_at", comparator: "<", type: "datetime", sortKey: "UPDATED_AT"],
+        ],
+        fields                   : [
+            [fieldPath: "id", label: "Order ID", type: "ID", selectionPath: "id", required: true],
+            [fieldPath: "legacyResourceId", label: "Legacy Order ID", type: "UnsignedInt64", selectionPath: "legacyResourceId", required: true],
+            [fieldPath: "name", label: "Order Name", type: "String", selectionPath: "name"],
+            [fieldPath: "createdAt", label: "Created At", type: "DateTime", selectionPath: "createdAt"],
+            // LIVE-PROBED 2026-08-13 on API 2026-01: Order.refunds is NON_NULL -> LIST, taking only
+            // a `first` arg. It is a PLAIN LIST, not a connection — there is no edges/node (and no
+            // nodes) wrapper, so the selectionPath must NOT contain them. Order.returns below IS a
+            // ReturnConnection. The two are asymmetric; do not "tidy" them into the same shape.
+            // connectionRoot is still set on refunds so buildBulkQuery keeps rejecting this source.
+            [fieldPath: "refunds.id", label: "Refund ID", type: "ID", selectionPath: "refunds.id",
+             connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            [fieldPath: "refunds.createdAt", label: "Refund Created At", type: "DateTime", selectionPath: "refunds.createdAt",
+             connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            // returns IS a connection (ReturnConnection). Live-probed shape uses nodes{}, matching
+            // ShopifyExchangeStateLookupSupport's existing `returns(first: 10) { nodes { ... } }`.
+            [fieldPath: "returns.id", label: "Return ID", type: "ID", selectionPath: "returns.nodes.id",
+             connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            [fieldPath: "returns.status", label: "Return Status", type: "String", selectionPath: "returns.nodes.status",
+             connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            [fieldPath: "returns.createdAt", label: "Return Created At", type: "DateTime", selectionPath: "returns.nodes.createdAt",
+             connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+        ],
+    ].asImmutable()
+
     private static final Map<String, Map<String, Object>> SOURCES_BY_ID = [
-        (SHOPIFY_ORDERS): ORDER_SOURCE,
+        (SHOPIFY_ORDERS)            : ORDER_SOURCE,
+        (SHOPIFY_ORDER_RETURN_REFS): ORDER_RETURN_REFS_SOURCE,
     ].asImmutable()
 
     static List<Map<String, Object>> listSources(Object apiVersion = null) {

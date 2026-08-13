@@ -1,0 +1,48 @@
+{
+  "_captured": "2026-08-13 gorjana-sandbox.myshopify.com, Admin GraphQL 2026-01, live probe for DAR-BE-018 Task 1",
+  "_shape": {
+    "refunds": "NON_NULL->LIST, arg: first. Plain list \u2014 NO nodes/edges wrapper.",
+    "returns": "NON_NULL->ReturnConnection, args: first/after/last/before/reverse/query. Use nodes{}."
+  },
+  "data": {
+    "orders": {
+      "edges": [
+        {
+          "node": {
+            "id": "gid://shopify/Order/6942747197484",
+            "legacyResourceId": "6942747197484",
+            "name": "#GORTEST27950",
+            "createdAt": "2026-08-12T22:48:48Z",
+            "refunds": [],
+            "returns": {
+              "nodes": [
+                {
+                  "id": "gid://shopify/Return/44800213036",
+                  "status": "CLOSED",
+                  "createdAt": "2026-08-12T22:50:47Z"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "node": {
+            "id": "gid://shopify/Order/6942591025196",
+            "legacyResourceId": "6942591025196",
+            "name": "#GORTEST27948",
+            "createdAt": "2026-08-12T21:27:32Z",
+            "refunds": [
+              {
+                "id": "gid://shopify/Refund/1005422084140",
+                "createdAt": "2026-08-12T21:29:15Z"
+              }
+            ],
+            "returns": {
+              "nodes": []
+            }
+          }
+        }
+      ]
+    }
+  }
+}
