@@ -40,9 +40,13 @@ class ShopifyGraphqlFacadeSupport {
 
         def authConfig = null
         if (!ec.message.hasError()) {
-            // canReadOrders is enforced here too: this service is the registered orders endpoint
-            // (SHOPIFY_REMOTE sendServiceName) and must match the bulk extraction path's contract.
-            authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [:])
+            // The SHOPIFY endpoint is enforced here too: this service is the registered
+            // remoteSendServiceName for the SHOPIFY connector row (bulk orders extraction) and must
+            // match that path's contract. Regression note (Task 16): this call used to pass a bare
+            // [:], which enforced nothing once requireUsableAuthConfig's canReadOrders default was
+            // removed — see ShopifyEndpointGateTests.executeShopifyGraphqlRefusesWhenShopifyEndpointDisabled.
+            authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId,
+                    [requiredEndpointSystemEnumId: "SHOPIFY"])
         }
 
         if (!ec.message.hasError()) {

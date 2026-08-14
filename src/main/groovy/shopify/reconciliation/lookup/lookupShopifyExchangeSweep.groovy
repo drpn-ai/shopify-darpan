@@ -16,8 +16,9 @@ if (!configIdValue) {
 }
 
 def authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configIdValue, [
-        disableAuthz      : true,
-        companyUserGroupId: companyUserGroupIdValue,
+        disableAuthz                : true,
+        companyUserGroupId          : companyUserGroupIdValue,
+        requiredEndpointSystemEnumId: "SHOPIFY",
 ])
 if (ec.message.hasError()) {
     errors = (ec.message.getErrors() ?: []) as List<String>

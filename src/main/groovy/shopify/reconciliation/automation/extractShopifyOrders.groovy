@@ -92,8 +92,9 @@ if (!configIdValue) outputErrors.add("Shopify auth config ID is required.")
 def authConfig = null
 if (!outputErrors) {
     authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configIdValue, [
-            disableAuthz      : true,
-            companyUserGroupId: companyUserGroupIdValue,
+            disableAuthz                : true,
+            companyUserGroupId          : companyUserGroupIdValue,
+            requiredEndpointSystemEnumId: "SHOPIFY",
     ])
     if (ec.message.hasError()) outputErrors.addAll((ec.message.getErrors() ?: []) as List<String>)
 }
