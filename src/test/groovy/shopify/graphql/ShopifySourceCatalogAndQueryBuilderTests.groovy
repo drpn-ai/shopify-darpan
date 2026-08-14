@@ -14,7 +14,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         Map<String, Object> source = ShopifySourceCatalog.requireSource("SHOPIFY_ORDERS", "2026-04")
 
         assertEquals("SHOPIFY_ORDERS", source.sourceDefinitionId)
-        assertEquals("canReadOrders", source.requiredPermissionFlag)
+        assertEquals("SHOPIFY", source.requiredEndpointSystemEnumId)
         assertEquals("orders", source.queryRoot)
         assertEquals("UPDATED_AT", source.defaultSortKey)
         assertEquals("CURSOR", source.paginationStrategy)

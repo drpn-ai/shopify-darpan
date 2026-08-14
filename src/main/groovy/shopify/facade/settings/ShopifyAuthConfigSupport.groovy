@@ -7,6 +7,7 @@ import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.SharedConfigGrantSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.common.TenantScopedFinder
+import darpan.reconciliation.automation.SourceEndpointAccessSupport
 
 class ShopifyAuthConfigSupport {
     static final String ENTITY_NAME = "darpan.shopify.ShopifyAuthConfig"
@@ -116,8 +117,11 @@ class ShopifyAuthConfigSupport {
      *
      * opts.companyUserGroupId — trusted automation owner tenant; checked instead of the user's
      *     active tenant (automation executions run without a user session tenant).
-     * opts.requiredPermissionFlag — indicator field that must not be 'N' (default canReadOrders,
-     *     matching ShopifySourceCatalog's requiredPermissionFlag for SHOPIFY_ORDERS).
+     * opts.requiredEndpointSystemEnumId — endpoint the caller is about to use, e.g. SHOPIFY_RETURN_REFS
+     *     (matching ShopifySourceCatalog's requiredEndpointSystemEnumId for that source). Checked via
+     *     SourceEndpointAccessSupport.isEndpointEnabled. Absent/blank means no endpoint check — the
+     *     compiler cannot catch a caller naming the WRONG endpoint, which is why each seam has its own
+     *     gate test.
      * opts.disableAuthz — accepted for source-compatibility with existing automation callers, but
      *     has no effect: the read now always goes through TenantScopedFinder.findGlobalUnscoped
      *     (DAR-BE-005 B3), which disables authz unconditionally. A caller may still pass it.
@@ -167,11 +171,13 @@ class ShopifyAuthConfigSupport {
             if ((readValue(config, "isActive") ?: "Y").toString().equalsIgnoreCase("N")) {
                 ec.message.addError("Shopify auth config ${configId} is inactive.")
             }
-            String permissionFlag = opts?.containsKey("requiredPermissionFlag") ?
-                    normalize(opts.requiredPermissionFlag) : "canReadOrders"
-            if (permissionFlag && (readValue(config, permissionFlag) ?: "N").toString().equalsIgnoreCase("N")) {
-                String capability = permissionFlag == "canReadOrders" ? "order reads" : permissionFlag
-                ec.message.addError("Shopify auth config ${configId} is not enabled for ${capability}.")
+            // Per-endpoint enablement replaces the single canReadOrders flag. Both Shopify sources
+            // used to name canReadOrders, so enabling orders silently permitted return-refs; they are
+            // now independently gated.
+            String requiredEndpoint = normalize(opts?.requiredEndpointSystemEnumId)
+            if (requiredEndpoint && !SourceEndpointAccessSupport.isEndpointEnabled(ec,
+                    SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, configId, requiredEndpoint)) {
+                ec.message.addError("Shopify auth config ${configId} is not enabled for ${requiredEndpoint}.")
             }
         }
         return config
