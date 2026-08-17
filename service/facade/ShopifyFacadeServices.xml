@@ -252,6 +252,14 @@
                 <description>Stage to run next, or blank when the probe is finished — either it
                     completed or a failure made the remaining stages meaningless.</description>
             </parameter>
+            <parameter name="endpoints" type="List">
+                <description>Per-endpoint enablement for this config (SourceEndpointAccessSupport
+                    .listEndpointsForConfig), not a single canReadOrders flag — a token issued before
+                    an endpoint existed can be enabled for it without carrying the scope it needs.</description>
+                <parameter name="systemEnumId"/>
+                <parameter name="endpointLabel"/>
+                <parameter name="isEnabled" type="Boolean"/>
+            </parameter>
         </out-parameters>
         <actions>
             <script>context.putAll(shopify.facade.settings.ShopifyConnectionProbe.probeConnection(ec, shopifyAuthConfigId, [:], stage))</script>

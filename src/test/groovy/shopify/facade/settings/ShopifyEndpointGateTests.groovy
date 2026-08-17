@@ -108,6 +108,73 @@ class ShopifyEndpointGateTests {
         assertFalse(endpoints.find { it.systemEnumId == "SHOPIFY_RETURN_REFS" }.isEnabled as boolean)
     }
 
+    // Fix round 1: a Groovy-level unit test on ShopifyConnectionProbe cannot see the service-dispatch
+    // out-parameter drop — probeConnection()'s return value already carries `endpoints` regardless of
+    // whether the Moqui service declares it as an out-parameter (Moqui's service engine only copies
+    // DECLARED out-parameters from ec.context into the result map it hands back to a service caller).
+    // This test goes through ec.service.sync().name(...).call() — real service dispatch — so it is the
+    // one that would have failed before probe#ShopifyAuthConnection declared `endpoints` in its
+    // out-parameters. Naming convention ("facade.ShopifyFacadeServices.probe#ShopifyAuthConnection")
+    // matches every other ec.service.sync() call in this component's tests (see
+    // ShopifyAuthConfigFacadeSmokeTests for "facade.ShopifyFacadeServices.list#ShopifyAuthConfigs" etc).
+    @Test
+    void probeServiceDispatchIncludesEndpointsNotJustTheSupportMethod() {
+        Map<String, Object> result = ec.service.sync()
+                .name("facade.ShopifyFacadeServices.probe#ShopifyAuthConnection")
+                .parameters([shopifyAuthConfigId: CONFIG_ID])
+                .call() as Map<String, Object>
+
+        List<Map<String, Object>> endpoints = result.endpoints as List<Map<String, Object>>
+        assertNotNull(endpoints,
+                "probe#ShopifyAuthConnection's out-parameters must declare endpoints, or the Moqui " +
+                "service engine drops it even though ShopifyConnectionProbe.probeConnection computed it")
+        assertTrue(endpoints.find { it.systemEnumId == "SHOPIFY" }.isEnabled as boolean)
+        assertFalse(endpoints.find { it.systemEnumId == "SHOPIFY_RETURN_REFS" }.isEnabled as boolean)
+    }
+
+    // Fix round 1: probe#ShopifyAuthConnection's out-parameters were only HALF the drop. The real
+    // remote-facing gateway an operator/UI actually calls is
+    // facade.SettingsFacadeServices.test#SourceConnection (darpan) — its Groovy support method,
+    // SourceConnectionDiagnosticsSupport.testSourceConnection, calls the connector's probe service via
+    // ec.service.sync() and then explicitly REBUILDS its own return map from that result. Before this
+    // fix round it never read `endpoints` off the inner result at all, so `endpoints` would have been
+    // dropped a second time here even with the previous test passing. This test goes through the actual
+    // production call path (test#SourceConnection, not probe#ShopifyAuthConnection directly) against
+    // the real SHOPIFY connector row from SourceSystemConnectorSeedData.xml (loaded in setup()).
+    //
+    // A separate KREWE-tenant config is used (rather than CONFIG_ID/GATE_TENANT above) because
+    // test#SourceConnection enforces TenantAccessSupport.requireActiveTenantWriteAccess, and
+    // ReconciliationSmokeTestSupport.seedCompanyScope is the canned fixture that already sets up a
+    // real logged-in user with write access to the "KREWE" tenant (same helper
+    // SourceConnectionDiagnosticsFacadeSmokeTests and ShopifyAuthConfigFacadeSmokeTests use).
+    @Test
+    void endpointsReachesTheRealGatewayServiceNotJustTheConnectorProbe() {
+        String kreweConfigId = "gate-shopify-krewe"
+        ReconciliationSmokeTestSupport.seedCompanyScope(ec)
+        ec.entity.makeValue("darpan.shopify.ShopifyAuthConfig")
+                .setAll([shopifyAuthConfigId: kreweConfigId, description: "Gate (KREWE gateway check)",
+                         companyUserGroupId : "KREWE",
+                         shopApiUrl         : "https://gate-krewe.myshopify.com/admin/api",
+                         apiVersion         : "2026-01", isActive: "Y", canReadOrders: "Y"]).createOrUpdate()
+        ec.entity.makeValue(SourceEndpointAccessSupport.ENTITY_NAME)
+                .setAll([configTypeEnumId  : SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH,
+                         configId          : kreweConfigId, systemEnumId: "SHOPIFY_RETURN_REFS",
+                         companyUserGroupId: "KREWE", isEnabled: "N"]).createOrUpdate()
+
+        Map<String, Object> result = ec.service.sync()
+                .name("facade.SettingsFacadeServices.test#SourceConnection")
+                .parameters([systemEnumId: "SHOPIFY", configId: kreweConfigId])
+                .call() as Map<String, Object>
+
+        List<Map<String, Object>> endpoints = result.endpoints as List<Map<String, Object>>
+        assertNotNull(endpoints,
+                "test#SourceConnection must forward endpoints from the connector probe result — " +
+                "SourceConnectionDiagnosticsSupport.testSourceConnection must not silently drop it " +
+                "while rebuilding its own return map, and the service's out-parameters must declare it")
+        assertTrue(endpoints.find { it.systemEnumId == "SHOPIFY" }.isEnabled as boolean)
+        assertFalse(endpoints.find { it.systemEnumId == "SHOPIFY_RETURN_REFS" }.isEnabled as boolean)
+    }
+
     @Test
     void catalogEntriesDeclareDistinctEndpoints() {
         // The latent bug: both sources used to name the same flag, so enabling orders permitted
