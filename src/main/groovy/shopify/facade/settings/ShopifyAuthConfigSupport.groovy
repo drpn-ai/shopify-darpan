@@ -353,6 +353,13 @@ class ShopifyAuthConfigSupport {
         }
 
         if (!ec.message.hasError()) {
+            // SourceConfigEndpointAccess.configId is polymorphic, so nothing cascades. Delete explicitly, or a
+            // later config reusing this id silently inherits this one's disabled endpoints.
+            ec.entity.find(SourceEndpointAccessSupport.ENTITY_NAME)
+                    .condition("configTypeEnumId", SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH)
+                    .condition("configId", configId)
+                    .deleteAll()
+
             ec.service.sync()
                     .name("delete#${ENTITY_NAME}")
                     .parameters([shopifyAuthConfigId: configId])
