@@ -332,6 +332,15 @@ class ShopifyAuthConfigSupport {
                 // standing on (not owner, not a peer) must be indistinguishable to the caller —
                 // the pre-Task-7 behavior threw a distinguishing "not available in your active
                 // tenant" message for the foreign-owned case here.
+                //
+                // Task 13 invariant: this "not found" path (config == null included) sets
+                // ec.message.hasError(), which gates the SourceConfigEndpointAccess cleanup below
+                // the same as it gates the entity delete — so a config already gone (deleted
+                // out-of-band, bypassing this method) never has its access rows swept here. That is
+                // safe today only because SourceConfigEndpointAccess is new in this plan (no
+                // pre-existing orphans can exist) and both real delete paths route through this
+                // method. An out-of-band delete of the config row (e.g. direct DB deletion) would
+                // still orphan its access rows.
                 ec.message.addError("Shopify auth config '${configId}' was not found.")
             } else if (SharedConfigGrantSupport.hasActiveGrants(ec,
                     SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, configId)) {
