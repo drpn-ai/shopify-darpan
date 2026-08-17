@@ -18,10 +18,13 @@ class ShopifyConnectionProbeTests {
 
     private static Map<String, Object> config(Map overrides = [:]) {
         return ([
-                shopApiUrl   : "https://example.myshopify.com/admin/api",
-                apiVersion   : "2026-04",
-                accessToken  : "shpat_secret_token",
-                canReadOrders: "Y",
+                shopApiUrl : "https://example.myshopify.com/admin/api",
+                apiVersion : "2026-04",
+                accessToken: "shpat_secret_token",
+                // Per-endpoint state, not the retired canReadOrders boolean. SHOPIFY enabled by
+                // default matches every existing scenario below; tests that care about a different
+                // shape (nothing enabled, or SHOPIFY_RETURN_REFS also enabled) override this key.
+                endpoints  : [[systemEnumId: "SHOPIFY", endpointLabel: "Orders", isEnabled: true]],
         ] + overrides) as Map<String, Object>
     }
 
@@ -143,16 +146,78 @@ class ShopifyConnectionProbeTests {
     }
 
     @Test
-    void configNotEnabledForOrdersSkipsRatherThanFails() {
+    void configWithNoEndpointsEnabledSkipsRatherThanFails() {
+        // Endpoint-level replacement for the retired "canReadOrders: N" case: no catalog endpoint on
+        // this config is enabled, so the connect stage must skip rather than run the orders query.
         List<String> queries = []
-        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config([canReadOrders: "N"]),
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(
+                config([endpoints: [[systemEnumId: "SHOPIFY", endpointLabel: "Orders", isEnabled: false]]]),
                 byQuery { String query ->
                     queries.add(query)
                     return ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
                 })
 
         assertStatus(result, "ordersRead", "SKIP")
-        assertEquals(1, queries.size(), "a config not enabled for orders must not issue the orders query")
+        assertEquals(1, queries.size(), "a config with no endpoints enabled must not issue the orders query")
+    }
+
+    @Test
+    void probeReportsPerEndpointStateAlongsideChecks() {
+        // The core contract change: callers read enablement from `endpoints`, not a canReadOrders flag.
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config([endpoints: [
+                [systemEnumId: "SHOPIFY", endpointLabel: "Orders", isEnabled: true],
+                [systemEnumId: "SHOPIFY_RETURN_REFS", endpointLabel: "Return references", isEnabled: false],
+        ]]), byQuery { String query ->
+            return query.contains("orders(")
+                    ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
+                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+        })
+
+        List<Map<String, Object>> endpoints = result.endpoints as List<Map<String, Object>>
+        assertNotNull(endpoints, "The probe must report per-endpoint state, not one canReadOrders boolean")
+        assertTrue(endpoints.find { it.systemEnumId == "SHOPIFY" }.isEnabled as boolean)
+        assertFalse(endpoints.find { it.systemEnumId == "SHOPIFY_RETURN_REFS" }.isEnabled as boolean)
+    }
+
+    @Test
+    void missingScopeNamesReadReturnsWhenReturnRefsIsAlsoEnabled() {
+        // The risk this task closes: the migration can enable SHOPIFY_RETURN_REFS on a token that
+        // never carried read_returns. The probe can only exercise the orders scope directly, but once
+        // it knows return-refs is also enabled it must name that as a likely second cause rather than
+        // reporting only the scope this one query happened to exercise.
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(
+                config([endpoints: [
+                        [systemEnumId: "SHOPIFY", endpointLabel: "Orders", isEnabled: true],
+                        [systemEnumId: "SHOPIFY_RETURN_REFS", endpointLabel: "Return references", isEnabled: true],
+                ]]),
+                byQuery { String query ->
+                    return query.contains("orders(")
+                            ? graphqlError("Access denied for orders field. Required access: `read_orders` access scope.",
+                                    "ACCESS_DENIED")
+                            : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+                })
+
+        assertStatus(result, "ordersRead", "FAIL")
+        String detail = checkFor(result, "ordersRead").detail as String
+        assertTrue(detail.contains("read_orders"), detail)
+        assertTrue(detail.contains("read_returns"), detail)
+        assertTrue(detail.contains("SHOPIFY_RETURN_REFS"), detail)
+    }
+
+    @Test
+    void missingScopeStaysOrdersOnlyWhenReturnRefsIsNotEnabled() {
+        // Same ACCESS_DENIED, but SHOPIFY_RETURN_REFS is not enabled on this config — the detail must
+        // not speculate about a scope this config was never going to need.
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery { String query ->
+            return query.contains("orders(")
+                    ? graphqlError("Access denied for orders field. Required access: `read_orders` access scope.",
+                            "ACCESS_DENIED")
+                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+        })
+
+        String detail = checkFor(result, "ordersRead").detail as String
+        assertTrue(detail.contains("read_orders"), detail)
+        assertFalse(detail.contains("read_returns"), detail)
     }
 
     @Test

@@ -18,6 +18,7 @@ import java.sql.Timestamp
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNotEquals
+import static org.junit.jupiter.api.Assertions.assertNotNull
 import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
@@ -89,6 +90,22 @@ class ShopifyEndpointGateTests {
     void disabledReturnRefsIsRefusedEvenThoughOrdersIsEnabled() {
         assertTrue(rejects("SHOPIFY_RETURN_REFS"))
         assertFalse(rejects("SHOPIFY"))
+    }
+
+    // Task 14: the connection probe must report per-endpoint state (from
+    // SourceEndpointAccessSupport.listEndpointsForConfig) rather than the retired canReadOrders
+    // boolean. CONFIG_ID here carries no accessToken, so the credential stage fails before any
+    // network call — but the endpoints list is resolved in probeConnection() before the credential
+    // check runs, so it is present on the result regardless of credential state. ShopifyConnectionProbe
+    // is in this same package (shopify.facade.settings), so no import is needed to reach it.
+    @Test
+    void probeNamesTheEnabledEndpointsRatherThanASingleFlag() {
+        Map<String, Object> result = ShopifyConnectionProbe.probeConnection(ec, CONFIG_ID)
+
+        List<Map<String, Object>> endpoints = result.endpoints as List<Map<String, Object>>
+        assertNotNull(endpoints, "The probe must report per-endpoint state, not one canReadOrders boolean")
+        assertTrue(endpoints.find { it.systemEnumId == "SHOPIFY" }.isEnabled as boolean)
+        assertFalse(endpoints.find { it.systemEnumId == "SHOPIFY_RETURN_REFS" }.isEnabled as boolean)
     }
 
     @Test

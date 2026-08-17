@@ -1,6 +1,8 @@
 package shopify.facade.settings
 
+import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.settings.SourceConnectionDiagnosticsSupport as Checks
+import darpan.reconciliation.automation.SourceEndpointAccessSupport
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import shopify.graphql.ShopifyGraphqlTransport
@@ -13,8 +15,8 @@ import static darpan.common.ValueSupport.normalize
  * Calls ShopifyGraphqlTransport directly rather than the execute#ShopifyGraphql service. The
  * security-relevant protections live in the transport (the .myshopify.com outbound allow-list and
  * endpoint construction), so they are inherited either way; the service additionally writes to
- * ec.message and enforces canReadOrders before any call, both of which would defeat a layered
- * diagnostic — a scope problem must be reportable as one row while the rest still pass.
+ * ec.message and enforces the endpoint-enablement gate before any call, both of which would defeat a
+ * layered diagnostic — a scope problem must be reportable as one row while the rest still pass.
  *
  * Nothing here writes to ec.message: a rejected credential is a diagnostic RESULT, not a service
  * error. Every outcome comes back as a check row.
@@ -52,9 +54,10 @@ class ShopifyConnectionProbe {
 
         def config = ShopifyAuthConfigSupport.findAuthConfig(ec, configId)
         if (config == null) {
-            return [checks  : [Checks.check("credential", "Configuration found", Checks.STATUS_FAIL,
+            return [checks   : [Checks.check("credential", "Configuration found", Checks.STATUS_FAIL,
                     "The configuration could not be loaded.")],
-                    nextStage: null]
+                    nextStage: null,
+                    endpoints: []]
         }
 
         String accessToken = null
@@ -70,7 +73,13 @@ class ShopifyConnectionProbe {
                 shopApiUrl     : normalize(config.shopApiUrl),
                 apiVersion     : normalize(config.apiVersion),
                 accessToken    : accessToken,
-                canReadOrders  : config.canReadOrders,
+                // Per-endpoint state, not a single legacy order-read flag: the migration enabled every
+                // endpoint on a config that could previously read orders, so a token issued before
+                // returns existed can be "enabled" for SHOPIFY_RETURN_REFS without carrying the
+                // read_returns scope. Reporting the full list (rather than one boolean) is what lets
+                // the orders stage below, and the scope-naming in ordersStage, reason about that.
+                endpoints      : SourceEndpointAccessSupport.listEndpointsForConfig(ec,
+                        SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, configId),
                 credentialError: credentialError,
         ]
         String wanted = normalize(stage)
@@ -89,7 +98,7 @@ class ShopifyConnectionProbe {
             checks.addAll((List<Map<String, Object>>) result.checks)
             stage = normalize(result.nextStage)
         }
-        return [checks: checks, nextStage: null]
+        return [checks: checks, nextStage: null, endpoints: endpointsOf(config)]
     }
 
     /**
@@ -97,13 +106,19 @@ class ShopifyConnectionProbe {
      * either because it completed or because a failure made the remaining stages meaningless).
      */
     static Map<String, Object> probeStage(Map<String, Object> config, Map options, String stage) {
+        Map<String, Object> result
         switch (normalize(stage)) {
             case Checks.STAGE_FIRST:
-            case STAGE_CREDENTIAL: return credentialStage(config)
-            case STAGE_CONNECT: return connectStage(config, options)
-            case STAGE_ORDERS: return ordersStage(config, options)
-            default: return [checks: [], nextStage: null]
+            case STAGE_CREDENTIAL: result = credentialStage(config); break
+            case STAGE_CONNECT: result = connectStage(config, options); break
+            case STAGE_ORDERS: result = ordersStage(config, options); break
+            default: result = [checks: [], nextStage: null]
         }
+        // Every stage call reports the same per-endpoint state alongside its own rows, so a caller
+        // walking the stages one at a time sees it as early as the credential stage, not only once
+        // the whole probe finishes.
+        result.endpoints = endpointsOf(config)
+        return result
     }
 
     /**
@@ -161,9 +176,9 @@ class ShopifyConnectionProbe {
                         normalize(result.data?.shop?.myshopifyDomain) ?: shopApiUrl, elapsedMillis),
                 Checks.check("apiVersion", "API version supported", Checks.STATUS_PASS, apiVersion),
         ]
-        if (isDisabled(config?.canReadOrders)) {
+        if (!anyEndpointEnabled(config)) {
             checks.add(Checks.check("ordersRead", "Orders readable", Checks.STATUS_SKIP,
-                    "This configuration is not enabled for order reads."))
+                    "This configuration has no endpoints enabled."))
             return [checks: checks, nextStage: null]
         }
         return [checks: checks, nextStage: STAGE_ORDERS]
@@ -186,7 +201,7 @@ class ShopifyConnectionProbe {
                     returned == 1 ? "1 order returned" : "no orders in range", elapsedMillis)
         } else if (indicatesMissingScope(result)) {
             row = Checks.check("ordersRead", "Orders readable", Checks.STATUS_FAIL,
-                    "The token is missing the read_orders scope.", elapsedMillis)
+                    missingScopeDetail(config), elapsedMillis)
         } else {
             row = Checks.check("ordersRead", "Orders readable", Checks.STATUS_FAIL,
                     describeTransportFailure(statusCodeOf(result)), elapsedMillis)
@@ -238,7 +253,16 @@ class ShopifyConnectionProbe {
         return "The shop could not be reached."
     }
 
-    /** Shopify signals a missing scope as an ACCESS_DENIED GraphQL error on the requested field. */
+    /**
+     * Shopify signals a missing scope as an ACCESS_DENIED GraphQL error on the requested field —
+     * concretely, an error whose {@code extensions.code} is {@code ACCESS_DENIED} and whose message
+     * reads "Access denied for &lt;field&gt; field. Required access: `&lt;scope&gt;` access scope."
+     * (Shopify's documented, stable shape for this error class). ShopifyGraphqlTransport does not
+     * carry the per-error {@code extensions.code} through to its result map — only the aggregate
+     * message text survives as {@code graphqlErrors} — so this matches on the message text Shopify
+     * emits exclusively for that code rather than the code itself. That text is exactly what the
+     * fixture below reproduces, and is why this check is reliable without needing a transport change.
+     */
     private static boolean indicatesMissingScope(Map<String, Object> result) {
         List errors = (List) (result?.get("graphqlErrors") ?: [])
         return errors.any { Object message ->
@@ -247,7 +271,36 @@ class ShopifyConnectionProbe {
         }
     }
 
-    private static boolean isDisabled(Object indicator) {
-        return normalize(indicator)?.equalsIgnoreCase("N")
+    /**
+     * ACCESS_DENIED on this stage always means read_orders — the only scope ORDERS_QUERY exercises.
+     * But the migration enabled every endpoint on a config that could previously read orders, so a
+     * token issued before returns existed is now "enabled" for SHOPIFY_RETURN_REFS without carrying
+     * read_returns — a failure that would otherwise only surface deep inside extraction. Name that
+     * possibility here too whenever this config has that endpoint switched on, rather than reporting
+     * only the scope this particular query happened to exercise.
+     */
+    private static String missingScopeDetail(Map<String, Object> config) {
+        String detail = "The token is missing the read_orders scope."
+        if (endpointEnabled(config, "SHOPIFY_RETURN_REFS")) {
+            detail += (" Shopify rejected this probe with ACCESS_DENIED. Because the SHOPIFY_RETURN_REFS " +
+                    "endpoint is also enabled on this configuration, the stored token is likely missing " +
+                    "the read_returns scope that endpoint needs as well. Re-issue the token with the " +
+                    "missing scope(s), or untick the endpoint(s) that should not be enabled.").toString()
+        }
+        return detail
+    }
+
+    /** True when at least one catalog endpoint on this config is enabled. Absent/empty means none is. */
+    private static boolean anyEndpointEnabled(Map<String, Object> config) {
+        return endpointsOf(config).any { it?.isEnabled }
+    }
+
+    /** True when the named endpoint is present in the catalog list for this config and enabled. */
+    private static boolean endpointEnabled(Map<String, Object> config, String systemEnumId) {
+        return endpointsOf(config).any { it?.systemEnumId == systemEnumId && it?.isEnabled }
+    }
+
+    private static List<Map<String, Object>> endpointsOf(Map<String, Object> config) {
+        return (config?.endpoints as List<Map<String, Object>>) ?: []
     }
 }
