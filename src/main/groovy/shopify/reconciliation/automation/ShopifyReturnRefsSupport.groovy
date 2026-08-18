@@ -97,6 +97,13 @@ class ShopifyReturnRefsSupport {
             ShopifyGraphqlTransport.execute(cfg, queryDocument, variables, opts)
         }
 
+        // Counts orders actually processed (one increment per edge, regardless of how many refund
+        // records — zero, one, or several — that order goes on to produce). records.size() can no
+        // longer stand in for this since Task 1's reshape (2026-08-17 grain-alignment plan): a
+        // record is now per-REFUND, not per-order, so an order with two refunds contributes two
+        // records and an order whose only event is an unrefunded return contributes zero.
+        int ordersProcessed = 0
+
         Map<String, Object> built
         try {
             built = ShopifyGraphqlQueryBuilder.buildQuery([
@@ -132,7 +139,7 @@ class ShopifyReturnRefsSupport {
 
         // Important #3: widen the fetch/emit floor by lookbackHours (default DEFAULT_LOOKBACK_HOURS)
         // BEFORE windowStart — see the class doc's LOOKBACK section. This floor drives both the
-        // Shopify search net below and the client-side inWindow() filter in toRecord(); windowStart
+        // Shopify search net below and the client-side inWindow() filter in toRecords(); windowStart
         // itself (unwidened) plays no further role in this class — the reporting-window gate lives
         // downstream, in the OMS-side consumer, keyed off its own caller's plain windowStart.
         int lookbackHours = normalizeInt(options?.lookbackHours, DEFAULT_LOOKBACK_HOURS)
@@ -191,7 +198,8 @@ class ShopifyReturnRefsSupport {
             edges.each { Object rawEdge ->
                 Map node = (Map) ((Map) rawEdge)?.get("node")
                 if (node == null) return
-                records.add(toRecord(node, refundsFirstEffective, returnsFirstEffective,
+                ordersProcessed++
+                records.addAll(toRecords(node, refundsFirstEffective, returnsFirstEffective,
                         netFloorMillis, windowEndMillis, warnings))
             }
 
@@ -214,9 +222,8 @@ class ShopifyReturnRefsSupport {
                 recordCount    : records.size(),
                 dataAvailable  : !records.isEmpty(),
                 requestMetadata: [filters: [
-                        serverReportedOrderCount: records.size(),
-                        refundIdCount           : records.sum { ((List) it.refundIds).size() } ?: 0,
-                        returnIdCount           : records.sum { ((List) it.returnIds).size() } ?: 0,
+                        serverReportedOrderCount: ordersProcessed,
+                        refundRecordCount       : records.size(),
                 ]],
                 warnings       : warnings,
                 errors         : [],
@@ -224,33 +231,79 @@ class ShopifyReturnRefsSupport {
     }
 
     /**
-     * Builds one order's record. refundIds/returnIds and the parallel refunds/returns lists are
-     * already filtered to events whose OWN createdAt falls inside [floorMillis, windowEndMillis) —
-     * see the class doc's LOOKBACK section (floorMillis is windowStart minus the lookback, not the
-     * plain reporting windowStart). An order can legitimately appear here with every set empty: it
-     * proves Shopify has nothing IN THIS (widened) WINDOW to match, which is itself evidence for the
-     * reverse pass (an OMS return pointing at it really is missing).
+     * Builds this order's refund records — ONE PER REFUND, not one per order (DAR-BE-018;
+     * 2026-08-17 returns-refund-grain-alignment plan, Task 1). Each emitted record is a flat scalar
+     * map: { refundId, returnId, orderId, createdAt }, where createdAt is the REFUND's own creation
+     * date. refundId/orderId/returnId are all bareId-normalized so they land in the same id space as
+     * the OMS side's externalId (see CompareDatasetSupport.applyIdNormalizer's SHOPIFY_GID_TAIL).
      *
-     * refunds / returns are REQUIRED downstream, not decorative: ReturnPresenceVerificationSupport's
-     * reverse pass needs to key its grace check on each refund's OWN createdAt (not the order's), so
-     * a refund minted five minutes ago on a three-month-old order still reads as young rather than
-     * permanently "old". Important #1 (fix-wave-C re-review): this used to be a
-     * `refundsCreatedAt: {id: isoCreatedAt}` MAP keyed by data-derived refund ids — a plain
-     * (schema-inferring) Spark JSON read (ReconciliationServices.ingestFile) turns a JSON object into
-     * a fixed-field StructType, never a MapType, so that map's field count tracked the union of every
-     * refund/return id across the whole file; CompareDatasetSupport.buildJsonDataDf's
-     * `struct(col("*"))` then carried that width straight into the compare dataset — fine for a small
-     * daily window, thousands of nested fields for a large merchant or a backfill. A list of objects
-     * with stable field names has a fixed, small schema regardless of event count. Exact record shape
-     * (consumed by the other repo's fix wave — do not rename without a migration plan):
-     *   { orderId, orderName, createdAt, refundIds: [...], returnIds: [...],
-     *     refunds: [{id, createdAt}, ...], returns: [{id, createdAt}, ...] }
-     * returns[] (parallel to returnIds) is consumed nowhere today — kept for symmetry and future use
-     * now that a list costs nothing extra, same as before this fix.
+     * SHAPE HISTORY — read before "restoring" a list field: this method used to emit ONE RECORD PER
+     * ORDER carrying refundIds[]/returnIds[] plus parallel refunds[]/returns[] {id, createdAt} lists
+     * (see git history / the 2026-08-17 plan's "why"). That list shape itself replaced an even
+     * earlier `refundsCreatedAt: {id: isoCreatedAt}` MAP keyed by data-derived refund ids (Important
+     * #1, fix-wave-C): a plain (schema-inferring) Spark JSON read (ReconciliationServices.ingestFile)
+     * turns a JSON object into a fixed-field StructType, never a MapType, so that map's field count
+     * tracked the union of every refund/return id across the whole file, and
+     * CompareDatasetSupport.buildJsonDataDf's `struct(col("*"))` carried that unbounded width
+     * straight into the compare dataset. The per-order list shape fixed that by keeping a stable,
+     * small set of field NAMES regardless of event count.
+     *
+     * Per-REFUND rows go further and satisfy the same constraint even more completely: there are no
+     * list-valued fields left at all, so schema width cannot vary with event count even in principle.
+     * The reason for THIS reshape is a different one, though — grain, not schema width: OMS
+     * `reconciliationReturns` already emits one row per return whose externalId is a Shopify REFUND
+     * id, so a Shopify side that emitted one row per ORDER could never be joined to it directly;
+     * ReturnPresenceVerificationSupport (the other repo) exists only to bridge that grain mismatch
+     * with bespoke presence-verification logic. Matching the grain — one row per refund on both sides
+     * — turns that bespoke stage into an ordinary flat compare, the same shape orders reconciliation
+     * already uses. See the 2026-08-17 plan doc for the full "why".
+     *
+     * refundIds/returnIds/refunds[]/returns[] are ALL REMOVED by this reshape. KNOWN BREAKAGE (not
+     * this task's to fix): the other repo's ReturnPresenceVerificationSupport reads exactly those
+     * four removed fields at multiple sites and will fail against this new shape until it is
+     * retired or rewritten — tracked as a separate, later task in the same plan; do not "fix" it
+     * from here without re-reading that class's own doc first (it has at least one behavior — a
+     * per-order forward-match suppression — that is not a plain join and needs a deliberate call).
+     *
+     * REFUND -> RETURN ASSOCIATION (the one open design question Task 1 had to investigate rather
+     * than assume): the GraphQL selection this class actually queries (ShopifySourceCatalog's
+     * SHOPIFY_ORDER_RETURN_REFS fields: refunds.id, refunds.createdAt, returns.nodes.id,
+     * returns.nodes.status, returns.nodes.createdAt — confirmed against both the field list and the
+     * live-captured fixture, src/test/resources/fixtures/shopify-order-return-refs-response.json)
+     * carries NO field on either side that names the other: a refund node has only {id, createdAt},
+     * a return node only {id, status, createdAt}. There is therefore no direct link in what this
+     * class actually receives today.
+     *   Shopify's Admin GraphQL schema DOES publish a direct link — Refund.return (a nullable
+     *   back-reference to the Return object; see shopify.dev's Refund object reference) — that would
+     *   give an authoritative, unambiguous join with no pairing heuristic needed at all. It is
+     *   deliberately NOT selected here: every other claim in this class about live Shopify behavior
+     *   (the refunds/returns shape asymmetry, the no_return trim gap, the search/sort text) is backed
+     *   by an actual probe against a real store on a real API version, and this field has not been.
+     *   Wiring it in speculatively — new selectionPath, new query shape, new fixture — without that
+     *   verification would repeat the exact mistake this task exists to avoid: shipping an assumed
+     *   join key. Adding and live-probing `refunds.return.id` is a well-scoped, high-value follow-up.
+     *   Until then, this class falls back to ORDER-LEVEL PAIRING, matching the precedent
+     *   ReturnPresenceVerificationSupport's own class doc already accepts for its per-order forward-
+     *   match suppression ("known phase-1 imprecision... needs the design's typed-field hedge or a
+     *   Shopify Return->Refund link"): when an order carries EXACTLY ONE in-window return, every
+     *   in-window refund on that order is paired with it. When an order carries zero or several
+     *   in-window returns, the pairing is unresolvable at this grain and returnId is left null rather
+     *   than guessed — a wrong guess would manufacture a false join, which is the one failure mode
+     *   this whole plan exists to eliminate; null is the honest answer when the data does not support
+     *   a confident one.
+     *
+     * NO-REFUND-YET NARROWING (deliberate, not a defect — see the plan's "Known narrowing" section):
+     * a refund-driven extract cannot emit a record for a return that has no refund yet. When this
+     * order's in-window returns are non-empty but its in-window refunds are empty, no record is
+     * emitted for it and a warning is added instead, so the gap is counted and surfaced rather than
+     * silently dropped. This also retires the old "empty order as reverse-pass evidence" behavior: an
+     * order with neither refunds nor returns in window now simply contributes nothing, with no
+     * warning either — that evidence existed only to support ReturnPresenceVerificationSupport's own
+     * per-order lookup, which a flat, matching-grain join does not need.
      */
-    private static Map<String, Object> toRecord(Map node, int refundsFirst, int returnsFirst,
-                                                long floorMillis, long windowEndMillis,
-                                                List<String> warnings) {
+    private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,
+                                                        long floorMillis, long windowEndMillis,
+                                                        List<String> warnings) {
         String orderId = bareId(node.get("legacyResourceId") ?: node.get("id"))
         List<Map<String, String>> refundEvents = collectEvents(node.get("refunds"), orderId, "refunds", refundsFirst, warnings)
         List<Map<String, String>> returnEvents = collectEvents(node.get("returns"), orderId, "returns", returnsFirst, warnings)
@@ -258,15 +311,27 @@ class ShopifyReturnRefsSupport {
         List<Map<String, String>> inWindowRefunds = inWindow(refundEvents, orderId, "refund", floorMillis, windowEndMillis, warnings)
         List<Map<String, String>> inWindowReturns = inWindow(returnEvents, orderId, "return", floorMillis, windowEndMillis, warnings)
 
-        return [
-                orderId  : orderId,
-                orderName: normalize(node.get("name")),
-                createdAt: normalize(node.get("createdAt")),
-                refundIds: inWindowRefunds.collect { it.id },
-                returnIds: inWindowReturns.collect { it.id },
-                refunds  : inWindowRefunds.collect { [id: it.id, createdAt: it.createdAt] },
-                returns  : inWindowReturns.collect { [id: it.id, createdAt: it.createdAt] },
-        ]
+        if (inWindowRefunds.isEmpty()) {
+            if (!inWindowReturns.isEmpty()) {
+                warnings.add(("Order ${orderId} has ${inWindowReturns.size()} return(s) in this window with no " +
+                        "matching refund; a refund-driven extract cannot represent a return before it is " +
+                        "refunded, so no record was emitted for it.").toString())
+            }
+            return []
+        }
+
+        // Order-level pairing (see the association section of this method's doc above): only
+        // resolvable when the order carries exactly one in-window return.
+        String pairedReturnId = (inWindowReturns.size() == 1) ? inWindowReturns[0].id : null
+
+        return inWindowRefunds.collect { Map<String, String> refund ->
+            [
+                    refundId : refund.id,
+                    returnId : pairedReturnId,
+                    orderId  : orderId,
+                    createdAt: refund.createdAt,
+            ] as Map<String, Object>
+        }
     }
 
     /**
@@ -287,7 +352,7 @@ class ShopifyReturnRefsSupport {
      *
      * Returns every event this page reported (id + own createdAt), UNFILTERED by window — truncation
      * must be judged against everything Shopify actually returned, before any window trim. The
-     * caller (toRecord) applies the window filter afterward via inWindow().
+     * caller (toRecords) applies the window filter afterward via inWindow().
      */
     private static List<Map<String, String>> collectEvents(Object rawConnection, String orderId, String label,
                                                             int requestedFirst, List<String> warnings) {

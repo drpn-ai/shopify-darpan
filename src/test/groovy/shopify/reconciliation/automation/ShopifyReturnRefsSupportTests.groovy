@@ -5,10 +5,14 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
- * Per-order refund/return id extraction for returns reconciliation (DAR-BE-018, design §7).
+ * Per-REFUND extraction for returns reconciliation (DAR-BE-018; 2026-08-17 grain-alignment plan,
+ * Task 1). One record per refund: {refundId, returnId, orderId, createdAt}, windowed on the
+ * refund's OWN createdAt. See ShopifyReturnRefsSupport.toRecords for the refund->return
+ * association rationale (order-level pairing; Shopify's queried response carries no direct link).
  *
  * Cursor path, not bulk: refunds and returns are connections, and buildBulkQuery rejects those.
  */
@@ -22,7 +26,7 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void emitsBothIdSetsPerOrder() {
+    void emitsOneRecordPerRefundWithBareOrderAndReturnIds() {
         // NOTE: ShopifyGraphqlTransport.execute() returns [ok, data, cost, extensions, statusCode,
         // retryable] on success — "data" is top-level, there is no "body" wrapper (see parseResponse
         // in ShopifyGraphqlTransport.groovy, and the same [ok:true, data:...] shape used by every
@@ -31,7 +35,7 @@ class ShopifyReturnRefsSupportTests {
             return [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("7025799037059",
                             ["gid://shopify/Refund/5001"],
-                            ["gid://shopify/Return/9001", "gid://shopify/Return/9002"])]],
+                            ["gid://shopify/Return/9001"])]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
             ]]]
         }
@@ -42,8 +46,156 @@ class ShopifyReturnRefsSupportTests {
         assertEquals(1, result.recordCount)
         Map record = (Map) ((List) result.records)[0]
         assertEquals("7025799037059", record.orderId)
-        assertEquals(["5001"], record.refundIds)
-        assertEquals(["9001", "9002"], record.returnIds)
+        assertEquals("5001", record.refundId)
+        // Unambiguous pairing: the order carries exactly one in-window return.
+        assertEquals("9001", record.returnId)
+        assertEquals("2026-05-01T11:00:00Z", record.createdAt)
+    }
+
+    @Test
+    void twoRefundsAndOneReturnProduceTwoRecordsEachWithItsOwnRefundIdAndCreatedAt() {
+        Map node = [
+                id              : "gid://shopify/Order/2020",
+                legacyResourceId: "2020",
+                name            : "#2020",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [
+                        [id: "gid://shopify/Refund/201", createdAt: "2026-05-01T09:00:00Z"],
+                        [id: "gid://shopify/Refund/202", createdAt: "2026-05-01T10:00:00Z"],
+                ],
+                returns         : [nodes: [[id: "gid://shopify/Return/301", status: "CLOSED", createdAt: "2026-05-01T09:05:00Z"]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(2, result.recordCount)
+        List records = (List) result.records
+        Map first = (Map) records.find { ((Map) it).refundId == "201" }
+        Map second = (Map) records.find { ((Map) it).refundId == "202" }
+        assertTrue(first != null && second != null, "both refunds must produce their own record: ${records}")
+        assertEquals("2026-05-01T09:00:00Z", first.createdAt)
+        assertEquals("2026-05-01T10:00:00Z", second.createdAt)
+        // Single return on the order => unambiguous pairing applies to every refund on it.
+        assertEquals("301", first.returnId)
+        assertEquals("301", second.returnId)
+    }
+
+    @Test
+    void aRefundWithAnAssociatedReturnCarriesThatReturnIdAndOneWithoutCarriesNull() {
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [
+                            [cursor: "c1", node: orderNode("4001", ["gid://shopify/Refund/401"], ["gid://shopify/Return/501"])],
+                            [cursor: "c2", node: orderNode("4002", ["gid://shopify/Refund/402"], [])],
+                    ],
+                    pageInfo: [hasNextPage: false, endCursor: "c2"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(2, result.recordCount)
+        List records = (List) result.records
+        Map withReturn = (Map) records.find { ((Map) it).refundId == "401" }
+        Map withoutReturn = (Map) records.find { ((Map) it).refundId == "402" }
+        assertEquals("501", withReturn.returnId)
+        assertNull(withoutReturn.returnId, "a refund with no associated return must carry a null returnId: ${withoutReturn}")
+    }
+
+    @Test
+    void anOldOrderWithARecentRefundIsEmitted() {
+        // The real-world common case: the order can be months old, but a refund minted THIS window
+        // must still be picked up. Windowing is on the refund's own createdAt, never the order's.
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("888",
+                            ["gid://shopify/Refund/81"], [],
+                            "2025-01-01T00:00:00Z",   // order createdAt: months before the window
+                            "2026-05-01T12:00:00Z",   // refund createdAt: INSIDE the window
+                            "2026-05-01T10:30:00Z")]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(1, result.recordCount)
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("81", record.refundId)
+        assertEquals("2026-05-01T12:00:00Z", record.createdAt)
+    }
+
+    @Test
+    void aRecentOrderWithAnOutOfWindowRefundIsNotEmitted() {
+        // C1: the order surfaces in the Shopify net because SOMETHING on it changed recently (an
+        // updated_at bump), but the refund itself predates the window. Only the event's OWN
+        // createdAt may decide inclusion.
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("777",
+                            ["gid://shopify/Refund/71"], [],
+                            "2026-01-01T00:00:00Z",   // order createdAt: irrelevant to windowing
+                            "2026-04-15T00:00:00Z",   // refund createdAt: BEFORE the window
+                            "2026-05-01T10:30:00Z")]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(0, result.recordCount, "an out-of-window refund must not appear: ${result.records}")
+    }
+
+    @Test
+    void anOrderWhoseReturnsHaveNoRefundEmitsNoRecordAndIncrementsAWarningCount() {
+        // The deliberate narrowing this plan accepts: a refund-driven extract cannot emit a return
+        // awaiting its refund. It must be counted and surfaced as a warning, never dropped silently.
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("9999", [], ["gid://shopify/Return/8801"])]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        int warningsBefore = 0
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(0, result.recordCount, "a return with no refund must emit no record: ${result.records}")
+        List warnings = (List) result.warnings
+        assertEquals(warningsBefore + 1, warnings.size(), "exactly one warning must be added for the unrefunded return: ${warnings}")
+        assertTrue(warnings.any { it.toString().contains("9999") && it.toString().contains("refund") },
+                "the warning must name the order and mention the missing refund: ${warnings}")
+    }
+
+    @Test
+    void anOrderWithNeitherRefundsNorReturnsInWindowEmitsNoRecordAndNoWarning() {
+        // Unlike the order-per-record model this replaces, an empty order is no longer emitted as
+        // "evidence" for a reverse pass — the target end-state is a plain flat join, which needs no
+        // such evidence record. No return exists here either, so this is not the no-refund narrowing:
+        // there is nothing to warn about.
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("333", [], [])]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(0, result.recordCount)
+        assertEquals([], result.warnings)
     }
 
     @Test
@@ -68,25 +220,8 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(2, calls)
         assertEquals(2, result.recordCount)
-    }
-
-    @Test
-    void emitsOrdersWithNoRefundsOrReturnsAsEmptySetsNotOmitted() {
-        // An order with neither is still evidence for the reverse pass: it proves Shopify has
-        // nothing to match, so an OMS return pointing at it is genuinely missing-in-Shopify.
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: orderNode("333", [], [])]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
-        }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals([], record.refundIds)
-        assertEquals([], record.returnIds)
+        List refundIds = ((List) result.records).collect { ((Map) it).refundId }
+        assertEquals(["1", "2"] as Set, refundIds as Set)
     }
 
     @Test
@@ -161,54 +296,6 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void excludesARefundCreatedBeforeTheWindowEvenWhenTheOrderWasUpdatedInWindow() {
-        // C1: the order surfaces in the Shopify net because SOMETHING on it changed recently (an
-        // updated_at bump), but the refund itself predates the window. Only the event's OWN
-        // createdAt may decide inclusion — this is the exact case the original order-level window
-        // could never get right.
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: orderNode("777",
-                            ["gid://shopify/Refund/71"], [],
-                            "2026-01-01T00:00:00Z",   // order createdAt: irrelevant to the new semantics
-                            "2026-04-15T00:00:00Z",   // refund createdAt: BEFORE the window
-                            "2026-05-01T10:30:00Z")]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
-        }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals([], record.refundIds, "an out-of-window refund must not appear: ${record}")
-        assertEquals([], record.refunds)
-    }
-
-    @Test
-    void includesARefundCreatedInWindowEvenWhenTheOrderWasCreatedLongBefore() {
-        // The inverse of the above, and the real-world common case: the order can be months old,
-        // but a refund minted THIS window must still be picked up.
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: orderNode("888",
-                            ["gid://shopify/Refund/81"], [],
-                            "2025-01-01T00:00:00Z",   // order createdAt: months before the window
-                            "2026-05-01T12:00:00Z",   // refund createdAt: INSIDE the window
-                            "2026-05-01T10:30:00Z")]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
-        }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals(["81"], record.refundIds)
-        assertEquals([[id: "81", createdAt: "2026-05-01T12:00:00Z"]], record.refunds)
-    }
-
-    @Test
     void windowIsHalfOpenIncludingStartButExcludingEnd() {
         Map node = [
                 id              : "gid://shopify/Order/999",
@@ -231,45 +318,19 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals(["91"], record.refundIds)
+        assertEquals(1, result.recordCount)
+        assertEquals("91", ((Map) ((List) result.records)[0]).refundId)
     }
 
     @Test
-    void emitsRefundsAndReturnsAsListsOfIdCreatedAtObjectsParallelToTheIdArrays() {
-        // Important #1 (fix-wave-C re-review): refunds/returns are now lists of {id, createdAt}
-        // objects, parallel to refundIds/returnIds, rather than a refundsCreatedAt/returnsCreatedAt
-        // MAP keyed by data-derived ids. A plain (schema-inferring) Spark JSON read turns a JSON
-        // object into a fixed-field StructType, so the old map shape's field count tracked the union
-        // of every distinct id in the whole file — this list has a fixed, small schema regardless of
-        // event count. This is the exact shape the other repo's reverse-grace fix now consumes
-        // (returnsCreatedAt/returns is consumed nowhere today; kept for symmetry and future use).
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: orderNode("1010",
-                            ["gid://shopify/Refund/11"], ["gid://shopify/Return/21"],
-                            "2026-05-01T09:00:00Z", "2026-05-01T09:15:00Z", "2026-05-01T09:30:00Z")]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
-        }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals(["11"], record.refundIds)
-        assertEquals(["21"], record.returnIds)
-        assertEquals([[id: "11", createdAt: "2026-05-01T09:15:00Z"]], record.refunds)
-        assertEquals([[id: "21", createdAt: "2026-05-01T09:30:00Z"]], record.returns)
-    }
-
-    @Test
-    void refundOnlyOrderSurvivesTheTrimAndAppearsInOutput() {
+    void refundOnlyOrderProducesARecordAndReturnOnlyOrderProducesOnlyAWarning() {
         // C1: live-captured fixture (gorjana-sandbox.myshopify.com, Admin API 2026-01, 2026-08-13).
         // #GORTEST27948 is a refund-only order — no Return object attached — which a bare
         // `-return_status:no_return` trim silently drops (probed: 25 orders back, all with
         // returns >= 1, zero refund-only). The OR-widened trim this class builds must let it survive
-        // extraction end to end.
+        // extraction end to end, now as a refund record with a null returnId.
+        // #GORTEST27950 is return-only: under the refund-driven grain it can no longer be
+        // represented as a Shopify record at all — it must surface as the no-refund-yet warning.
         Map fixture = loadFixture()
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: fixture.data]
@@ -279,15 +340,15 @@ class ShopifyReturnRefsSupportTests {
                 "2026-08-12T00:00:00Z", "2026-08-13T00:00:00Z", [:], executor)
 
         List records = (List) result.records
-        Map refundOnly = (Map) records.find { ((Map) it).orderName == "#GORTEST27948" }
-        assertTrue(refundOnly != null, "the refund-only order must survive the trim: ${records}")
-        assertEquals(["1005422084140"], refundOnly.refundIds)
-        assertEquals([], refundOnly.returnIds)
+        assertEquals(1, records.size(), "only the refund-only order should produce a record: ${records}")
+        Map refundOnly = (Map) records[0]
+        assertEquals("1005422084140", refundOnly.refundId)
+        assertEquals("6942591025196", refundOnly.orderId)
+        assertNull(refundOnly.returnId, "a refund-only order has no return to pair with: ${refundOnly}")
 
-        Map returnOnly = (Map) records.find { ((Map) it).orderName == "#GORTEST27950" }
-        assertTrue(returnOnly != null, "the return-only order must also survive: ${records}")
-        assertEquals([], returnOnly.refundIds)
-        assertEquals(["44800213036"], returnOnly.returnIds)
+        List warnings = (List) result.warnings
+        assertTrue(warnings.any { it.toString().contains("6942747197484") && it.toString().contains("refund") },
+                "the return-only order must surface as a no-refund-yet warning, not a silently dropped record: ${warnings}")
     }
 
     @Test
@@ -350,8 +411,8 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals(["111"], record.refundIds, "a refund within the lookback before windowStart must be included: ${record}")
+        assertEquals(1, result.recordCount, "a refund within the lookback before windowStart must be included: ${result.records}")
+        assertEquals("111", ((Map) ((List) result.records)[0]).refundId)
     }
 
     @Test
@@ -372,8 +433,7 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals([], record.refundIds, "a refund before the lookback floor must still be excluded: ${record}")
+        assertEquals(0, result.recordCount, "a refund before the lookback floor must still be excluded: ${result.records}")
     }
 
     private static Map authConfig() {
