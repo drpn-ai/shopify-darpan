@@ -123,18 +123,22 @@
             refundId/returnId column split (and with it the refund-to-return association problem — see
             ShopifyReturnRefsSupport.toRecords for that investigation's history) and the earlier
             "no refund yet" warning: a return with no refund yet now emits its own RETURN row rather
-            than being dropped. Accepted, disclosed cost: a refunded return still produces two rows
-            (its refund and itself) — the OMS-side contract (one row per return, one externalId
-            field, stamped with the refund id once one exists, the return id only beforehand — see
-            ReturnPresenceVerificationSupport's class doc) means a refunded return gets exactly ONE
-            OMS counterpart keyed by the refund id, so the RETURN row for it reads as a permanent,
-            structural missing-in-OMS row. A narrowing to skip the RETURN row for refunded returns
-            was investigated (2026-08-18) using returns.nodes.status (Shopify's ReturnStatus) as the
-            candidate discriminator and REJECTED: Shopify's own returnClose mutation doc confirms a
-            return can reach CLOSED with zero refunds, and nothing prevents a refund existing while a
-            return is still OPEN, so status cannot cleanly separate refunded from unrefunded returns
-            in either direction. See ShopifyReturnRefsSupport.toRecords for the full rationale and
-            evidence.</description>
+            than being dropped.
+
+            REFUNDED-RETURN NARROWING (2026-08-18): a refunded return is represented by its REFUND row
+            ALONE — the return itself does not also get a RETURN row, since the OMS-side contract (one
+            row per return, one externalId field, stamped with the refund id once one exists — see
+            ReturnPresenceVerificationSupport's class doc, "a refunded Shopify Return is never
+            separately expected; its event is its refund") means a refunded return gets exactly ONE OMS
+            counterpart, keyed by the refund id; a separate RETURN row for it would be a permanent,
+            structural phantom missing-in-OMS. The discriminator is Return.refunds (a RefundConnection,
+            confirmed present with no required args on every dated API version this catalog supports —
+            not returns.nodes.status: that field was investigated first and REJECTED, since Shopify's
+            own returnClose mutation doc confirms a return can reach CLOSED with zero refunds, and
+            nothing prevents a refund existing while a return stays OPEN, so status cannot cleanly
+            separate refunded from unrefunded returns in either direction. A return whose Return.refunds
+            connection comes back empty gets its own RETURN row; any non-empty result means it is
+            skipped. See ShopifyReturnRefsSupport.toRecords for the full rationale and evidence.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
@@ -164,7 +168,10 @@
                     connectionMaxPageSize (100) regardless of the value requested here; truncation
                     detection reads the clamped value back off the built query, not this raw parameter,
                     so a warning still fires naming the order rather than silently truncating its id
-                    set.</description>
+                    set. Also governs the nested per-return Return.refunds existence check
+                    (2026-08-18 narrowing) — it shares the same refunds connectionRoot/page-size as the
+                    order-level refunds list, since only emptiness of that nested connection is ever
+                    read, never its count.</description>
             </parameter>
             <parameter name="lookbackHours" type="Integer" default-value="3">
                 <description>Hours the fetch/emit floor is widened BEFORE windowStart, so a Shopify

@@ -19,6 +19,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * own same-shaped rows removes the need for any precedence rule: eventId is the single join key,
  * whichever kind of id it is. See ShopifyReturnRefsSupport.toRecords for the full history.
  *
+ * REFUNDED-RETURN NARROWING (2026-08-18): a refunded return is represented by its REFUND row alone
+ * — the return itself does not also get a RETURN row, since OMS gets exactly one counterpart for it
+ * (keyed by the refund id). The discriminator is Return.refunds (does this return have at least one
+ * refund), NOT returns.nodes.status — status was investigated and rejected first (Shopify's own
+ * returnClose mutation doc confirms a return can reach CLOSED with zero refunds, and nothing
+ * prevents a refund existing while a return stays OPEN). See ShopifyReturnRefsSupport.toRecords for
+ * the full evidence.
+ *
  * Cursor path, not bulk: refunds and returns are connections, and buildBulkQuery rejects those.
  */
 class ShopifyReturnRefsSupportTests {
@@ -35,6 +43,8 @@ class ShopifyReturnRefsSupportTests {
         // The defining case for the per-event shape: every refund AND every return on the order
         // gets its own row. eventType and eventId (that specific event's own id) must be correct on
         // each, and createdAt must be that event's own date, not the order's or any other event's.
+        // The return's own `refunds` is explicitly empty — it is UNREFUNDED, distinct from either of
+        // the two order-level refunds (201, 202), so the narrowing does not suppress its row.
         Map node = [
                 id              : "gid://shopify/Order/2020",
                 legacyResourceId: "2020",
@@ -44,7 +54,7 @@ class ShopifyReturnRefsSupportTests {
                         [id: "gid://shopify/Refund/201", createdAt: "2026-05-01T09:00:00Z"],
                         [id: "gid://shopify/Refund/202", createdAt: "2026-05-01T10:00:00Z"],
                 ],
-                returns         : [nodes: [[id: "gid://shopify/Return/301", status: "CLOSED", createdAt: "2026-05-01T09:05:00Z"]]],
+                returns         : [nodes: [[id: "gid://shopify/Return/301", status: "CLOSED", createdAt: "2026-05-01T09:05:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
@@ -184,25 +194,21 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void returnStatusDoesNotGateWhetherARETURNRowIsEmitted() {
-        // Investigated 2026-08-18: a narrowing to skip the RETURN row for a REFUNDED return was
-        // considered, using returns.nodes.status as the candidate discriminator. Rejected on direct
-        // evidence (see ShopifyReturnRefsSupport.toRecords doc): Shopify's own returnClose mutation
-        // doc confirms a return can reach CLOSED with zero refunds ("simply when it has been marked
-        // as returned in the system"), and nothing prevents a refund existing while a return stays
-        // OPEN. Both directions of a status-based rule would manufacture exactly the false-positive
-        // class this plan removes, so no such rule was implemented — every in-window return still
-        // gets its own RETURN row regardless of status. This test locks that in for both status
-        // values actually seen in this codebase's evidence (CLOSED, from the live fixture) and the
-        // other end of the lifecycle (OPEN), so a future change cannot silently reintroduce a status
-        // gate without this test forcing a deliberate look.
+    void aRefundedReturnEmitsNoReturnRowOnlyItsRefundsRow() {
+        // The narrowing itself: a return with at least one refund (per Return.refunds) is skipped —
+        // it is represented by its refund's own REFUND row alone, matching the OMS contract (one
+        // counterpart per return, keyed by the refund id). The refund 911 is deliberately present
+        // BOTH as an order-level refund (its own row) AND nested under the return's own `refunds`
+        // (the existence signal) — exactly how live Shopify data would actually look for a return
+        // that has since been refunded.
         Map node = [
-                id              : "gid://shopify/Order/6001",
-                legacyResourceId: "6001",
-                name            : "#6001",
+                id              : "gid://shopify/Order/9001",
+                legacyResourceId: "9001",
+                name            : "#9001",
                 createdAt       : "2026-05-01T08:00:00Z",
-                refunds         : [[id: "gid://shopify/Refund/601", createdAt: "2026-05-01T09:00:00Z"]],
-                returns         : [nodes: [[id: "gid://shopify/Return/701", status: "OPEN", createdAt: "2026-05-01T08:15:00Z"]]],
+                refunds         : [[id: "gid://shopify/Refund/911", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [[id: "gid://shopify/Return/912", status: "CLOSED", createdAt: "2026-05-01T08:30:00Z",
+                                             refunds: [[id: "gid://shopify/Refund/911"]]]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
@@ -214,11 +220,111 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        assertEquals(2, result.recordCount,
-                "an OPEN return alongside an unrelated refund must still emit both rows — status is not a gate: ${result.records}")
+        assertEquals(1, result.recordCount, "a refunded return must emit only its refund's row: ${result.records}")
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("911", record.eventId)
+        assertEquals("REFUND", record.eventType)
+        assertTrue(((List) result.records).every { ((Map) it).eventId != "912" },
+                "the refunded return itself must not also appear as a RETURN row: ${result.records}")
+    }
+
+    @Test
+    void anUnrefundedReturnWithAnEmptyRefundsConnectionEmitsAReturnRow() {
+        // The other half of the narrowing: Return.refunds explicitly present but EMPTY (not merely
+        // absent from the payload) must still be read as "no refund" and emit a RETURN row.
+        Map node = [
+                id              : "gid://shopify/Order/9002",
+                legacyResourceId: "9002",
+                name            : "#9002",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [[id: "gid://shopify/Return/922", status: "OPEN", createdAt: "2026-05-01T08:30:00Z",
+                                             refunds: []]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(1, result.recordCount, "an unrefunded return must still emit its own row: ${result.records}")
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("922", record.eventId)
+        assertEquals("RETURN", record.eventType)
+    }
+
+    @Test
+    void anOrderWithOneRefundedReturnAndOneUnrefundedReturnEmitsExactlyTwoRows() {
+        // The mixed case: one return already has a refund (911, skipped — represented by its refund's
+        // row), the other does not (932, gets its own RETURN row). Exactly one REFUND row and one
+        // RETURN row, no more.
+        Map node = [
+                id              : "gid://shopify/Order/9003",
+                legacyResourceId: "9003",
+                name            : "#9003",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/931", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [
+                        [id: "gid://shopify/Return/930", status: "CLOSED", createdAt: "2026-05-01T08:20:00Z",
+                         refunds: [[id: "gid://shopify/Refund/931"]]],
+                        [id: "gid://shopify/Return/932", status: "OPEN", createdAt: "2026-05-01T08:40:00Z",
+                         refunds: []],
+                ]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(2, result.recordCount, "exactly one REFUND row and one RETURN row are expected: ${result.records}")
         List records = (List) result.records
-        assertTrue(records.any { ((Map) it).eventId == "601" && ((Map) it).eventType == "REFUND" })
-        assertTrue(records.any { ((Map) it).eventId == "701" && ((Map) it).eventType == "RETURN" })
+        assertTrue(records.any { ((Map) it).eventId == "931" && ((Map) it).eventType == "REFUND" })
+        assertTrue(records.any { ((Map) it).eventId == "932" && ((Map) it).eventType == "RETURN" })
+        assertTrue(records.every { ((Map) it).eventId != "930" }, "the refunded return (930) must not also appear: ${records}")
+    }
+
+    @Test
+    void statusDoesNotAffectTheOutcomeAClosedReturnWithNoRefundsStillEmitsAReturnRow() {
+        // Investigated 2026-08-18: a narrowing using returns.nodes.status as the discriminator was
+        // considered and REJECTED on direct evidence (see ShopifyReturnRefsSupport.toRecords doc):
+        // Shopify's own returnClose mutation doc confirms a return can reach CLOSED with zero refunds
+        // ("simply when it has been marked as returned in the system"), and nothing prevents a refund
+        // existing while a return stays OPEN. Return.refunds — not status — is the actual gate. This
+        // test locks that in: a CLOSED return with an explicitly empty refunds connection must still
+        // emit its RETURN row, proving CLOSED is not read as "has a refund".
+        Map node = [
+                id              : "gid://shopify/Order/9004",
+                legacyResourceId: "9004",
+                name            : "#9004",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [[id: "gid://shopify/Return/942", status: "CLOSED", createdAt: "2026-05-01T08:30:00Z",
+                                             refunds: []]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(1, result.recordCount,
+                "a CLOSED return with no refunds must still emit its RETURN row — status is not the gate: ${result.records}")
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("942", record.eventId)
+        assertEquals("RETURN", record.eventType)
     }
 
     @Test
@@ -370,7 +476,9 @@ class ShopifyReturnRefsSupportTests {
         // extraction end to end, as a REFUND event row.
         // #GORTEST27950 is return-only. Under the earlier per-refund shape this produced no record at
         // all, only a warning — exactly the gap this revision closes: it now produces its own RETURN
-        // event row directly.
+        // event row directly. Its return's `refunds: []` is a 2026-08-18 SYNTHESIZED addition (the
+        // original probe never selected Return.refunds — see the fixture's own `_returnRefundsField`
+        // note), consistent with this order's live-captured, unchanged order-level `refunds: []`.
         Map fixture = loadFixture()
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: fixture.data]

@@ -117,6 +117,12 @@ class ShopifySourceCatalog {
      * Shape live-probed against gorjana-sandbox.myshopify.com on Admin GraphQL API 2026-01
      * (2026-08-13, DAR-BE-018 Task 1): Order.refunds is NON_NULL -> LIST (plain list, `first` arg
      * only); Order.returns is NON_NULL -> ReturnConnection. See the field-level comments below.
+     *
+     * REVISION 2026-08-18: also selects Return.refunds (nested under returns.nodes, id-only) —
+     * confirmed present across every dated supported API version via shopify.dev's schema reference,
+     * not live-probed like the shape above. Used solely to test whether a given return already has a
+     * refund; see ShopifyReturnRefsSupport.toRecords for why that determines whether the return gets
+     * its own output row.
      */
     private static final Map<String, Object> ORDER_RETURN_REFS_SOURCE = [
         sourceDefinitionId       : SHOPIFY_ORDER_RETURN_REFS,
@@ -139,6 +145,7 @@ class ShopifySourceCatalog {
             "refunds.createdAt",
             "returns.id",
             "returns.createdAt",
+            "returns.refunds",
         ],
         // Bulk is unsupported for this source (see class doc above). This stays an empty list
         // rather than an absent key: copySource() below unconditionally does
@@ -176,6 +183,27 @@ class ShopifySourceCatalog {
              connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
             [fieldPath: "returns.createdAt", label: "Return Created At", type: "DateTime", selectionPath: "returns.nodes.createdAt",
              connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            // REVISION 2026-08-18 (returns-refund-grain-alignment plan narrowing): Return.refunds
+            // confirmed present — non-null RefundConnection, no required args — on every DATED API
+            // version this catalog supports (2025-07, 2025-10, 2026-01, 2026-04; checked directly
+            // against shopify.dev's schema reference for each, not assumed). Selected ONLY to test
+            // emptiness (does this return have at least one refund) — see
+            // ShopifyReturnRefsSupport.toRecords for why that question matters and why `status` could
+            // not answer it. `.id` is the sole leaf, mirroring the other id-only selections above; no
+            // other Refund field is needed here.
+            //   connectionRoot deliberately REUSES "refunds" (the same $refundsFirst variable as
+            //   Order.refunds above) rather than getting a page size of its own:
+            //   ShopifyGraphqlQueryBuilder's connection-page-size variables are keyed purely by the
+            //   literal (leaf) GraphQL field name shared across the WHOLE rendered document, not by
+            //   tree position, so this nested "refunds" occurrence and the top-level one cannot carry
+            //   independently-valued `first` arguments without either extending that shared mechanism
+            //   (used by every other source too) or embedding literal GraphQL argument text into what
+            //   every other selectionPath in this catalog treats as a plain dotted identifier path —
+            //   neither is done here for one field. The shared value (default 50, clamped to 100) is
+            //   still narrow and fully correct for an existence check, since only emptiness is ever
+            //   read downstream, never the count.
+            [fieldPath: "returns.refunds", label: "Return Has Refund", type: "ID", selectionPath: "returns.nodes.refunds.id",
+             connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
         ],
     ].asImmutable()
 

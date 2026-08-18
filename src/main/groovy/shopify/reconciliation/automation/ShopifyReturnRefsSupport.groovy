@@ -312,58 +312,57 @@ class ShopifyReturnRefsSupport {
      * future need arises to correlate a refund row with the return it actually belongs to (analytics,
      * not reconciliation), Refund.return remains the answer — still requiring a live probe first.
      *
-     * ACCEPTED COST — report, do not silently work around: a refunded return still produces TWO rows
-     * (its refund and the return itself) whenever both events fall in the same window. The OMS-side
+     * REFUNDED-RETURN NARROWING — IMPLEMENTED via Return.refunds (2026-08-18): a refunded return is
+     * represented by its REFUND row ALONE; the return itself does NOT also get a RETURN row. Without
+     * this, a refunded return produced TWO rows (its refund and the return), and the OMS-side
      * CONTRACT (OmsReturnsSourceSupport: one row per physical OMS return record;
-     * ReturnPresenceVerificationSupport's own doc: exactly one externalId per row, stamped with
-     * EITHER the refund id — the usual case, once a refund exists — OR, for the return's own
-     * IN-PROGRESS window before any refund lands, the return id, "never backfilled to the refund id
-     * once one issues") establishes that a refunded return gets exactly ONE OMS counterpart, keyed
-     * by the refund id — "a refunded Shopify Return is never separately expected; its event is its
-     * refund" (that class's doc, verbatim). The OTHER of this class's two rows for a refunded return
-     * — the RETURN row — therefore has NO OMS counterpart and reads as a permanent, structural
-     * missing-in-OMS row on every run, not a transient timing gap. No live OMS
-     * `reconciliationReturns` payload has ever been captured, so the OMS side of this is contract-
-     * inferred, not live-verified — but the contract is unambiguous on this specific point.
+     * ReturnPresenceVerificationSupport's own doc: exactly one externalId per row, stamped with the
+     * refund id once one exists, "never backfilled" back to the return id — "a refunded Shopify
+     * Return is never separately expected; its event is its refund", verbatim) means a refunded
+     * return gets exactly ONE OMS counterpart, keyed by the refund id — so the extra RETURN row was a
+     * PERMANENT, STRUCTURAL phantom missing-in-OMS on every run, not a transient timing gap. No live
+     * OMS `reconciliationReturns` payload has ever been captured, so the OMS side of this remains
+     * contract-inferred, not live-verified — but the contract is unambiguous on this specific point,
+     * and removing a guaranteed false positive on the common case (a return WILL usually get
+     * refunded) was worth acting on without it.
      *
-     * REFUNDED-RETURN NARROWING — INVESTIGATED, NOT IMPLEMENTED (2026-08-18): the obvious fix is to
-     * emit a RETURN row only for a return with NO refund yet (a refunded return would then be
-     * represented by its REFUND row alone, matching the OMS contract above exactly). That requires
-     * knowing, per return, whether it has been refunded — and the only field this class's query
-     * selects that varies per return is `returns.nodes.status` (ShopifySourceCatalog's
-     * SHOPIFY_ORDER_RETURN_REFS fields), a Shopify ReturnStatus value: REQUESTED, OPEN, CLOSED,
-     * DECLINED, or CANCELED (shopify.dev's ReturnStatus enum reference). It does NOT work as that
-     * discriminator, on direct evidence, not a guess:
-     *   - Shopify's OWN `returnClose` mutation doc states CLOSED is reached "either when a refund
-     *     has been made and items restocked, OR SIMPLY WHEN IT HAS BEEN MARKED AS RETURNED IN THE
-     *     SYSTEM" (shopify.dev) — i.e. a return can be CLOSED with ZERO refunds. Treating CLOSED as
-     *     "has a refund, skip the RETURN row" would silently drop the RETURN row for exactly this
-     *     case, leaving that return with NO row on the Shopify side at all (no refund exists to give
-     *     it a REFUND row either) — reproducing the ORIGINAL bug this whole revision exists to fix,
-     *     for every non-refund-resolved (e.g. exchanged, or simply marked-returned) CLOSED return.
-     *   - Nothing in the schema prevents a refund existing while a return is still OPEN (Shopify
-     *     supports partial refunds mid-return). Treating OPEN as "not yet refunded, emit the RETURN
-     *     row" would then emit a RETURN row ALONGSIDE that refund's REFUND row for a return that
-     *     already has a real OMS counterpart (keyed by the refund id per the contract above) —
-     *     reproducing the phantom missing-in-OMS bug this narrowing exists to remove.
-     *   Both failure directions are live risks from the same field, not a rare corner: status
-     *   encodes the return's own workflow stage, not whether any refund transaction exists against
-     *   it — a different question the field was never designed to answer. The live-captured fixture
-     *   (src/test/resources/fixtures/shopify-order-return-refs-response.json) offers no help either:
-     *   its only return carries `status: "CLOSED"` — zero live examples of OPEN, REQUESTED, DECLINED,
-     *   or CANCELED exist in this repo to check the theory against even empirically.
-     *   Per the same standard applied to the rejected order-level return-pairing (fix round 1): a
-     *   wrong narrowing is worse than no narrowing, so none was implemented. Every in-window return
-     *   still emits its own RETURN row regardless of status, exactly as before this investigation.
-     *   The reliable discriminator remains a live-probed field query, same conclusion as the
-     *   Refund.return investigation above: either `Refund.return.id` (does this refund reference a
-     *   return) or, arguably better here since the question is per-return, `Return.refunds` (a
-     *   RefundConnection — "the refunds associated with the return"; querying it with `first: 1` and
-     *   checking for at least one edge would answer "has this return been refunded" directly).
-     *   Neither is selected today for the same reason as before: an invalid field fails the WHOLE
-     *   query at GraphQL validation time, and neither has been probed against this component's live
-     *   traffic. Adding and live-probing one of them is the well-scoped follow-up this narrowing is
-     *   actually waiting on — not a smarter status heuristic.
+     * WHAT DECIDES "HAS THIS RETURN BEEN REFUNDED" — `status` INVESTIGATED AND REJECTED, evidence
+     * preserved: the only per-return field this class's query used to select was
+     * `returns.nodes.status`, a Shopify ReturnStatus value (REQUESTED, OPEN, CLOSED, DECLINED,
+     * CANCELED — shopify.dev's ReturnStatus enum reference). It does NOT work as a refunded/unrefunded
+     * discriminator, on direct evidence, not a guess: Shopify's OWN `returnClose` mutation doc states
+     * CLOSED is reached "either when a refund has been made and items restocked, OR SIMPLY WHEN IT
+     * HAS BEEN MARKED AS RETURNED IN THE SYSTEM" (shopify.dev) — a return can be CLOSED with ZERO
+     * refunds (e.g. resolved by exchange). Treating CLOSED as "has a refund" would have silently
+     * dropped the RETURN row for exactly that case, leaving it with NO row on the Shopify side at all
+     * — reproducing the ORIGINAL bug this whole revision exists to fix. Symmetrically, nothing in the
+     * schema prevents a refund existing while a return stays OPEN (Shopify supports partial refunds
+     * mid-return), so treating OPEN as "not yet refunded" would have emitted a spurious RETURN row
+     * alongside an already-matched refund's row — reproducing the phantom missing-in-OMS bug this
+     * narrowing exists to remove. `status` encodes the return's own WORKFLOW STAGE, not whether any
+     * refund transaction exists against it — a different question the field was never designed to
+     * answer, and both of the failure directions above are live risks from it, not rare corners.
+     *
+     * THE AUTHORITATIVE DISCRIMINATOR — `Return.refunds` (ShopifySourceCatalog's
+     * SHOPIFY_ORDER_RETURN_REFS fields, `returns.refunds` fieldPath / `returns.nodes.refunds.id`
+     * selectionPath): a RefundConnection — "the refunds associated with the return" — confirmed
+     * present (non-null, no required args) on every DATED API version this catalog supports (2025-07,
+     * 2025-10, 2026-01, 2026-04; checked directly against shopify.dev's schema reference for each
+     * version, not assumed) — unlike the earlier Refund.return candidate, this removes the exact
+     * document-validation risk (an invalid field failing the WHOLE query) that justified refusing to
+     * select a field speculatively before. A return whose `refunds` connection comes back EMPTY has
+     * no refund and gets its own RETURN row; a return with ANY refund is skipped — its refund's own
+     * row (sourced independently from the order-level `refunds` list, not from this nested
+     * connection) already carries the match. See collectEvents/toRecords below for exactly how this
+     * is read; only emptiness is ever consulted, never the nested refund ids or their count.
+     *
+     * ACCEPTED COST NOW CLOSED: a refunded return previously produced two rows; it now produces
+     * exactly one (its refund's). The remaining known limitation is narrower: this narrowing trusts
+     * that `Return.refunds` accurately reflects refund state — reasonable given it is the schema's
+     * own authoritative connection for exactly this relationship, but, like every other live-Shopify
+     * claim in this class, not yet exercised against a real store's actual response for THIS specific
+     * field (the shape assumptions elsewhere here — the refunds/returns asymmetry, the no_return trim
+     * gap — were each probed live before being trusted; this one is schema-reference-verified only).
      *
      * KNOWN BREAKAGE (not this task's to fix): the other repo's ReturnPresenceVerificationSupport
      * reads the original refundIds/returnIds/refunds/returns fields (and would equally break against
@@ -376,14 +375,14 @@ class ShopifyReturnRefsSupport {
                                                         long floorMillis, long windowEndMillis,
                                                         List<String> warnings) {
         String orderId = bareId(node.get("legacyResourceId") ?: node.get("id"))
-        List<Map<String, String>> refundEvents = collectEvents(node.get("refunds"), orderId, "refunds", refundsFirst, warnings)
-        List<Map<String, String>> returnEvents = collectEvents(node.get("returns"), orderId, "returns", returnsFirst, warnings)
+        List<Map<String, Object>> refundEvents = collectEvents(node.get("refunds"), orderId, "refunds", refundsFirst, warnings)
+        List<Map<String, Object>> returnEvents = collectEvents(node.get("returns"), orderId, "returns", returnsFirst, warnings)
 
-        List<Map<String, String>> inWindowRefunds = inWindow(refundEvents, orderId, "refund", floorMillis, windowEndMillis, warnings)
-        List<Map<String, String>> inWindowReturns = inWindow(returnEvents, orderId, "return", floorMillis, windowEndMillis, warnings)
+        List<Map<String, Object>> inWindowRefunds = inWindow(refundEvents, orderId, "refund", floorMillis, windowEndMillis, warnings)
+        List<Map<String, Object>> inWindowReturns = inWindow(returnEvents, orderId, "return", floorMillis, windowEndMillis, warnings)
 
         List<Map<String, Object>> records = []
-        inWindowRefunds.each { Map<String, String> refund ->
+        inWindowRefunds.each { Map<String, Object> refund ->
             records.add([
                     eventId  : refund.id,
                     eventType: EVENT_TYPE_REFUND,
@@ -391,7 +390,12 @@ class ShopifyReturnRefsSupport {
                     createdAt: refund.createdAt,
             ] as Map<String, Object>)
         }
-        inWindowReturns.each { Map<String, String> ret ->
+        inWindowReturns.each { Map<String, Object> ret ->
+            // Refunded-return narrowing (2026-08-18): a return with at least one refund (per
+            // Return.refunds, read into hasRefund by collectEvents below) is represented by its
+            // refund's own REFUND row alone — see the class doc's "REFUNDED-RETURN NARROWING" and
+            // "AUTHORITATIVE DISCRIMINATOR" sections above. Only an unrefunded return gets a row here.
+            if (ret.hasRefund == true) return
             records.add([
                     eventId  : ret.id,
                     eventType: EVENT_TYPE_RETURN,
@@ -418,11 +422,22 @@ class ShopifyReturnRefsSupport {
      * not just the plain list. It over-warns on an order holding exactly `first` items; that false
      * positive is far cheaper than a silently truncated set.
      *
-     * Returns every event this page reported (id + own createdAt), UNFILTERED by window — truncation
-     * must be judged against everything Shopify actually returned, before any window trim. The
-     * caller (toRecords) applies the window filter afterward via inWindow().
+     * Returns every event this page reported (id + own createdAt, plus hasRefund — see below),
+     * UNFILTERED by window — truncation must be judged against everything Shopify actually returned,
+     * before any window trim. The caller (toRecords) applies the window filter afterward via
+     * inWindow().
+     *
+     * hasRefund (2026-08-18 narrowing): true only when the raw node carries a non-empty `refunds`
+     * list — i.e. only ever true for a RETURN node selected via Return.refunds (refund nodes have no
+     * such key, so a refund event's hasRefund is always false and is never read). A MISSING `refunds`
+     * key (null, not an empty list) also computes false — deliberately treated the same as "no
+     * refund", matching this class's established bias throughout (see inWindow's unparseable-
+     * createdAt handling below): when evidence is absent rather than explicitly negative, default
+     * toward EMITTING the row rather than silently suppressing it. Suppressing on missing evidence
+     * risks reproducing the original false-missing-in-Shopify bug; emitting an extra row on missing
+     * evidence is, at worst, a redundant row a downstream compare can resolve.
      */
-    private static List<Map<String, String>> collectEvents(Object rawConnection, String orderId, String label,
+    private static List<Map<String, Object>> collectEvents(Object rawConnection, String orderId, String label,
                                                             int requestedFirst, List<String> warnings) {
         if (rawConnection == null) return []
         List rawNodes = []
@@ -445,8 +460,13 @@ class ShopifyReturnRefsSupport {
             warnings.add("Order ${orderId} returned ${rawNodes.size()} ${label}, the maximum requested — the list may be truncated and diffs for it may be wrong.".toString())
         }
         return rawNodes.findAll { it instanceof Map }.collect { Map rawNode ->
-            [id: bareId(rawNode.get("id")), createdAt: normalize(rawNode.get("createdAt"))]
-        }.findAll { Map event -> event.id } as List<Map<String, String>>
+            Object rawRefunds = rawNode.get("refunds")
+            [
+                    id       : bareId(rawNode.get("id")),
+                    createdAt: normalize(rawNode.get("createdAt")),
+                    hasRefund: (rawRefunds instanceof List) && !((List) rawRefunds).isEmpty(),
+            ]
+        }.findAll { Map event -> event.id } as List<Map<String, Object>>
     }
 
     /**
@@ -458,7 +478,7 @@ class ShopifyReturnRefsSupport {
      * would manufacture exactly the false missing-in-Shopify diff this extractor exists to prevent,
      * while an over-inclusive candidate is, at worst, resolved as a forward match downstream.
      */
-    private static List<Map<String, String>> inWindow(List<Map<String, String>> events, String orderId, String label,
+    private static List<Map<String, Object>> inWindow(List<Map<String, Object>> events, String orderId, String label,
                                                        long floorMillis, long windowEndMillis,
                                                        List<String> warnings) {
         return events.findAll { Map event ->
