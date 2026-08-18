@@ -5,18 +5,19 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
-import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
- * Per-REFUND extraction for returns reconciliation (DAR-BE-018; 2026-08-17 grain-alignment plan,
- * Task 1, fix round 1 2026-08-18). One record per refund: {refundId, returnId, orderId, createdAt},
- * windowed on the refund's OWN createdAt. returnId is UNCONDITIONALLY NULL: Shopify's queried
- * response carries no direct refund->return link, and an order-level pairing heuristic (pair every
- * refund on an order with its one in-window return) was tried and rejected in fix round 1 — an
- * order can legitimately carry a real return alongside an unrelated refund (goodwill, shipping,
- * price adjustment), so that heuristic produced a confident but false returnId. See
- * ShopifyReturnRefsSupport.toRecords for the full rationale.
+ * Per-EVENT extraction for returns reconciliation (DAR-BE-018; 2026-08-17 grain-alignment plan,
+ * Task 1, REVISION 2026-08-18). One record per EVENT — a refund OR a return — each windowed on
+ * that event's OWN createdAt: {eventId, eventType: "REFUND"|"RETURN", orderId, createdAt}.
+ *
+ * This shape replaced an intermediate one-record-per-REFUND shape (with a nullable returnId) once
+ * the product owner confirmed OMS `externalId` is usually a Shopify refund id but sometimes a
+ * return id instead — a refund-only Shopify side had no fallback for that minority and would
+ * silently report those OMS rows missing-in-Shopify. Emitting both refunds and returns as their
+ * own same-shaped rows removes the need for any precedence rule: eventId is the single join key,
+ * whichever kind of id it is. See ShopifyReturnRefsSupport.toRecords for the full history.
  *
  * Cursor path, not bulk: refunds and returns are connections, and buildBulkQuery rejects those.
  */
@@ -30,40 +31,10 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void emitsOneRecordPerRefundWithBareOrderAndReturnIds() {
-        // NOTE: ShopifyGraphqlTransport.execute() returns [ok, data, cost, extensions, statusCode,
-        // retryable] on success — "data" is top-level, there is no "body" wrapper (see parseResponse
-        // in ShopifyGraphqlTransport.groovy, and the same [ok:true, data:...] shape used by every
-        // sibling cursor consumer: ShopifyExchangeSweepSupport, ShopifyExchangeStateLookupSupport).
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: orderNode("7025799037059",
-                            ["gid://shopify/Refund/5001"],
-                            ["gid://shopify/Return/9001"])]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
-        }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        assertEquals(1, result.recordCount)
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals("7025799037059", record.orderId)
-        assertEquals("5001", record.refundId)
-        // returnId is unconditionally null (fix round 1): a single in-window return on the order is
-        // NOT evidence the refund belongs to it — see the class doc.
-        assertNull(record.returnId)
-        assertEquals("2026-05-01T11:00:00Z", record.createdAt)
-    }
-
-    @Test
-    void twoRefundsAndOneReturnProduceTwoRecordsNeitherClaimingTheReturnItCannotBeShownToOwn() {
-        // Fix round 1, 2026-08-18: this is the exact case that exposed the rejected order-level
-        // pairing heuristic. One order, one in-window return, two in-window refunds — a real return
-        // plus, e.g., an unrelated goodwill/shipping refund is an ordinary Shopify pattern. Nothing in
-        // the queried response can tell these two refunds apart, so NEITHER may claim return 301;
-        // returnId must be null on both, never guessed onto either one.
+    void anOrderWithTwoRefundsAndOneReturnProducesThreeRecordsTwoRefundOneReturn() {
+        // The defining case for the per-event shape: every refund AND every return on the order
+        // gets its own row. eventType and eventId (that specific event's own id) must be correct on
+        // each, and createdAt must be that event's own date, not the order's or any other event's.
         Map node = [
                 id              : "gid://shopify/Order/2020",
                 legacyResourceId: "2020",
@@ -85,73 +56,32 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        assertEquals(2, result.recordCount)
+        assertEquals(3, result.recordCount)
         List records = (List) result.records
-        Map first = (Map) records.find { ((Map) it).refundId == "201" }
-        Map second = (Map) records.find { ((Map) it).refundId == "202" }
-        assertTrue(first != null && second != null, "both refunds must produce their own record: ${records}")
-        assertEquals("2026-05-01T09:00:00Z", first.createdAt)
-        assertEquals("2026-05-01T10:00:00Z", second.createdAt)
-        assertNull(first.returnId, "no refund may claim a returnId it cannot be shown to own: ${first}")
-        assertNull(second.returnId, "no refund may claim a returnId it cannot be shown to own: ${second}")
-    }
+        Map refund201 = (Map) records.find { ((Map) it).eventId == "201" }
+        Map refund202 = (Map) records.find { ((Map) it).eventId == "202" }
+        Map return301 = (Map) records.find { ((Map) it).eventId == "301" }
+        assertTrue(refund201 != null && refund202 != null && return301 != null,
+                "two REFUND records and one RETURN record are expected: ${records}")
 
-    @Test
-    void returnIdIsNullWhetherOrNotTheOrderHasAReturn() {
-        // Not "a refund WITH an associated return carries that id" — Task 1's original brief assumed
-        // order-level pairing could safely make that true; fix round 1 established it cannot. Both
-        // orders below produce a null returnId: the one-return order for the reason exercised above,
-        // the no-return order because there is nothing at all to pair with.
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [
-                            [cursor: "c1", node: orderNode("4001", ["gid://shopify/Refund/401"], ["gid://shopify/Return/501"])],
-                            [cursor: "c2", node: orderNode("4002", ["gid://shopify/Refund/402"], [])],
-                    ],
-                    pageInfo: [hasNextPage: false, endCursor: "c2"],
-            ]]]
+        assertEquals("REFUND", refund201.eventType)
+        assertEquals("2026-05-01T09:00:00Z", refund201.createdAt)
+        assertEquals("2020", refund201.orderId)
+
+        assertEquals("REFUND", refund202.eventType)
+        assertEquals("2026-05-01T10:00:00Z", refund202.createdAt)
+
+        assertEquals("RETURN", return301.eventType)
+        assertEquals("2026-05-01T09:05:00Z", return301.createdAt)
+        assertEquals("2020", return301.orderId)
+
+        // No record ever carries a refundId or returnId field any more — eventId/eventType replace
+        // both entirely.
+        records.each { Object raw ->
+            Map record = (Map) raw
+            assertFalse(record.containsKey("refundId"), "refundId must not appear on any record: ${record}")
+            assertFalse(record.containsKey("returnId"), "returnId must not appear on any record: ${record}")
         }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        assertEquals(2, result.recordCount)
-        List records = (List) result.records
-        Map onOrderWithReturn = (Map) records.find { ((Map) it).refundId == "401" }
-        Map onOrderWithoutReturn = (Map) records.find { ((Map) it).refundId == "402" }
-        assertNull(onOrderWithReturn.returnId, "a single in-window return is not proof the refund belongs to it: ${onOrderWithReturn}")
-        assertNull(onOrderWithoutReturn.returnId, "a refund with no return on its order must carry a null returnId: ${onOrderWithoutReturn}")
-    }
-
-    @Test
-    void twoOrMoreInWindowReturnsLeaveReturnIdNullOnEveryEmittedRefund() {
-        // The defensive 2+-returns branch, explicitly tested (fix round 1 review point 2). Whether
-        // ambiguity comes from zero, one, or several returns, the outcome must be identical: null.
-        Map node = [
-                id              : "gid://shopify/Order/2222",
-                legacyResourceId: "2222",
-                name            : "#2222",
-                createdAt       : "2026-05-01T08:00:00Z",
-                refunds         : [[id: "gid://shopify/Refund/211", createdAt: "2026-05-01T09:00:00Z"]],
-                returns         : [nodes: [
-                        [id: "gid://shopify/Return/311", status: "CLOSED", createdAt: "2026-05-01T08:30:00Z"],
-                        [id: "gid://shopify/Return/312", status: "CLOSED", createdAt: "2026-05-01T08:45:00Z"],
-                ]],
-        ]
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: node]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
-        }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        assertEquals(1, result.recordCount)
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals("211", record.refundId)
-        assertNull(record.returnId, "with two in-window returns on the order, pairing is doubly unresolvable: ${record}")
     }
 
     @Test
@@ -174,20 +104,47 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(1, result.recordCount)
         Map record = (Map) ((List) result.records)[0]
-        assertEquals("81", record.refundId)
+        assertEquals("81", record.eventId)
+        assertEquals("REFUND", record.eventType)
         assertEquals("2026-05-01T12:00:00Z", record.createdAt)
     }
 
     @Test
+    void aRecentOrderWithAnOutOfWindowReturnIsNotEmitted() {
+        // The mirror of the refund case above, on the RETURN side: the order surfaces in the
+        // Shopify net because something on it changed recently, but the return itself predates the
+        // window. Only the event's OWN createdAt may decide inclusion — this applies to returns
+        // exactly as it does to refunds now that both are windowed and emitted the same way.
+        Map node = [
+                id              : "gid://shopify/Order/779",
+                legacyResourceId: "779",
+                name            : "#779",
+                createdAt       : "2026-01-01T00:00:00Z",   // order createdAt: irrelevant to windowing
+                refunds         : [],
+                returns         : [nodes: [[id: "gid://shopify/Return/791", status: "CLOSED",
+                                             createdAt: "2026-04-15T00:00:00Z"]]],   // BEFORE the window
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(0, result.recordCount, "an out-of-window return must not appear: ${result.records}")
+    }
+
+    @Test
     void aRecentOrderWithAnOutOfWindowRefundIsNotEmitted() {
-        // C1: the order surfaces in the Shopify net because SOMETHING on it changed recently (an
-        // updated_at bump), but the refund itself predates the window. Only the event's OWN
-        // createdAt may decide inclusion.
+        // C1: the refund-side counterpart of the return case above.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("777",
                             ["gid://shopify/Refund/71"], [],
-                            "2026-01-01T00:00:00Z",   // order createdAt: irrelevant to windowing
+                            "2026-01-01T00:00:00Z",
                             "2026-04-15T00:00:00Z",   // refund createdAt: BEFORE the window
                             "2026-05-01T10:30:00Z")]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
@@ -201,9 +158,12 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void anOrderWhoseReturnsHaveNoRefundEmitsNoRecordAndIncrementsAWarningCount() {
-        // The deliberate narrowing this plan accepts: a refund-driven extract cannot emit a return
-        // awaiting its refund. It must be counted and surfaced as a warning, never dropped silently.
+    void aReturnWithNoRefundEmitsItsOwnReturnRow() {
+        // This is the case that closes the false-positive gap this revision exists for: previously
+        // (the per-refund shape) a return with no refund yet emitted NOTHING and only a warning. An
+        // OMS row whose externalId happened to be this return's id would then have no Shopify row to
+        // join against at all and would misreport as missing-in-Shopify. Now it gets a genuine RETURN
+        // row, no warning needed, nothing dropped.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("9999", [], ["gid://shopify/Return/8801"])]],
@@ -211,23 +171,20 @@ class ShopifyReturnRefsSupportTests {
             ]]]
         }
 
-        int warningsBefore = 0
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        assertEquals(0, result.recordCount, "a return with no refund must emit no record: ${result.records}")
-        List warnings = (List) result.warnings
-        assertEquals(warningsBefore + 1, warnings.size(), "exactly one warning must be added for the unrefunded return: ${warnings}")
-        assertTrue(warnings.any { it.toString().contains("9999") && it.toString().contains("refund") },
-                "the warning must name the order and mention the missing refund: ${warnings}")
+        assertEquals(1, result.recordCount, "a return with no refund must still emit its own row: ${result.records}")
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("8801", record.eventId)
+        assertEquals("RETURN", record.eventType)
+        assertEquals("9999", record.orderId)
+        // No narrowing warning any more — nothing was dropped, so there is nothing to disclose.
+        assertEquals([], result.warnings)
     }
 
     @Test
     void anOrderWithNeitherRefundsNorReturnsInWindowEmitsNoRecordAndNoWarning() {
-        // Unlike the order-per-record model this replaces, an empty order is no longer emitted as
-        // "evidence" for a reverse pass — the target end-state is a plain flat join, which needs no
-        // such evidence record. No return exists here either, so this is not the no-refund narrowing:
-        // there is nothing to warn about.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("333", [], [])]],
@@ -264,8 +221,8 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(2, calls)
         assertEquals(2, result.recordCount)
-        List refundIds = ((List) result.records).collect { ((Map) it).refundId }
-        assertEquals(["1", "2"] as Set, refundIds as Set)
+        List eventIds = ((List) result.records).collect { ((Map) it).eventId }
+        assertEquals(["1", "2"] as Set, eventIds as Set)
     }
 
     @Test
@@ -363,18 +320,19 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
         assertEquals(1, result.recordCount)
-        assertEquals("91", ((Map) ((List) result.records)[0]).refundId)
+        assertEquals("91", ((Map) ((List) result.records)[0]).eventId)
     }
 
     @Test
-    void refundOnlyOrderProducesARecordAndReturnOnlyOrderProducesOnlyAWarning() {
+    void refundOnlyAndReturnOnlyOrdersBothProduceRecordsUnderTheEventShape() {
         // C1: live-captured fixture (gorjana-sandbox.myshopify.com, Admin API 2026-01, 2026-08-13).
         // #GORTEST27948 is a refund-only order — no Return object attached — which a bare
         // `-return_status:no_return` trim silently drops (probed: 25 orders back, all with
         // returns >= 1, zero refund-only). The OR-widened trim this class builds must let it survive
-        // extraction end to end, now as a refund record with a null returnId.
-        // #GORTEST27950 is return-only: under the refund-driven grain it can no longer be
-        // represented as a Shopify record at all — it must surface as the no-refund-yet warning.
+        // extraction end to end, as a REFUND event row.
+        // #GORTEST27950 is return-only. Under the earlier per-refund shape this produced no record at
+        // all, only a warning — exactly the gap this revision closes: it now produces its own RETURN
+        // event row directly.
         Map fixture = loadFixture()
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: fixture.data]
@@ -384,15 +342,17 @@ class ShopifyReturnRefsSupportTests {
                 "2026-08-12T00:00:00Z", "2026-08-13T00:00:00Z", [:], executor)
 
         List records = (List) result.records
-        assertEquals(1, records.size(), "only the refund-only order should produce a record: ${records}")
-        Map refundOnly = (Map) records[0]
-        assertEquals("1005422084140", refundOnly.refundId)
-        assertEquals("6942591025196", refundOnly.orderId)
-        assertNull(refundOnly.returnId, "a refund-only order has no return to pair with: ${refundOnly}")
+        assertEquals(2, records.size(), "both the refund-only and the return-only order must each produce one record: ${records}")
 
-        List warnings = (List) result.warnings
-        assertTrue(warnings.any { it.toString().contains("6942747197484") && it.toString().contains("refund") },
-                "the return-only order must surface as a no-refund-yet warning, not a silently dropped record: ${warnings}")
+        Map refundEvent = (Map) records.find { ((Map) it).orderId == "6942591025196" }
+        assertTrue(refundEvent != null, "the refund-only order must produce a REFUND event: ${records}")
+        assertEquals("1005422084140", refundEvent.eventId)
+        assertEquals("REFUND", refundEvent.eventType)
+
+        Map returnEvent = (Map) records.find { ((Map) it).orderId == "6942747197484" }
+        assertTrue(returnEvent != null, "the return-only order must now produce a RETURN event, not just a warning: ${records}")
+        assertEquals("44800213036", returnEvent.eventId)
+        assertEquals("RETURN", returnEvent.eventType)
     }
 
     @Test
@@ -456,7 +416,7 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
         assertEquals(1, result.recordCount, "a refund within the lookback before windowStart must be included: ${result.records}")
-        assertEquals("111", ((Map) ((List) result.records)[0]).refundId)
+        assertEquals("111", ((Map) ((List) result.records)[0]).eventId)
     }
 
     @Test

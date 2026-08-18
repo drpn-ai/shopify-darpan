@@ -92,38 +92,45 @@
 
     <service verb="extract" noun="ShopifyOrderReturnRefs" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyReturnRefs.groovy">
-        <description>Extract per-REFUND Shopify records for a window, for returns reconciliation
-            against the OMS reconciliationReturns extract (DAR-BE-018; reshaped to this grain by the
-            2026-08-17 returns-refund-grain-alignment plan, Task 1).
+        <description>Extract per-EVENT Shopify records for a window, for returns reconciliation
+            against the OMS reconciliationReturns extract (DAR-BE-018). An event is a refund OR a
+            return; this is the second reshape of this service's output — see
+            ShopifyReturnRefsSupport's class doc (2026-08-17 returns-refund-grain-alignment plan,
+            Task 1, REVISION 2026-08-18) for the full shape history.
 
             Uses CURSOR pagination, not Bulk Operations: refunds and returns are GraphQL connections,
             and the bulk path rejects connection-bearing fields because bulk JSONL emits their children
             as separate __parentId lines that nothing here re-nests. That is why this service carries no
             bulk poll/retry parameters.
 
-            WINDOW SEMANTICS: this windows on the CREATION of the refund itself, not on any order-level
-            date (an order can be arbitrarily older than its refund). The Shopify search is a wide,
-            lower-bound-only net (updated_at >= windowStart - lookbackHours, no upper bound, trimmed to
-            orders that plausibly carry a refund or a return); [windowStart - lookbackHours, windowEnd)
-            is then applied client-side against each refund's (and return's) own createdAt. The lookback
-            (default 3h) exists because OMS lags Shopify by ~38min (RQ-23): an OMS return just inside
-            windowStart can point at a Shopify refund created just before it, and that refund must still
-            be fetched for the OMS-side forward match to see it. See ShopifyReturnRefsSupport for the
-            full rationale.
+            WINDOW SEMANTICS: this windows on the CREATION of each event itself, not on any order-level
+            date (an order can be arbitrarily older than a refund or return on it). The Shopify search
+            is a wide, lower-bound-only net (updated_at >= windowStart - lookbackHours, no upper bound,
+            trimmed to orders that plausibly carry a refund or a return); [windowStart - lookbackHours,
+            windowEnd) is then applied client-side against each refund's and each return's own
+            createdAt independently. The lookback (default 3h) exists because OMS lags Shopify by
+            ~38min (RQ-23): an OMS row just inside windowStart can point at a Shopify event created
+            just before it, and that event must still be fetched for the OMS-side forward match to see
+            it. See ShopifyReturnRefsSupport for the full rationale.
 
-            Each output record is one REFUND: {refundId, returnId, orderId, createdAt}, all ids bare
-            (GID tail stripped) so they land in the same space as the OMS externalId — refundId is the
-            join key OMS reconciliationReturns.externalId matches against. returnId is nullable and,
-            as of fix round 1 (2026-08-18), UNCONDITIONALLY NULL today: Shopify's queried response
-            carries no direct refund-to-return link, and an order-level pairing heuristic (pair a
-            refund with its order's return whenever the order has exactly one in-window return) was
-            tried and rejected — an order can legitimately carry a real return alongside an unrelated
-            refund (goodwill, shipping, price adjustment), and pairing on order-level coincidence
-            produced a confident but false returnId. See ShopifyReturnRefsSupport.toRecords for the
-            full rationale and the live-probe-gated follow-up (Shopify's schema exposes a direct
-            Refund.return field) that will eventually populate this field for real. An order whose
-            return has no refund yet cannot be represented as a record under this refund-driven grain;
-            that gap is counted and surfaced as a warning instead of a silently dropped row.</description>
+            Each output record is one EVENT: {eventId, eventType, orderId, createdAt}, all ids bare
+            (GID tail stripped) so they land in the same space as the OMS externalId. eventType is
+            "REFUND" or "RETURN". eventId is the single join key OMS reconciliationReturns.externalId
+            matches against — no precedence rule needed: the product owner confirmed (2026-08-18) that
+            externalId is usually a Shopify refund id but sometimes a return id, and emitting both
+            kinds as same-shaped rows under one eventId column means whichever kind OMS actually used,
+            the matching Shopify row is there to join against directly. This revision retires the
+            refundId/returnId column split (and with it the refund-to-return association problem — see
+            ShopifyReturnRefsSupport.toRecords for that investigation's history) and the earlier
+            "no refund yet" warning: a return with no refund yet now emits its own RETURN row rather
+            than being dropped. Accepted, disclosed cost: a refunded return now produces two rows (its
+            refund and itself). No live OMS reconciliationReturns payload has ever been captured, but
+            the documented OMS-side contract (one row per return, one externalId field, stamped with
+            either the refund id or, for a permanent minority, the return id — see
+            ReturnPresenceVerificationSupport's class doc) suggests OMS emits at most ONE counterpart
+            per return; if so the other Shopify row reads as a permanent, structural missing-in-OMS
+            row, not a transient gap. See ShopifyReturnRefsSupport.toRecords for the full
+            rationale.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>

@@ -12,17 +12,19 @@ import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeInt
 
 /**
- * Per-REFUND Shopify records for returns reconciliation (DAR-BE-018, design §7). Originally this
- * class emitted one record per ORDER, carrying refundIds[]/returnIds[] id-set lists; the
- * 2026-08-17 returns-refund-grain-alignment plan (Task 1) reshaped it to one record per REFUND so
- * both sides of the compare share a grain — see the doc above toRecords for the full shape history
- * and the refund-return association investigation.
+ * Per-EVENT Shopify records for returns reconciliation (DAR-BE-018, design §7). An event is a
+ * refund OR a return; every in-window refund and every in-window return each emit their own row,
+ * tagged with an eventType. This is this class's SECOND reshape: it originally emitted one record
+ * per ORDER carrying refundIds[]/returnIds[] id-set lists, then (2026-08-17 plan, Task 1) one
+ * record per REFUND with a nullable returnId, and now (REVISION 2026-08-18, same plan) one record
+ * per EVENT with no refund/return distinction beyond the eventType tag — see the doc above
+ * toRecords for the full shape history and why each reshape happened.
  *
  * CURSOR PATH, NOT BULK. refunds and returns are connections; ShopifyGraphqlQueryBuilder
  * .buildBulkQuery rejects connection-bearing fields because bulk JSONL emits their children as
  * separate __parentId lines and nothing here re-nests them. Cursor pagination returns naturally
  * nested objects — each order together with its own refunds and returns — which toRecords then
- * flattens into one output record per refund on that order.
+ * flattens into one output record per EVENT (refund or return) on that order.
  *
  * Ids are emitted BARE (GID tail). The OMS side stores a bare numeric Shopify reference, and the
  * SHOPIFY_GID_TAIL normalizer's type segment is a wildcard, so both sides land in the same space
@@ -77,6 +79,10 @@ class ShopifyReturnRefsSupport {
     // Keep the two in sync if either default ever moves — they encode the same RQ-23 sync-lag
     // assumption from opposite ends of the pipeline.
     static final int DEFAULT_LOOKBACK_HOURS = 3
+    // REVISION 2026-08-18: the eventType tag on the per-event record shape. See the doc above
+    // toRecords for why this replaced the earlier refundId/returnId column split.
+    static final String EVENT_TYPE_REFUND = "REFUND"
+    static final String EVENT_TYPE_RETURN = "RETURN"
 
     private static final Pattern GID_TAIL = Pattern.compile('gid://shopify/[^/]+/(\\d+)(?:\\?.*)?$')
     private static final Pattern TRAILING_DIGITS = Pattern.compile('(\\d+)$')
@@ -102,11 +108,11 @@ class ShopifyReturnRefsSupport {
             ShopifyGraphqlTransport.execute(cfg, queryDocument, variables, opts)
         }
 
-        // Counts orders actually processed (one increment per edge, regardless of how many refund
+        // Counts orders actually processed (one increment per edge, regardless of how many event
         // records — zero, one, or several — that order goes on to produce). records.size() can no
-        // longer stand in for this since Task 1's reshape (2026-08-17 grain-alignment plan): a
-        // record is now per-REFUND, not per-order, so an order with two refunds contributes two
-        // records and an order whose only event is an unrefunded return contributes zero.
+        // longer stand in for this since this class's per-order shape was reshaped (2026-08-17
+        // grain-alignment plan): a record is now per-EVENT (one refund OR one return), so an order
+        // with two refunds and one return contributes three records to a single ordersProcessed++.
         int ordersProcessed = 0
 
         Map<String, Object> built
@@ -228,7 +234,7 @@ class ShopifyReturnRefsSupport {
                 dataAvailable  : !records.isEmpty(),
                 requestMetadata: [filters: [
                         serverReportedOrderCount: ordersProcessed,
-                        refundRecordCount       : records.size(),
+                        eventRecordCount        : records.size(),
                 ]],
                 warnings       : warnings,
                 errors         : [],
@@ -236,83 +242,98 @@ class ShopifyReturnRefsSupport {
     }
 
     /**
-     * Builds this order's refund records — ONE PER REFUND, not one per order (DAR-BE-018;
-     * 2026-08-17 returns-refund-grain-alignment plan, Task 1). Each emitted record is a flat scalar
-     * map: { refundId, returnId, orderId, createdAt }, where createdAt is the REFUND's own creation
-     * date. refundId/orderId/returnId are all bareId-normalized so they land in the same id space as
-     * the OMS side's externalId (see CompareDatasetSupport.applyIdNormalizer's SHOPIFY_GID_TAIL).
+     * Builds this order's EVENT records — one row per refund AND one row per return, each tagged
+     * with its own eventType (DAR-BE-018; 2026-08-17 returns-refund-grain-alignment plan, Task 1,
+     * REVISION 2026-08-18). Each emitted record is a flat scalar map:
+     *   { eventId, eventType: EVENT_TYPE_REFUND | EVENT_TYPE_RETURN, orderId, createdAt }
+     * createdAt is that SPECIFIC event's own creation date (a refund row carries the refund's
+     * createdAt; a return row carries the return's). eventId/orderId are bareId-normalized so they
+     * land in the same id space as the OMS side's externalId (see
+     * CompareDatasetSupport.applyIdNormalizer's SHOPIFY_GID_TAIL).
      *
-     * SHAPE HISTORY — read before "restoring" a list field: this method used to emit ONE RECORD PER
-     * ORDER carrying refundIds[]/returnIds[] plus parallel refunds[]/returns[] {id, createdAt} lists
-     * (see git history / the 2026-08-17 plan's "why"). That list shape itself replaced an even
-     * earlier `refundsCreatedAt: {id: isoCreatedAt}` MAP keyed by data-derived refund ids (Important
-     * #1, fix-wave-C): a plain (schema-inferring) Spark JSON read (ReconciliationServices.ingestFile)
-     * turns a JSON object into a fixed-field StructType, never a MapType, so that map's field count
-     * tracked the union of every refund/return id across the whole file, and
-     * CompareDatasetSupport.buildJsonDataDf's `struct(col("*"))` carried that unbounded width
-     * straight into the compare dataset. The per-order list shape fixed that by keeping a stable,
-     * small set of field NAMES regardless of event count.
+     * WHY ONE KEY, NO PRECEDENCE RULE (the reason for this revision): OMS
+     * reconciliationReturns.externalId is *usually* a Shopify refund id, but the product owner
+     * confirmed (2026-08-18) that for a small number of returns it holds the RETURN id instead —
+     * exactly the ambiguity the now-retired-in-spirit ReturnPresenceVerificationSupport hedged on by
+     * checking refund ids first and falling back to return ids (that class's forward pass, the other
+     * repo's ReturnPresenceVerificationSupport.groovy:121-122). A Shopify side that only ever emitted
+     * refunds had no equivalent fallback: an OMS row whose externalId happens to be a return id would
+     * join against nothing, miss every refund on its order, and report missing-in-Shopify — a SILENT
+     * FALSE POSITIVE, exactly the failure class this whole plan exists to remove. Emitting both
+     * refunds and returns as same-shaped rows under one eventId column removes the need for any
+     * precedence rule entirely: whichever kind of id OMS actually put in externalId, the matching
+     * Shopify event lands in the same eventId column on this side and joins directly, no lookup order
+     * required.
      *
-     * Per-REFUND rows go further and satisfy the same constraint even more completely: there are no
-     * list-valued fields left at all, so schema width cannot vary with event count even in principle.
-     * The reason for THIS reshape is a different one, though — grain, not schema width: OMS
-     * `reconciliationReturns` already emits one row per return whose externalId is a Shopify REFUND
-     * id, so a Shopify side that emitted one row per ORDER could never be joined to it directly;
-     * ReturnPresenceVerificationSupport (the other repo) exists only to bridge that grain mismatch
-     * with bespoke presence-verification logic. Matching the grain — one row per refund on both sides
-     * — turns that bespoke stage into an ordinary flat compare, the same shape orders reconciliation
-     * already uses. See the 2026-08-17 plan doc for the full "why".
+     * SHAPE HISTORY — read before "restoring" a removed field: this class has now been reshaped
+     * TWICE. It originally emitted ONE RECORD PER ORDER carrying refundIds[]/returnIds[] plus
+     * parallel refunds[]/returns[] {id, createdAt} lists (see git history). The 2026-08-17 plan's
+     * Task 1 first reshaped that to ONE RECORD PER REFUND — {refundId, returnId, orderId, createdAt}
+     * — to match OMS's per-return grain; this REVISION (2026-08-18) reshapes it again, to one record
+     * per EVENT of either kind, once the per-refund shape's OMS-id assumption above turned out not to
+     * hold universally. The very first, pre-list shape was itself a `refundsCreatedAt: {id:
+     * isoCreatedAt}` MAP keyed by data-derived refund ids (Important #1, fix-wave-C): a plain
+     * (schema-inferring) Spark JSON read (ReconciliationServices.ingestFile) turns a JSON object into
+     * a fixed-field StructType, never a MapType, so that map's field count tracked the union of every
+     * refund/return id across the whole file, and CompareDatasetSupport.buildJsonDataDf's
+     * `struct(col("*"))` carried that unbounded width straight into the compare dataset. Every shape
+     * since has kept a small, event-count-independent set of field NAMES; per-event rows keep that
+     * property too — there are still no list-valued fields anywhere in the output.
      *
-     * refundIds/returnIds/refunds[]/returns[] are ALL REMOVED by this reshape. KNOWN BREAKAGE (not
-     * this task's to fix): the other repo's ReturnPresenceVerificationSupport reads exactly those
-     * four removed fields at multiple sites and will fail against this new shape until it is
-     * retired or rewritten — tracked as a separate, later task in the same plan; do not "fix" it
+     * WHAT THIS REVISION REMOVES relative to the per-refund shape it supersedes:
+     *   - refundId/returnId as two separate columns on one row. Refunds and returns are now separate
+     *     ROWS instead of one row trying to carry both, so there is no longer a refund->return
+     *     association to get right (or wrong) at all — see ASSOCIATION HISTORY below for why that
+     *     entire problem is now moot, kept here because it documents real investigation and a real,
+     *     reviewed rejection (fix round 1) that would otherwise look inexplicably absent.
+     *   - the "no refund yet" narrowing and its warning. A return with no refund yet now emits its
+     *     own RETURN row directly, so nothing is dropped and there is nothing to warn about — this is
+     *     also precisely how this revision closes the false-positive gap described above: a
+     *     return-only OMS row now has a genuine Shopify row to match against even before any refund
+     *     for it exists.
+     *
+     * ASSOCIATION HISTORY (kept for context; no longer load-bearing since refunds and returns are
+     * independent rows here): earlier revisions of this class tried to attach a returnId to each
+     * refund record. Investigation found the GraphQL selection this class actually queries
+     * (ShopifySourceCatalog's SHOPIFY_ORDER_RETURN_REFS fields: refunds.id, refunds.createdAt,
+     * returns.nodes.id, returns.nodes.status, returns.nodes.createdAt — confirmed against both the
+     * field list and the live-captured fixture,
+     * src/test/resources/fixtures/shopify-order-return-refs-response.json) carries no field on either
+     * side that names the other. Shopify's Admin GraphQL schema does publish a direct link —
+     * Refund.return (a nullable back-reference to the Return object; see shopify.dev's Refund object
+     * reference) — but it has never been live-probed against this component (an invalid field would
+     * fail the WHOLE query at GraphQL validation time, not just degrade one column) and was
+     * deliberately not selected speculatively. A fallback order-level pairing heuristic (pair a
+     * refund with its order's one in-window return) was implemented and then rejected on review (fix
+     * round 1, 2026-08-18): an order can legitimately carry a real return alongside an unrelated
+     * refund — goodwill, shipping, a price adjustment — so the heuristic produced a confidently WRONG
+     * returnId rather than an honest null. This revision makes the whole question moot: refunds and
+     * returns are independent rows here and this class never associates one with the other. If a
+     * future need arises to correlate a refund row with the return it actually belongs to (analytics,
+     * not reconciliation), Refund.return remains the answer — still requiring a live probe first.
+     *
+     * ACCEPTED COST — report, do not silently work around: a refunded return now produces TWO rows
+     * (its refund and the return itself) whenever both events fall in the same window. No live OMS
+     * `reconciliationReturns` payload has ever been captured (OmsReturnsExtractTests.groovy's own
+     * class doc, the other repo: "no swagger, fixture, or captured live response for this endpoint
+     * exists"), so this is not live-verified either way. The documented OMS-side CONTRACT is
+     * suggestive, though, and points one direction: OmsReturnsSourceSupport extracts one row per
+     * physical OMS return record, and ReturnPresenceVerificationSupport's own doc describes exactly
+     * one externalId per row, stamped with EITHER the refund id (usual case) OR, for a permanent
+     * minority of returns imported while IN PROGRESS, the return id — "never backfilled to the
+     * refund id once one issues" (that class's doc). Nothing in that contract describes a return
+     * being represented by two OMS rows. If that holds, a refunded return most likely gets exactly
+     * ONE OMS counterpart, and the OTHER of this class's two Shopify rows for it will read as a
+     * permanent, structural missing-in-OMS row on every run — not a transient timing gap. This is a
+     * known, disclosed limitation the plan explicitly accepted, not something to patch around in
+     * this class; do not add filtering here to "fix" it without a deliberate, separate decision.
+     *
+     * KNOWN BREAKAGE (not this task's to fix): the other repo's ReturnPresenceVerificationSupport
+     * reads the original refundIds/returnIds/refunds/returns fields (and would equally break against
+     * the intermediate refundId/returnId shape) at multiple sites, and will fail against this shape
+     * too until it is retired or rewritten — a separate, later task in the same plan. Do not "fix" it
      * from here without re-reading that class's own doc first (it has at least one behavior — a
      * per-order forward-match suppression — that is not a plain join and needs a deliberate call).
-     *
-     * REFUND -> RETURN ASSOCIATION (the one open design question Task 1 had to investigate rather
-     * than assume): the GraphQL selection this class actually queries (ShopifySourceCatalog's
-     * SHOPIFY_ORDER_RETURN_REFS fields: refunds.id, refunds.createdAt, returns.nodes.id,
-     * returns.nodes.status, returns.nodes.createdAt — confirmed against both the field list and the
-     * live-captured fixture, src/test/resources/fixtures/shopify-order-return-refs-response.json)
-     * carries NO field on either side that names the other: a refund node has only {id, createdAt},
-     * a return node only {id, status, createdAt}. There is therefore no direct link in what this
-     * class actually receives today.
-     *   Shopify's Admin GraphQL schema DOES publish a direct link — Refund.return (a nullable
-     *   back-reference to the Return object; see shopify.dev's Refund object reference) — that would
-     *   give an authoritative, unambiguous join with no pairing heuristic needed at all. It is
-     *   deliberately NOT selected here: every other claim in this class about live Shopify behavior
-     *   (the refunds/returns shape asymmetry, the no_return trim gap, the search/sort text) is backed
-     *   by an actual probe against a real store on a real API version, and this field has not been.
-     *   Selecting an unverified field on the live query is a materially bigger risk than a heuristic
-     *   guess would be: GraphQL schema validation runs on the WHOLE document before any execution, so
-     *   if `refunds.return.id` is not a valid path for a store's actual API version, the entire
-     *   extraction fails closed for every order in that run — not just the returnId column. Adding
-     *   and live-probing that field first, across every supported API version
-     *   (SUPPORTED_API_VERSIONS), is a well-scoped, high-value follow-up; it must not be added
-     *   speculatively from here.
-     *   returnId is therefore UNCONDITIONALLY NULL in this class today — no pairing heuristic of any
-     *   kind is applied. An earlier revision of this fix paired a refund with its order's return
-     *   whenever the order carried EXACTLY ONE in-window return (reasoning that zero or several
-     *   returns are genuinely ambiguous, so only the single-return case looked safe). Code review
-     *   (fix round 1, 2026-08-18) correctly rejected that: an order can legitimately carry one real
-     *   Return AND a separate refund that has nothing to do with it — a goodwill refund, a shipping
-     *   refund, a price adjustment — all ordinary Shopify patterns. The single-return case is not
-     *   evidence of relatedness, only of order-level coincidence, and pairing on it manufactures a
-     *   CONFIDENT LIE: a returnId that looks authoritative but is not, which produces a clean-looking
-     *   diff that is wrong — precisely the failure this whole plan exists to remove. A null returnId
-     *   is a known unknown and is the honest, harmless answer until the real Refund.return link is
-     *   live-verified and wired in; do not reintroduce any form of order-level pairing without that
-     *   verification.
-     *
-     * NO-REFUND-YET NARROWING (deliberate, not a defect — see the plan's "Known narrowing" section):
-     * a refund-driven extract cannot emit a record for a return that has no refund yet. When this
-     * order's in-window returns are non-empty but its in-window refunds are empty, no record is
-     * emitted for it and a warning is added instead, so the gap is counted and surfaced rather than
-     * silently dropped. This also retires the old "empty order as reverse-pass evidence" behavior: an
-     * order with neither refunds nor returns in window now simply contributes nothing, with no
-     * warning either — that evidence existed only to support ReturnPresenceVerificationSupport's own
-     * per-order lookup, which a flat, matching-grain join does not need.
      */
     private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,
                                                         long floorMillis, long windowEndMillis,
@@ -324,27 +345,24 @@ class ShopifyReturnRefsSupport {
         List<Map<String, String>> inWindowRefunds = inWindow(refundEvents, orderId, "refund", floorMillis, windowEndMillis, warnings)
         List<Map<String, String>> inWindowReturns = inWindow(returnEvents, orderId, "return", floorMillis, windowEndMillis, warnings)
 
-        if (inWindowRefunds.isEmpty()) {
-            if (!inWindowReturns.isEmpty()) {
-                warnings.add(("Order ${orderId} has ${inWindowReturns.size()} return(s) in this window with no " +
-                        "matching refund; a refund-driven extract cannot represent a return before it is " +
-                        "refunded, so no record was emitted for it.").toString())
-            }
-            return []
-        }
-
-        // returnId is UNCONDITIONALLY NULL — see the ASSOCIATION section of this method's doc above
-        // (fix round 1, 2026-08-18). inWindowReturns is still collected and windowed above only to
-        // drive the no-refund-yet warning; it must NEVER be read here to guess a returnId, by any
-        // heuristic, no matter how narrow — a wrong returnId is worse than a missing one.
-        return inWindowRefunds.collect { Map<String, String> refund ->
-            [
-                    refundId : refund.id,
-                    returnId : null,
+        List<Map<String, Object>> records = []
+        inWindowRefunds.each { Map<String, String> refund ->
+            records.add([
+                    eventId  : refund.id,
+                    eventType: EVENT_TYPE_REFUND,
                     orderId  : orderId,
                     createdAt: refund.createdAt,
-            ] as Map<String, Object>
+            ] as Map<String, Object>)
         }
+        inWindowReturns.each { Map<String, String> ret ->
+            records.add([
+                    eventId  : ret.id,
+                    eventType: EVENT_TYPE_RETURN,
+                    orderId  : orderId,
+                    createdAt: ret.createdAt,
+            ] as Map<String, Object>)
+        }
+        return records
     }
 
     /**
