@@ -10,13 +10,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 /**
  * Per-EVENT extraction for returns reconciliation (DAR-BE-018; 2026-08-17 grain-alignment plan,
  * Task 1, REVISION 2026-08-18). One record per EVENT — a refund OR a return — each windowed on
- * that event's OWN createdAt: {eventId, eventType: "REFUND"|"RETURN", orderId, createdAt}.
+ * that event's OWN createdAt: {refundOrReturnId, refundOrReturnType: "REFUND"|"RETURN", orderId, createdAt}.
  *
  * This shape replaced an intermediate one-record-per-REFUND shape (with a nullable returnId) once
  * the product owner confirmed OMS `externalId` is usually a Shopify refund id but sometimes a
  * return id instead — a refund-only Shopify side had no fallback for that minority and would
  * silently report those OMS rows missing-in-Shopify. Emitting both refunds and returns as their
- * own same-shaped rows removes the need for any precedence rule: eventId is the single join key,
+ * own same-shaped rows removes the need for any precedence rule: refundOrReturnId is the single join key,
  * whichever kind of id it is. See ShopifyReturnRefsSupport.toRecords for the full history.
  *
  * REFUNDED-RETURN NARROWING (2026-08-18): a refunded return is represented by its REFUND row alone
@@ -41,7 +41,7 @@ class ShopifyReturnRefsSupportTests {
     @Test
     void anOrderWithTwoRefundsAndOneReturnProducesThreeRecordsTwoRefundOneReturn() {
         // The defining case for the per-event shape: every refund AND every return on the order
-        // gets its own row. eventType and eventId (that specific event's own id) must be correct on
+        // gets its own row. refundOrReturnType and refundOrReturnId (that specific event's own id) must be correct on
         // each, and createdAt must be that event's own date, not the order's or any other event's.
         // The return's own `refunds` is explicitly empty — it is UNREFUNDED, distinct from either of
         // the two order-level refunds (201, 202), so the narrowing does not suppress its row.
@@ -68,24 +68,24 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(3, result.recordCount)
         List records = (List) result.records
-        Map refund201 = (Map) records.find { ((Map) it).eventId == "201" }
-        Map refund202 = (Map) records.find { ((Map) it).eventId == "202" }
-        Map return301 = (Map) records.find { ((Map) it).eventId == "301" }
+        Map refund201 = (Map) records.find { ((Map) it).refundOrReturnId == "201" }
+        Map refund202 = (Map) records.find { ((Map) it).refundOrReturnId == "202" }
+        Map return301 = (Map) records.find { ((Map) it).refundOrReturnId == "301" }
         assertTrue(refund201 != null && refund202 != null && return301 != null,
                 "two REFUND records and one RETURN record are expected: ${records}")
 
-        assertEquals("REFUND", refund201.eventType)
+        assertEquals("REFUND", refund201.refundOrReturnType)
         assertEquals("2026-05-01T09:00:00Z", refund201.createdAt)
         assertEquals("2020", refund201.orderId)
 
-        assertEquals("REFUND", refund202.eventType)
+        assertEquals("REFUND", refund202.refundOrReturnType)
         assertEquals("2026-05-01T10:00:00Z", refund202.createdAt)
 
-        assertEquals("RETURN", return301.eventType)
+        assertEquals("RETURN", return301.refundOrReturnType)
         assertEquals("2026-05-01T09:05:00Z", return301.createdAt)
         assertEquals("2020", return301.orderId)
 
-        // No record ever carries a refundId or returnId field any more — eventId/eventType replace
+        // No record ever carries a refundId or returnId field any more — refundOrReturnId/refundOrReturnType replace
         // both entirely.
         records.each { Object raw ->
             Map record = (Map) raw
@@ -114,8 +114,8 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(1, result.recordCount)
         Map record = (Map) ((List) result.records)[0]
-        assertEquals("81", record.eventId)
-        assertEquals("REFUND", record.eventType)
+        assertEquals("81", record.refundOrReturnId)
+        assertEquals("REFUND", record.refundOrReturnType)
         assertEquals("2026-05-01T12:00:00Z", record.createdAt)
     }
 
@@ -186,8 +186,8 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(1, result.recordCount, "a return with no refund must still emit its own row: ${result.records}")
         Map record = (Map) ((List) result.records)[0]
-        assertEquals("8801", record.eventId)
-        assertEquals("RETURN", record.eventType)
+        assertEquals("8801", record.refundOrReturnId)
+        assertEquals("RETURN", record.refundOrReturnType)
         assertEquals("9999", record.orderId)
         // No narrowing warning any more — nothing was dropped, so there is nothing to disclose.
         assertEquals([], result.warnings)
@@ -222,9 +222,9 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(1, result.recordCount, "a refunded return must emit only its refund's row: ${result.records}")
         Map record = (Map) ((List) result.records)[0]
-        assertEquals("911", record.eventId)
-        assertEquals("REFUND", record.eventType)
-        assertTrue(((List) result.records).every { ((Map) it).eventId != "912" },
+        assertEquals("911", record.refundOrReturnId)
+        assertEquals("REFUND", record.refundOrReturnType)
+        assertTrue(((List) result.records).every { ((Map) it).refundOrReturnId != "912" },
                 "the refunded return itself must not also appear as a RETURN row: ${result.records}")
     }
 
@@ -253,8 +253,8 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(1, result.recordCount, "an unrefunded return must still emit its own row: ${result.records}")
         Map record = (Map) ((List) result.records)[0]
-        assertEquals("922", record.eventId)
-        assertEquals("RETURN", record.eventType)
+        assertEquals("922", record.refundOrReturnId)
+        assertEquals("RETURN", record.refundOrReturnType)
     }
 
     @Test
@@ -287,9 +287,9 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(2, result.recordCount, "exactly one REFUND row and one RETURN row are expected: ${result.records}")
         List records = (List) result.records
-        assertTrue(records.any { ((Map) it).eventId == "931" && ((Map) it).eventType == "REFUND" })
-        assertTrue(records.any { ((Map) it).eventId == "932" && ((Map) it).eventType == "RETURN" })
-        assertTrue(records.every { ((Map) it).eventId != "930" }, "the refunded return (930) must not also appear: ${records}")
+        assertTrue(records.any { ((Map) it).refundOrReturnId == "931" && ((Map) it).refundOrReturnType == "REFUND" })
+        assertTrue(records.any { ((Map) it).refundOrReturnId == "932" && ((Map) it).refundOrReturnType == "RETURN" })
+        assertTrue(records.every { ((Map) it).refundOrReturnId != "930" }, "the refunded return (930) must not also appear: ${records}")
     }
 
     @Test
@@ -323,8 +323,8 @@ class ShopifyReturnRefsSupportTests {
         assertEquals(1, result.recordCount,
                 "a CLOSED return with no refunds must still emit its RETURN row — status is not the gate: ${result.records}")
         Map record = (Map) ((List) result.records)[0]
-        assertEquals("942", record.eventId)
-        assertEquals("RETURN", record.eventType)
+        assertEquals("942", record.refundOrReturnId)
+        assertEquals("RETURN", record.refundOrReturnType)
     }
 
     @Test
@@ -365,8 +365,8 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(2, calls)
         assertEquals(2, result.recordCount)
-        List eventIds = ((List) result.records).collect { ((Map) it).eventId }
-        assertEquals(["1", "2"] as Set, eventIds as Set)
+        List refundOrReturnIds = ((List) result.records).collect { ((Map) it).refundOrReturnId }
+        assertEquals(["1", "2"] as Set, refundOrReturnIds as Set)
     }
 
     @Test
@@ -464,7 +464,7 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
         assertEquals(1, result.recordCount)
-        assertEquals("91", ((Map) ((List) result.records)[0]).eventId)
+        assertEquals("91", ((Map) ((List) result.records)[0]).refundOrReturnId)
     }
 
     @Test
@@ -492,13 +492,13 @@ class ShopifyReturnRefsSupportTests {
 
         Map refundEvent = (Map) records.find { ((Map) it).orderId == "6942591025196" }
         assertTrue(refundEvent != null, "the refund-only order must produce a REFUND event: ${records}")
-        assertEquals("1005422084140", refundEvent.eventId)
-        assertEquals("REFUND", refundEvent.eventType)
+        assertEquals("1005422084140", refundEvent.refundOrReturnId)
+        assertEquals("REFUND", refundEvent.refundOrReturnType)
 
         Map returnEvent = (Map) records.find { ((Map) it).orderId == "6942747197484" }
         assertTrue(returnEvent != null, "the return-only order must now produce a RETURN event, not just a warning: ${records}")
-        assertEquals("44800213036", returnEvent.eventId)
-        assertEquals("RETURN", returnEvent.eventType)
+        assertEquals("44800213036", returnEvent.refundOrReturnId)
+        assertEquals("RETURN", returnEvent.refundOrReturnType)
     }
 
     @Test
@@ -562,7 +562,7 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
         assertEquals(1, result.recordCount, "a refund within the lookback before windowStart must be included: ${result.records}")
-        assertEquals("111", ((Map) ((List) result.records)[0]).eventId)
+        assertEquals("111", ((Map) ((List) result.records)[0]).refundOrReturnId)
     }
 
     @Test

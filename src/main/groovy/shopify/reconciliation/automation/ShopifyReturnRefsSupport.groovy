@@ -14,10 +14,10 @@ import static darpan.common.ValueSupport.normalizeInt
 /**
  * Per-EVENT Shopify records for returns reconciliation (DAR-BE-018, design §7). An event is a
  * refund OR a return; every in-window refund and every in-window return each emit their own row,
- * tagged with an eventType. This is this class's SECOND reshape: it originally emitted one record
- * per ORDER carrying refundIds[]/returnIds[] id-set lists, then (2026-08-17 plan, Task 1) one
+ * tagged with a refundOrReturnType. This is this class's SECOND reshape: it originally emitted one
+ * record per ORDER carrying refundIds[]/returnIds[] id-set lists, then (2026-08-17 plan, Task 1) one
  * record per REFUND with a nullable returnId, and now (REVISION 2026-08-18, same plan) one record
- * per EVENT with no refund/return distinction beyond the eventType tag — see the doc above
+ * per EVENT with no refund/return distinction beyond the refundOrReturnType tag — see the doc above
  * toRecords for the full shape history and why each reshape happened.
  *
  * CURSOR PATH, NOT BULK. refunds and returns are connections; ShopifyGraphqlQueryBuilder
@@ -79,10 +79,12 @@ class ShopifyReturnRefsSupport {
     // Keep the two in sync if either default ever moves — they encode the same RQ-23 sync-lag
     // assumption from opposite ends of the pipeline.
     static final int DEFAULT_LOOKBACK_HOURS = 3
-    // REVISION 2026-08-18: the eventType tag on the per-event record shape. See the doc above
-    // toRecords for why this replaced the earlier refundId/returnId column split.
-    static final String EVENT_TYPE_REFUND = "REFUND"
-    static final String EVENT_TYPE_RETURN = "RETURN"
+    // The refundOrReturnType tag on the per-event record shape (REVISION 2026-08-18). See the doc
+    // above toRecords for why this replaced the earlier refundId/returnId column split, and why the
+    // emitted column is named refundOrReturnId rather than the internal "event" vocabulary this
+    // class uses for the refund-or-return abstraction.
+    static final String ID_TYPE_REFUND = "REFUND"
+    static final String ID_TYPE_RETURN = "RETURN"
 
     private static final Pattern GID_TAIL = Pattern.compile('gid://shopify/[^/]+/(\\d+)(?:\\?.*)?$')
     private static final Pattern TRAILING_DIGITS = Pattern.compile('(\\d+)$')
@@ -243,12 +245,12 @@ class ShopifyReturnRefsSupport {
 
     /**
      * Builds this order's EVENT records — one row per refund AND one row per return, each tagged
-     * with its own eventType (DAR-BE-018; 2026-08-17 returns-refund-grain-alignment plan, Task 1,
-     * REVISION 2026-08-18). Each emitted record is a flat scalar map:
-     *   { eventId, eventType: EVENT_TYPE_REFUND | EVENT_TYPE_RETURN, orderId, createdAt }
+     * with its own refundOrReturnType (DAR-BE-018; 2026-08-17 returns-refund-grain-alignment plan,
+     * Task 1, REVISION 2026-08-18). Each emitted record is a flat scalar map:
+     *   { refundOrReturnId, refundOrReturnType: ID_TYPE_REFUND | ID_TYPE_RETURN, orderId, createdAt }
      * createdAt is that SPECIFIC event's own creation date (a refund row carries the refund's
-     * createdAt; a return row carries the return's). eventId/orderId are bareId-normalized so they
-     * land in the same id space as the OMS side's externalId (see
+     * createdAt; a return row carries the return's). refundOrReturnId/orderId are bareId-normalized
+     * so both land in the same id space as the OMS side's externalId (see
      * CompareDatasetSupport.applyIdNormalizer's SHOPIFY_GID_TAIL).
      *
      * WHY ONE KEY, NO PRECEDENCE RULE (the reason for this revision): OMS
@@ -260,10 +262,10 @@ class ShopifyReturnRefsSupport {
      * refunds had no equivalent fallback: an OMS row whose externalId happens to be a return id would
      * join against nothing, miss every refund on its order, and report missing-in-Shopify — a SILENT
      * FALSE POSITIVE, exactly the failure class this whole plan exists to remove. Emitting both
-     * refunds and returns as same-shaped rows under one eventId column removes the need for any
-     * precedence rule entirely: whichever kind of id OMS actually put in externalId, the matching
-     * Shopify event lands in the same eventId column on this side and joins directly, no lookup order
-     * required.
+     * refunds and returns as same-shaped rows under one refundOrReturnId column removes the need for
+     * any precedence rule entirely: whichever kind of id OMS actually put in externalId, the matching
+     * Shopify event lands in the same refundOrReturnId column on this side and joins directly, with no
+     * lookup order required.
      *
      * SHAPE HISTORY — read before "restoring" a removed field: this class has now been reshaped
      * TWICE. It originally emitted ONE RECORD PER ORDER carrying refundIds[]/returnIds[] plus
@@ -387,10 +389,10 @@ class ShopifyReturnRefsSupport {
         List<Map<String, Object>> records = []
         inWindowRefunds.each { Map<String, Object> refund ->
             records.add([
-                    eventId  : refund.id,
-                    eventType: EVENT_TYPE_REFUND,
-                    orderId  : orderId,
-                    createdAt: refund.createdAt,
+                    refundOrReturnId  : refund.id,
+                    refundOrReturnType: ID_TYPE_REFUND,
+                    orderId           : orderId,
+                    createdAt         : refund.createdAt,
             ] as Map<String, Object>)
         }
         inWindowReturns.each { Map<String, Object> ret ->
@@ -400,10 +402,10 @@ class ShopifyReturnRefsSupport {
             // "AUTHORITATIVE DISCRIMINATOR" sections above. Only an unrefunded return gets a row here.
             if (ret.hasRefund == true) return
             records.add([
-                    eventId  : ret.id,
-                    eventType: EVENT_TYPE_RETURN,
-                    orderId  : orderId,
-                    createdAt: ret.createdAt,
+                    refundOrReturnId  : ret.id,
+                    refundOrReturnType: ID_TYPE_RETURN,
+                    orderId           : orderId,
+                    createdAt         : ret.createdAt,
             ] as Map<String, Object>)
         }
         return records
