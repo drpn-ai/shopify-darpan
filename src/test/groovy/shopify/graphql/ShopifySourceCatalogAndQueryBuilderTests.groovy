@@ -2,6 +2,8 @@ package shopify.graphql
 
 import org.junit.jupiter.api.Test
 
+import java.util.regex.Pattern
+
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNotNull
@@ -213,6 +215,42 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         assertTrue(document.contains("refunds"), "query must select refunds: ${document}")
         assertTrue(document.contains("returns"), "query must select returns: ${document}")
         assertTrue(document.contains("legacyResourceId"), "order identity must be selectable bare")
+    }
+
+    @Test
+    void returnRefsQuerySelectsTheNestedRefundsConnectionAsNodesNotAsAPlainId() {
+        // Regression for a LIVE failure: Return.refunds is a RefundConnection, unlike the order-level
+        // Order.refunds (a plain List) it sits alongside in this same source — see the asymmetry
+        // ShopifySourceCatalog documents on both fields. Selecting `id` directly off a connection,
+        // skipping `.nodes`, is invalid GraphQL: Shopify's own validator rejects the WHOLE query
+        // before any data comes back, with "Field 'id' doesn't exist on type 'RefundConnection'" —
+        // exactly the error a real reconciliation run hit against a real store. A fixture-only test
+        // cannot catch this class of bug: a hand-shaped JSON response only ever gets validated against
+        // itself, never against what Shopify's schema actually accepts — which is exactly how the
+        // original selectionPath bug shipped with every test green. This asserts on the RENDERED
+        // query document instead, the same kind of check that would have failed before this fix.
+        Map<String, Object> built = ShopifyGraphqlQueryBuilder.buildQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+                operationName     : "DarpanReturnRefs",
+                filters           : [createdAtFrom: "2026-05-01T00:00:00Z", createdAtTo: "2026-05-02T00:00:00Z"],
+        ])
+        String document = built.queryDocument as String
+
+        // Positive: the nested refunds connection under returns must render as `refunds(first: ...) {
+        // nodes { id } }`. Whitespace/indentation is deliberately not pinned down here.
+        Pattern nestedRefundsConnection = Pattern.compile('refunds\\(first: [^)]*\\)\\s*\\{\\s*nodes\\s*\\{\\s*id\\s*\\}\\s*\\}')
+        assertTrue(nestedRefundsConnection.matcher(document).find(),
+                "the returns.refunds selection must be a connection selecting nodes { id }: ${document}")
+
+        // Negative: no `refunds(first: ...) { id ...` may appear anywhere — that is precisely the
+        // malformed, pre-fix shape (id selected directly off a connection, no nodes/edges wrapper) that
+        // produced the live "Field 'id' doesn't exist on type 'RefundConnection'" error. This also
+        // guards the sibling, correctly-plain-list Order.refunds field: its children are createdAt
+        // then id (alphabetical), so it never opens with `{ id` either — this pattern only ever
+        // matches a regression back to the un-nested selectionPath.
+        Pattern refundsSelectingIdDirectly = Pattern.compile('refunds\\(first: [^)]*\\)\\s*\\{\\s*id\\b')
+        assertFalse(refundsSelectingIdDirectly.matcher(document).find(),
+                "no refunds selection may select id directly off a connection without .nodes first: ${document}")
     }
 
     @Test

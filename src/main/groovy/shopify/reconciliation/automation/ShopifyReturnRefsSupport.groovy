@@ -344,8 +344,11 @@ class ShopifyReturnRefsSupport {
      * answer, and both of the failure directions above are live risks from it, not rare corners.
      *
      * THE AUTHORITATIVE DISCRIMINATOR — `Return.refunds` (ShopifySourceCatalog's
-     * SHOPIFY_ORDER_RETURN_REFS fields, `returns.refunds` fieldPath / `returns.nodes.refunds.id`
-     * selectionPath): a RefundConnection — "the refunds associated with the return" — confirmed
+     * SHOPIFY_ORDER_RETURN_REFS fields, `returns.refunds` fieldPath / `returns.nodes.refunds.nodes.id`
+     * selectionPath — corrected same-day, 2026-08-18, after a live run hit Shopify's GraphQL validator
+     * rejecting the original "returns.nodes.refunds.id" with "Field 'id' doesn't exist on type
+     * 'RefundConnection'"; see ShopifySourceCatalog's own field-level comment for the full story):
+     * a RefundConnection — "the refunds associated with the return" — confirmed
      * present (non-null, no required args) on every DATED API version this catalog supports (2025-07,
      * 2025-10, 2026-01, 2026-04; checked directly against shopify.dev's schema reference for each
      * version, not assumed) — unlike the earlier Refund.return candidate, this removes the exact
@@ -427,10 +430,17 @@ class ShopifyReturnRefsSupport {
      * before any window trim. The caller (toRecords) applies the window filter afterward via
      * inWindow().
      *
-     * hasRefund (2026-08-18 narrowing): true only when the raw node carries a non-empty `refunds`
-     * list — i.e. only ever true for a RETURN node selected via Return.refunds (refund nodes have no
-     * such key, so a refund event's hasRefund is always false and is never read). A MISSING `refunds`
-     * key (null, not an empty list) also computes false — deliberately treated the same as "no
+     * hasRefund (2026-08-18 narrowing; connection-shape fix same day): true only when the raw node
+     * carries at least one entry under its `refunds` key — i.e. only ever true for a RETURN node
+     * selected via Return.refunds (refund nodes have no such key, so a refund event's hasRefund is
+     * always false and is never read). `refunds` here is a REAL Shopify RefundConnection (the
+     * corrected "returns.nodes.refunds.nodes.id" selectionPath — see ShopifySourceCatalog's field
+     * comment and this class's own toRecords doc for why the FIRST version of that path was wrong and
+     * how a live run caught it), so the parsed JSON carries it as `{nodes: [...]}`, never a bare List
+     * — hasAtLeastOneRefund below reads `.nodes` accordingly. A bare List is still tolerated
+     * defensively (mirroring this method's own nodes/edges tolerance for the outer connection just
+     * above), but live traffic will never actually send one for this field. A MISSING `refunds` key
+     * (null, not an empty list/connection) also computes false — deliberately treated the same as "no
      * refund", matching this class's established bias throughout (see inWindow's unparseable-
      * createdAt handling below): when evidence is absent rather than explicitly negative, default
      * toward EMITTING the row rather than silently suppressing it. Suppressing on missing evidence
@@ -460,13 +470,33 @@ class ShopifyReturnRefsSupport {
             warnings.add("Order ${orderId} returned ${rawNodes.size()} ${label}, the maximum requested — the list may be truncated and diffs for it may be wrong.".toString())
         }
         return rawNodes.findAll { it instanceof Map }.collect { Map rawNode ->
-            Object rawRefunds = rawNode.get("refunds")
             [
                     id       : bareId(rawNode.get("id")),
                     createdAt: normalize(rawNode.get("createdAt")),
-                    hasRefund: (rawRefunds instanceof List) && !((List) rawRefunds).isEmpty(),
+                    hasRefund: hasAtLeastOneRefund(rawNode.get("refunds")),
             ]
         }.findAll { Map event -> event.id } as List<Map<String, Object>>
+    }
+
+    /**
+     * True when a RETURN node's own `refunds` value carries at least one entry. Handles the REAL
+     * shape Shopify sends for Return.refunds — a RefundConnection, parsed as `{nodes: [...]}` (or,
+     * defensively, `{edges: [...]}`, mirroring collectEvents' own tolerance for the outer connection)
+     * — and, defensively, a bare List, though live traffic never actually sends one for this
+     * particular field (unlike the order-level Order.refunds, which genuinely is a plain list — see
+     * the asymmetry documented on both fields in ShopifySourceCatalog). null, an absent key, an empty
+     * list, or an empty connection all resolve to false: "no evidence of a refund", which is exactly
+     * the state an unrefunded return's own row needs to still be emitted (see this method's only
+     * caller and the REFUNDED-RETURN NARROWING section of the class doc above).
+     */
+    private static boolean hasAtLeastOneRefund(Object rawRefunds) {
+        if (rawRefunds instanceof List) return !((List) rawRefunds).isEmpty()
+        if (rawRefunds instanceof Map) {
+            Map connection = (Map) rawRefunds
+            if (connection.get("nodes") instanceof List) return !((List) connection.get("nodes")).isEmpty()
+            if (connection.get("edges") instanceof List) return !((List) connection.get("edges")).isEmpty()
+        }
+        return false
     }
 
     /**

@@ -191,6 +191,20 @@ class ShopifySourceCatalog {
             // ShopifyReturnRefsSupport.toRecords for why that question matters and why `status` could
             // not answer it. `.id` is the sole leaf, mirroring the other id-only selections above; no
             // other Refund field is needed here.
+            //
+            // LIVE-FAILURE FIX (same day, 2026-08-18): the selectionPath below first shipped as
+            // "returns.nodes.refunds.id" — missing the `.nodes` a RefundConnection requires before its
+            // leaf field, exactly the mistake this same comment warns against for Order.refunds above
+            // (a plain LIST, no `.nodes`) versus Order.returns (a connection, WITH `.nodes`). A real
+            // reconciliation run against a live store hit that bug immediately: Shopify's GraphQL
+            // validator rejected the whole query with "Field 'id' doesn't exist on type
+            // 'RefundConnection'" (RefundConnection has no `id` field of its own — only `.nodes[].id`
+            // or `.edges[].node.id` do). Corrected to "returns.nodes.refunds.nodes.id". See
+            // ShopifyReturnRefsSupportTests / ShopifySourceCatalogAndQueryBuilderTests for the
+            // regression coverage this gap in testing left: the fixture-based test only validated a
+            // hand-shaped JSON response against itself and could never have caught a malformed
+            // selection — a query-DOCUMENT assertion (returnRefsQuerySelectsTheNestedRefundsConnectionAsNodesNotAsAPlainId)
+            // was added specifically because it would have failed before this fix.
             //   connectionRoot deliberately REUSES "refunds" (the same $refundsFirst variable as
             //   Order.refunds above) rather than getting a page size of its own:
             //   ShopifyGraphqlQueryBuilder's connection-page-size variables are keyed purely by the
@@ -202,7 +216,7 @@ class ShopifySourceCatalog {
             //   neither is done here for one field. The shared value (default 50, clamped to 100) is
             //   still narrow and fully correct for an existence check, since only emptiness is ever
             //   read downstream, never the count.
-            [fieldPath: "returns.refunds", label: "Return Has Refund", type: "ID", selectionPath: "returns.nodes.refunds.id",
+            [fieldPath: "returns.refunds", label: "Return Has Refund", type: "ID", selectionPath: "returns.nodes.refunds.nodes.id",
              connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
         ],
     ].asImmutable()

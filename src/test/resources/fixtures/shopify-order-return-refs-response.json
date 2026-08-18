@@ -4,7 +4,7 @@
     "refunds": "NON_NULL->LIST, arg: first. Plain list \u2014 NO nodes/edges wrapper.",
     "returns": "NON_NULL->ReturnConnection, args: first/after/last/before/reverse/query. Use nodes{}."
   },
-  "_returnRefundsField": "SYNTHESIZED 2026-08-18, NOT part of the 2026-08-13 live capture above: the original probe never selected Return.refunds (the field did not exist in this class's query until the 2026-08-18 refunded-return narrowing). The 'refunds' key added below the one return node in this fixture (order #GORTEST27950) is therefore an author-added assumption consistent with that order's own live-captured, unchanged 'refunds: []' at the ORDER level (i.e. Shopify never reported a refund anywhere on this order, live-captured) \u2014 not a second live probe of the Return.refunds connection itself. Every other field in this file, including this return's own id/status/createdAt, remains exactly as captured.",
+  "_returnRefundsField": "SYNTHESIZED 2026-08-18, NOT part of the 2026-08-13 live capture above: the original probe never selected Return.refunds (the field did not exist in this class's query until the 2026-08-18 refunded-return narrowing). The 'refunds' key added below the one return node in this fixture (order #GORTEST27950) is therefore an author-added assumption consistent with that order's own live-captured, unchanged 'refunds: []' at the ORDER level (i.e. Shopify never reported a refund anywhere on this order, live-captured) \u2014 not a second live probe of the Return.refunds connection itself. Every other field in this file, including this return's own id/status/createdAt, remains exactly as captured. CORRECTED same-day, 2026-08-18 (live-failure fix): this key was first synthesized as a bare 'refunds: []' list, shaped to match the catalog's selectionPath at the time (\"returns.nodes.refunds.id\", no '.nodes'). That selectionPath was itself wrong \u2014 Return.refunds is a RefundConnection, not a plain list \u2014 and a real reconciliation run against a live store proved it: Shopify's GraphQL validator rejected the query outright with \"Field 'id' doesn't exist on type 'RefundConnection'\". Because this fixture's 'refunds: []' happened to be shaped like the (wrong) query's expected result, every fixture-based test kept passing throughout \u2014 the fixture validated the code against its own mistaken assumption instead of against Shopify's actual schema. Reshaped below to 'refunds: {\"nodes\": []}', the real connection form the corrected selectionPath (\"returns.nodes.refunds.nodes.id\") now selects. Catching this class of error needs a rendered-query-document assertion, not a fixture \u2014 see ShopifySourceCatalogAndQueryBuilderTests.returnRefsQuerySelectsTheNestedRefundsConnectionAsNodesNotAsAPlainId.",
   "data": {
     "orders": {
       "edges": [
@@ -21,7 +21,9 @@
                   "id": "gid://shopify/Return/44800213036",
                   "status": "CLOSED",
                   "createdAt": "2026-08-12T22:50:47Z",
-                  "refunds": []
+                  "refunds": {
+                    "nodes": []
+                  }
                 }
               ]
             }
