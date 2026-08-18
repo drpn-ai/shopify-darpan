@@ -312,21 +312,58 @@ class ShopifyReturnRefsSupport {
      * future need arises to correlate a refund row with the return it actually belongs to (analytics,
      * not reconciliation), Refund.return remains the answer — still requiring a live probe first.
      *
-     * ACCEPTED COST — report, do not silently work around: a refunded return now produces TWO rows
-     * (its refund and the return itself) whenever both events fall in the same window. No live OMS
-     * `reconciliationReturns` payload has ever been captured (OmsReturnsExtractTests.groovy's own
-     * class doc, the other repo: "no swagger, fixture, or captured live response for this endpoint
-     * exists"), so this is not live-verified either way. The documented OMS-side CONTRACT is
-     * suggestive, though, and points one direction: OmsReturnsSourceSupport extracts one row per
-     * physical OMS return record, and ReturnPresenceVerificationSupport's own doc describes exactly
-     * one externalId per row, stamped with EITHER the refund id (usual case) OR, for a permanent
-     * minority of returns imported while IN PROGRESS, the return id — "never backfilled to the
-     * refund id once one issues" (that class's doc). Nothing in that contract describes a return
-     * being represented by two OMS rows. If that holds, a refunded return most likely gets exactly
-     * ONE OMS counterpart, and the OTHER of this class's two Shopify rows for it will read as a
-     * permanent, structural missing-in-OMS row on every run — not a transient timing gap. This is a
-     * known, disclosed limitation the plan explicitly accepted, not something to patch around in
-     * this class; do not add filtering here to "fix" it without a deliberate, separate decision.
+     * ACCEPTED COST — report, do not silently work around: a refunded return still produces TWO rows
+     * (its refund and the return itself) whenever both events fall in the same window. The OMS-side
+     * CONTRACT (OmsReturnsSourceSupport: one row per physical OMS return record;
+     * ReturnPresenceVerificationSupport's own doc: exactly one externalId per row, stamped with
+     * EITHER the refund id — the usual case, once a refund exists — OR, for the return's own
+     * IN-PROGRESS window before any refund lands, the return id, "never backfilled to the refund id
+     * once one issues") establishes that a refunded return gets exactly ONE OMS counterpart, keyed
+     * by the refund id — "a refunded Shopify Return is never separately expected; its event is its
+     * refund" (that class's doc, verbatim). The OTHER of this class's two rows for a refunded return
+     * — the RETURN row — therefore has NO OMS counterpart and reads as a permanent, structural
+     * missing-in-OMS row on every run, not a transient timing gap. No live OMS
+     * `reconciliationReturns` payload has ever been captured, so the OMS side of this is contract-
+     * inferred, not live-verified — but the contract is unambiguous on this specific point.
+     *
+     * REFUNDED-RETURN NARROWING — INVESTIGATED, NOT IMPLEMENTED (2026-08-18): the obvious fix is to
+     * emit a RETURN row only for a return with NO refund yet (a refunded return would then be
+     * represented by its REFUND row alone, matching the OMS contract above exactly). That requires
+     * knowing, per return, whether it has been refunded — and the only field this class's query
+     * selects that varies per return is `returns.nodes.status` (ShopifySourceCatalog's
+     * SHOPIFY_ORDER_RETURN_REFS fields), a Shopify ReturnStatus value: REQUESTED, OPEN, CLOSED,
+     * DECLINED, or CANCELED (shopify.dev's ReturnStatus enum reference). It does NOT work as that
+     * discriminator, on direct evidence, not a guess:
+     *   - Shopify's OWN `returnClose` mutation doc states CLOSED is reached "either when a refund
+     *     has been made and items restocked, OR SIMPLY WHEN IT HAS BEEN MARKED AS RETURNED IN THE
+     *     SYSTEM" (shopify.dev) — i.e. a return can be CLOSED with ZERO refunds. Treating CLOSED as
+     *     "has a refund, skip the RETURN row" would silently drop the RETURN row for exactly this
+     *     case, leaving that return with NO row on the Shopify side at all (no refund exists to give
+     *     it a REFUND row either) — reproducing the ORIGINAL bug this whole revision exists to fix,
+     *     for every non-refund-resolved (e.g. exchanged, or simply marked-returned) CLOSED return.
+     *   - Nothing in the schema prevents a refund existing while a return is still OPEN (Shopify
+     *     supports partial refunds mid-return). Treating OPEN as "not yet refunded, emit the RETURN
+     *     row" would then emit a RETURN row ALONGSIDE that refund's REFUND row for a return that
+     *     already has a real OMS counterpart (keyed by the refund id per the contract above) —
+     *     reproducing the phantom missing-in-OMS bug this narrowing exists to remove.
+     *   Both failure directions are live risks from the same field, not a rare corner: status
+     *   encodes the return's own workflow stage, not whether any refund transaction exists against
+     *   it — a different question the field was never designed to answer. The live-captured fixture
+     *   (src/test/resources/fixtures/shopify-order-return-refs-response.json) offers no help either:
+     *   its only return carries `status: "CLOSED"` — zero live examples of OPEN, REQUESTED, DECLINED,
+     *   or CANCELED exist in this repo to check the theory against even empirically.
+     *   Per the same standard applied to the rejected order-level return-pairing (fix round 1): a
+     *   wrong narrowing is worse than no narrowing, so none was implemented. Every in-window return
+     *   still emits its own RETURN row regardless of status, exactly as before this investigation.
+     *   The reliable discriminator remains a live-probed field query, same conclusion as the
+     *   Refund.return investigation above: either `Refund.return.id` (does this refund reference a
+     *   return) or, arguably better here since the question is per-return, `Return.refunds` (a
+     *   RefundConnection — "the refunds associated with the return"; querying it with `first: 1` and
+     *   checking for at least one edge would answer "has this return been refunded" directly).
+     *   Neither is selected today for the same reason as before: an invalid field fails the WHOLE
+     *   query at GraphQL validation time, and neither has been probed against this component's live
+     *   traffic. Adding and live-probing one of them is the well-scoped follow-up this narrowing is
+     *   actually waiting on — not a smarter status heuristic.
      *
      * KNOWN BREAKAGE (not this task's to fix): the other repo's ReturnPresenceVerificationSupport
      * reads the original refundIds/returnIds/refunds/returns fields (and would equally break against

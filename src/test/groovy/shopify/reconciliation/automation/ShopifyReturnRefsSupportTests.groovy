@@ -184,6 +184,44 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
+    void returnStatusDoesNotGateWhetherARETURNRowIsEmitted() {
+        // Investigated 2026-08-18: a narrowing to skip the RETURN row for a REFUNDED return was
+        // considered, using returns.nodes.status as the candidate discriminator. Rejected on direct
+        // evidence (see ShopifyReturnRefsSupport.toRecords doc): Shopify's own returnClose mutation
+        // doc confirms a return can reach CLOSED with zero refunds ("simply when it has been marked
+        // as returned in the system"), and nothing prevents a refund existing while a return stays
+        // OPEN. Both directions of a status-based rule would manufacture exactly the false-positive
+        // class this plan removes, so no such rule was implemented — every in-window return still
+        // gets its own RETURN row regardless of status. This test locks that in for both status
+        // values actually seen in this codebase's evidence (CLOSED, from the live fixture) and the
+        // other end of the lifecycle (OPEN), so a future change cannot silently reintroduce a status
+        // gate without this test forcing a deliberate look.
+        Map node = [
+                id              : "gid://shopify/Order/6001",
+                legacyResourceId: "6001",
+                name            : "#6001",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/601", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [[id: "gid://shopify/Return/701", status: "OPEN", createdAt: "2026-05-01T08:15:00Z"]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(2, result.recordCount,
+                "an OPEN return alongside an unrelated refund must still emit both rows — status is not a gate: ${result.records}")
+        List records = (List) result.records
+        assertTrue(records.any { ((Map) it).eventId == "601" && ((Map) it).eventType == "REFUND" })
+        assertTrue(records.any { ((Map) it).eventId == "701" && ((Map) it).eventType == "RETURN" })
+    }
+
+    @Test
     void anOrderWithNeitherRefundsNorReturnsInWindowEmitsNoRecordAndNoWarning() {
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [

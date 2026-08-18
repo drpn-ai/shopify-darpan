@@ -123,14 +123,18 @@
             refundId/returnId column split (and with it the refund-to-return association problem — see
             ShopifyReturnRefsSupport.toRecords for that investigation's history) and the earlier
             "no refund yet" warning: a return with no refund yet now emits its own RETURN row rather
-            than being dropped. Accepted, disclosed cost: a refunded return now produces two rows (its
-            refund and itself). No live OMS reconciliationReturns payload has ever been captured, but
-            the documented OMS-side contract (one row per return, one externalId field, stamped with
-            either the refund id or, for a permanent minority, the return id — see
-            ReturnPresenceVerificationSupport's class doc) suggests OMS emits at most ONE counterpart
-            per return; if so the other Shopify row reads as a permanent, structural missing-in-OMS
-            row, not a transient gap. See ShopifyReturnRefsSupport.toRecords for the full
-            rationale.</description>
+            than being dropped. Accepted, disclosed cost: a refunded return still produces two rows
+            (its refund and itself) — the OMS-side contract (one row per return, one externalId
+            field, stamped with the refund id once one exists, the return id only beforehand — see
+            ReturnPresenceVerificationSupport's class doc) means a refunded return gets exactly ONE
+            OMS counterpart keyed by the refund id, so the RETURN row for it reads as a permanent,
+            structural missing-in-OMS row. A narrowing to skip the RETURN row for refunded returns
+            was investigated (2026-08-18) using returns.nodes.status (Shopify's ReturnStatus) as the
+            candidate discriminator and REJECTED: Shopify's own returnClose mutation doc confirms a
+            return can reach CLOSED with zero refunds, and nothing prevents a refund existing while a
+            return is still OPEN, so status cannot cleanly separate refunded from unrefunded returns
+            in either direction. See ShopifyReturnRefsSupport.toRecords for the full rationale and
+            evidence.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
