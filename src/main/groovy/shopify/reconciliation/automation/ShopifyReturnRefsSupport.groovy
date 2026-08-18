@@ -12,12 +12,17 @@ import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeInt
 
 /**
- * Per-order Shopify refund ids and return ids for returns reconciliation (DAR-BE-018, design §7).
+ * Per-REFUND Shopify records for returns reconciliation (DAR-BE-018, design §7). Originally this
+ * class emitted one record per ORDER, carrying refundIds[]/returnIds[] id-set lists; the
+ * 2026-08-17 returns-refund-grain-alignment plan (Task 1) reshaped it to one record per REFUND so
+ * both sides of the compare share a grain — see the doc above toRecords for the full shape history
+ * and the refund-return association investigation.
  *
  * CURSOR PATH, NOT BULK. refunds and returns are connections; ShopifyGraphqlQueryBuilder
  * .buildBulkQuery rejects connection-bearing fields because bulk JSONL emits their children as
  * separate __parentId lines and nothing here re-nests them. Cursor pagination returns naturally
- * nested objects, which is exactly the per-order id-set shape the match rule wants.
+ * nested objects — each order together with its own refunds and returns — which toRecords then
+ * flattens into one output record per refund on that order.
  *
  * Ids are emitted BARE (GID tail). The OMS side stores a bare numeric Shopify reference, and the
  * SHOPIFY_GID_TAIL normalizer's type segment is a wildcard, so both sides land in the same space
@@ -279,18 +284,26 @@ class ShopifyReturnRefsSupport {
      *   deliberately NOT selected here: every other claim in this class about live Shopify behavior
      *   (the refunds/returns shape asymmetry, the no_return trim gap, the search/sort text) is backed
      *   by an actual probe against a real store on a real API version, and this field has not been.
-     *   Wiring it in speculatively — new selectionPath, new query shape, new fixture — without that
-     *   verification would repeat the exact mistake this task exists to avoid: shipping an assumed
-     *   join key. Adding and live-probing `refunds.return.id` is a well-scoped, high-value follow-up.
-     *   Until then, this class falls back to ORDER-LEVEL PAIRING, matching the precedent
-     *   ReturnPresenceVerificationSupport's own class doc already accepts for its per-order forward-
-     *   match suppression ("known phase-1 imprecision... needs the design's typed-field hedge or a
-     *   Shopify Return->Refund link"): when an order carries EXACTLY ONE in-window return, every
-     *   in-window refund on that order is paired with it. When an order carries zero or several
-     *   in-window returns, the pairing is unresolvable at this grain and returnId is left null rather
-     *   than guessed — a wrong guess would manufacture a false join, which is the one failure mode
-     *   this whole plan exists to eliminate; null is the honest answer when the data does not support
-     *   a confident one.
+     *   Selecting an unverified field on the live query is a materially bigger risk than a heuristic
+     *   guess would be: GraphQL schema validation runs on the WHOLE document before any execution, so
+     *   if `refunds.return.id` is not a valid path for a store's actual API version, the entire
+     *   extraction fails closed for every order in that run — not just the returnId column. Adding
+     *   and live-probing that field first, across every supported API version
+     *   (SUPPORTED_API_VERSIONS), is a well-scoped, high-value follow-up; it must not be added
+     *   speculatively from here.
+     *   returnId is therefore UNCONDITIONALLY NULL in this class today — no pairing heuristic of any
+     *   kind is applied. An earlier revision of this fix paired a refund with its order's return
+     *   whenever the order carried EXACTLY ONE in-window return (reasoning that zero or several
+     *   returns are genuinely ambiguous, so only the single-return case looked safe). Code review
+     *   (fix round 1, 2026-08-18) correctly rejected that: an order can legitimately carry one real
+     *   Return AND a separate refund that has nothing to do with it — a goodwill refund, a shipping
+     *   refund, a price adjustment — all ordinary Shopify patterns. The single-return case is not
+     *   evidence of relatedness, only of order-level coincidence, and pairing on it manufactures a
+     *   CONFIDENT LIE: a returnId that looks authoritative but is not, which produces a clean-looking
+     *   diff that is wrong — precisely the failure this whole plan exists to remove. A null returnId
+     *   is a known unknown and is the honest, harmless answer until the real Refund.return link is
+     *   live-verified and wired in; do not reintroduce any form of order-level pairing without that
+     *   verification.
      *
      * NO-REFUND-YET NARROWING (deliberate, not a defect — see the plan's "Known narrowing" section):
      * a refund-driven extract cannot emit a record for a return that has no refund yet. When this
@@ -320,14 +333,14 @@ class ShopifyReturnRefsSupport {
             return []
         }
 
-        // Order-level pairing (see the association section of this method's doc above): only
-        // resolvable when the order carries exactly one in-window return.
-        String pairedReturnId = (inWindowReturns.size() == 1) ? inWindowReturns[0].id : null
-
+        // returnId is UNCONDITIONALLY NULL — see the ASSOCIATION section of this method's doc above
+        // (fix round 1, 2026-08-18). inWindowReturns is still collected and windowed above only to
+        // drive the no-refund-yet warning; it must NEVER be read here to guess a returnId, by any
+        // heuristic, no matter how narrow — a wrong returnId is worse than a missing one.
         return inWindowRefunds.collect { Map<String, String> refund ->
             [
                     refundId : refund.id,
-                    returnId : pairedReturnId,
+                    returnId : null,
                     orderId  : orderId,
                     createdAt: refund.createdAt,
             ] as Map<String, Object>

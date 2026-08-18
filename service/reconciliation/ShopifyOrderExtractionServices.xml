@@ -113,11 +113,15 @@
 
             Each output record is one REFUND: {refundId, returnId, orderId, createdAt}, all ids bare
             (GID tail stripped) so they land in the same space as the OMS externalId — refundId is the
-            join key OMS reconciliationReturns.externalId matches against. returnId is nullable: it is
-            populated only when the refund's order carries exactly one in-window return (order-level
-            pairing — Shopify's queried response carries no direct refund-to-return link; see
-            ShopifyReturnRefsSupport.toRecords for the full rationale and its documented limitation),
-            and is left null when that pairing is ambiguous or there is no return at all. An order whose
+            join key OMS reconciliationReturns.externalId matches against. returnId is nullable and,
+            as of fix round 1 (2026-08-18), UNCONDITIONALLY NULL today: Shopify's queried response
+            carries no direct refund-to-return link, and an order-level pairing heuristic (pair a
+            refund with its order's return whenever the order has exactly one in-window return) was
+            tried and rejected — an order can legitimately carry a real return alongside an unrelated
+            refund (goodwill, shipping, price adjustment), and pairing on order-level coincidence
+            produced a confident but false returnId. See ShopifyReturnRefsSupport.toRecords for the
+            full rationale and the live-probe-gated follow-up (Shopify's schema exposes a direct
+            Refund.return field) that will eventually populate this field for real. An order whose
             return has no refund yet cannot be represented as a record under this refund-driven grain;
             that gap is counted and surfaced as a warning instead of a silently dropped row.</description>
         <in-parameters>

@@ -10,9 +10,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
  * Per-REFUND extraction for returns reconciliation (DAR-BE-018; 2026-08-17 grain-alignment plan,
- * Task 1). One record per refund: {refundId, returnId, orderId, createdAt}, windowed on the
- * refund's OWN createdAt. See ShopifyReturnRefsSupport.toRecords for the refund->return
- * association rationale (order-level pairing; Shopify's queried response carries no direct link).
+ * Task 1, fix round 1 2026-08-18). One record per refund: {refundId, returnId, orderId, createdAt},
+ * windowed on the refund's OWN createdAt. returnId is UNCONDITIONALLY NULL: Shopify's queried
+ * response carries no direct refund->return link, and an order-level pairing heuristic (pair every
+ * refund on an order with its one in-window return) was tried and rejected in fix round 1 — an
+ * order can legitimately carry a real return alongside an unrelated refund (goodwill, shipping,
+ * price adjustment), so that heuristic produced a confident but false returnId. See
+ * ShopifyReturnRefsSupport.toRecords for the full rationale.
  *
  * Cursor path, not bulk: refunds and returns are connections, and buildBulkQuery rejects those.
  */
@@ -47,13 +51,19 @@ class ShopifyReturnRefsSupportTests {
         Map record = (Map) ((List) result.records)[0]
         assertEquals("7025799037059", record.orderId)
         assertEquals("5001", record.refundId)
-        // Unambiguous pairing: the order carries exactly one in-window return.
-        assertEquals("9001", record.returnId)
+        // returnId is unconditionally null (fix round 1): a single in-window return on the order is
+        // NOT evidence the refund belongs to it — see the class doc.
+        assertNull(record.returnId)
         assertEquals("2026-05-01T11:00:00Z", record.createdAt)
     }
 
     @Test
-    void twoRefundsAndOneReturnProduceTwoRecordsEachWithItsOwnRefundIdAndCreatedAt() {
+    void twoRefundsAndOneReturnProduceTwoRecordsNeitherClaimingTheReturnItCannotBeShownToOwn() {
+        // Fix round 1, 2026-08-18: this is the exact case that exposed the rejected order-level
+        // pairing heuristic. One order, one in-window return, two in-window refunds — a real return
+        // plus, e.g., an unrelated goodwill/shipping refund is an ordinary Shopify pattern. Nothing in
+        // the queried response can tell these two refunds apart, so NEITHER may claim return 301;
+        // returnId must be null on both, never guessed onto either one.
         Map node = [
                 id              : "gid://shopify/Order/2020",
                 legacyResourceId: "2020",
@@ -82,13 +92,16 @@ class ShopifyReturnRefsSupportTests {
         assertTrue(first != null && second != null, "both refunds must produce their own record: ${records}")
         assertEquals("2026-05-01T09:00:00Z", first.createdAt)
         assertEquals("2026-05-01T10:00:00Z", second.createdAt)
-        // Single return on the order => unambiguous pairing applies to every refund on it.
-        assertEquals("301", first.returnId)
-        assertEquals("301", second.returnId)
+        assertNull(first.returnId, "no refund may claim a returnId it cannot be shown to own: ${first}")
+        assertNull(second.returnId, "no refund may claim a returnId it cannot be shown to own: ${second}")
     }
 
     @Test
-    void aRefundWithAnAssociatedReturnCarriesThatReturnIdAndOneWithoutCarriesNull() {
+    void returnIdIsNullWhetherOrNotTheOrderHasAReturn() {
+        // Not "a refund WITH an associated return carries that id" — Task 1's original brief assumed
+        // order-level pairing could safely make that true; fix round 1 established it cannot. Both
+        // orders below produce a null returnId: the one-return order for the reason exercised above,
+        // the no-return order because there is nothing at all to pair with.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
                     edges   : [
@@ -104,10 +117,41 @@ class ShopifyReturnRefsSupportTests {
 
         assertEquals(2, result.recordCount)
         List records = (List) result.records
-        Map withReturn = (Map) records.find { ((Map) it).refundId == "401" }
-        Map withoutReturn = (Map) records.find { ((Map) it).refundId == "402" }
-        assertEquals("501", withReturn.returnId)
-        assertNull(withoutReturn.returnId, "a refund with no associated return must carry a null returnId: ${withoutReturn}")
+        Map onOrderWithReturn = (Map) records.find { ((Map) it).refundId == "401" }
+        Map onOrderWithoutReturn = (Map) records.find { ((Map) it).refundId == "402" }
+        assertNull(onOrderWithReturn.returnId, "a single in-window return is not proof the refund belongs to it: ${onOrderWithReturn}")
+        assertNull(onOrderWithoutReturn.returnId, "a refund with no return on its order must carry a null returnId: ${onOrderWithoutReturn}")
+    }
+
+    @Test
+    void twoOrMoreInWindowReturnsLeaveReturnIdNullOnEveryEmittedRefund() {
+        // The defensive 2+-returns branch, explicitly tested (fix round 1 review point 2). Whether
+        // ambiguity comes from zero, one, or several returns, the outcome must be identical: null.
+        Map node = [
+                id              : "gid://shopify/Order/2222",
+                legacyResourceId: "2222",
+                name            : "#2222",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/211", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [
+                        [id: "gid://shopify/Return/311", status: "CLOSED", createdAt: "2026-05-01T08:30:00Z"],
+                        [id: "gid://shopify/Return/312", status: "CLOSED", createdAt: "2026-05-01T08:45:00Z"],
+                ]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(1, result.recordCount)
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("211", record.refundId)
+        assertNull(record.returnId, "with two in-window returns on the order, pairing is doubly unresolvable: ${record}")
     }
 
     @Test
