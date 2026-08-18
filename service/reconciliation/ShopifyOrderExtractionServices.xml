@@ -113,12 +113,13 @@
             just before it, and that event must still be fetched for the OMS-side forward match to see
             it. See ShopifyReturnRefsSupport for the full rationale.
 
-            Each output record is one EVENT: {eventId, eventType, orderId, createdAt}, all ids bare
-            (GID tail stripped) so they land in the same space as the OMS externalId. eventType is
-            "REFUND" or "RETURN". eventId is the single join key OMS reconciliationReturns.externalId
-            matches against — no precedence rule needed: the product owner confirmed (2026-08-18) that
-            externalId is usually a Shopify refund id but sometimes a return id, and emitting both
-            kinds as same-shaped rows under one eventId column means whichever kind OMS actually used,
+            Each output record is one EVENT: {refundOrReturnId, refundOrReturnType, orderId,
+            createdAt}, all ids bare (GID tail stripped) so they land in the same space as the OMS
+            externalId. refundOrReturnType is "REFUND" or "RETURN". refundOrReturnId is the single join
+            key OMS reconciliationReturns.externalId matches against — no precedence rule needed: the
+            product owner confirmed (2026-08-18) that externalId is usually a Shopify refund id but
+            sometimes a return id, and emitting both kinds as same-shaped rows under one
+            refundOrReturnId column means whichever kind OMS actually used,
             the matching Shopify row is there to join against directly. This revision retires the
             refundId/returnId column split (and with it the refund-to-return association problem — see
             ShopifyReturnRefsSupport.toRecords for that investigation's history) and the earlier
