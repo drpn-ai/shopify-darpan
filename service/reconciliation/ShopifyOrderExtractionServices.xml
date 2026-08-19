@@ -200,6 +200,45 @@
         </out-parameters>
     </service>
 
+    <service verb="lookup" noun="ShopifyRefundOrReturnIds" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyRefundOrReturnIds.groovy">
+        <description>Point-existence check for Shopify refund/return ids against the primary datastore via
+            nodes(ids:). The returns extract must enumerate through orders(query:) because the Admin API has
+            no top-level refunds or returns connection, and that search-index-backed net was observed to omit
+            old orders carrying new refunds — so the saved-run verification pass calls this to confirm or
+            refute "missing in SHOPIFY" differences for the returns pair. The id's type is not known to the
+            caller, so each bare id is checked under BOTH the Refund and Return gid forms and counted present
+            if either resolves. A failed lookup returns ok=false with both id lists empty — it never
+            classifies an id as missing.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true">
+                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
+            </parameter>
+            <parameter name="refundOrReturnIds" type="List" required="true">
+                <description>Shopify refund OR return ids to check; bare numeric ids, or gid://shopify/Refund/...
+                    / gid://shopify/Return/... values. A bare id is checked under both forms.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
+                <description>HTTP connect timeout for Shopify GraphQL requests.</description>
+            </parameter>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
+                <description>HTTP read timeout for Shopify GraphQL requests.</description>
+            </parameter>
+            <parameter name="maxAttempts" type="Integer" default-value="2">
+                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="foundIds" type="List"/>
+            <parameter name="missingIds" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="ShopifyOrderIds" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/lookup/lookupShopifyOrderIds.groovy">
         <description>Point-existence check for Shopify order ids against the primary datastore via nodes(ids:).
