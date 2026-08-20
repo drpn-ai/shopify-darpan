@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -618,5 +619,60 @@ class ShopifyReturnRefsSupportTests {
                 refunds         : refundGids.collect { [id: it, createdAt: refundsCreatedAt] },
                 returns         : [nodes: returnGids.collect { [id: it, status: "CLOSED", createdAt: returnsCreatedAt] }],
         ]
+    }
+
+    @Test
+    void everyEventRowCarriesTheOrderCancellationMarkerAndTheKeyIsAlwaysPresent() {
+        // The cancellation-refund suppression reads this off the diff row's own embedded data, so it
+        // must land on BOTH row kinds (refund and return) and the key must be present even when the
+        // order is not cancelled — see ShopifyReturnRefsSupport.toRecords for why absent and null
+        // cannot be allowed to mean the same thing.
+        Map cancelled = [
+                id              : "gid://shopify/Order/5001",
+                legacyResourceId: "5001",
+                name            : "#5001",
+                createdAt       : "2026-05-01T08:00:00Z",
+                cancelledAt     : "2026-05-03T11:22:33Z",
+                refunds         : [[id: "gid://shopify/Refund/501", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [[id: "gid://shopify/Return/601", status: "OPEN", createdAt: "2026-05-01T09:05:00Z", refunds: []]]],
+        ]
+        Map live = [
+                id              : "gid://shopify/Order/5002",
+                legacyResourceId: "5002",
+                name            : "#5002",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/502", createdAt: "2026-05-01T09:30:00Z"]],
+                returns         : [nodes: []],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: cancelled], [cursor: "c2", node: live]],
+                    pageInfo: [hasNextPage: false, endCursor: "c2"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        List records = (List) result.records
+        Map refund501 = (Map) records.find { ((Map) it).refundOrReturnId == "501" }
+        Map return601 = (Map) records.find { ((Map) it).refundOrReturnId == "601" }
+        Map refund502 = (Map) records.find { ((Map) it).refundOrReturnId == "502" }
+        assertTrue(refund501 != null && return601 != null && refund502 != null,
+                "all three events are expected: ${records}")
+
+        // Both row kinds on the cancelled order carry the order's cancellation timestamp.
+        assertEquals("2026-05-03T11:22:33Z", refund501.orderCancelledAt)
+        assertEquals("2026-05-03T11:22:33Z", return601.orderCancelledAt)
+
+        // Not cancelled -> key PRESENT, value null. Absent would mean "extract predates the field".
+        assertTrue(refund502.containsKey("orderCancelledAt"),
+                "the key must be present even when the order is not cancelled: ${refund502}")
+        assertNull(refund502.orderCancelledAt)
+
+        records.each { Object raw ->
+            assertTrue(((Map) raw).containsKey("orderCancelledAt"),
+                    "every event row must carry the key: ${raw}")
+        }
     }
 }

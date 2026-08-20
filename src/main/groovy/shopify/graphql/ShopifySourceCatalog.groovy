@@ -141,6 +141,12 @@ class ShopifySourceCatalog {
             "legacyResourceId",
             "name",
             "createdAt",
+            // Order-level cancellation marker (2026-08-20). A plain scalar on the Order node this
+            // source ALREADY fetches, so selecting it costs no extra request and no extra rate-limit
+            // points — unlike the OMS point lookup it replaces, which was one HTTP call per chunk of
+            // candidate orders. ShopifyReturnRefsSupport.toRecords stamps it onto every event row as
+            // orderCancelledAt; ReturnPresenceVerificationSupport reads it from there.
+            "cancelledAt",
             "refunds.id",
             "refunds.createdAt",
             "returns.id",
@@ -166,6 +172,11 @@ class ShopifySourceCatalog {
             [fieldPath: "legacyResourceId", label: "Legacy Order ID", type: "UnsignedInt64", selectionPath: "legacyResourceId", required: true],
             [fieldPath: "name", label: "Order Name", type: "String", selectionPath: "name"],
             [fieldPath: "createdAt", label: "Created At", type: "DateTime", selectionPath: "createdAt"],
+            // Nullable DateTime on Order — null means "not cancelled". Present on every dated API
+            // version this catalog supports; it is already selected by the SHOPIFY_ORDERS source
+            // above, so it carries no new document-validation risk of the kind that broke
+            // returns.nodes.refunds (see that field's comment below).
+            [fieldPath: "cancelledAt", label: "Order Cancelled At", type: "DateTime", selectionPath: "cancelledAt"],
             // LIVE-PROBED 2026-08-13 on API 2026-01: Order.refunds is NON_NULL -> LIST, taking only
             // a `first` arg. It is a PLAIN LIST, not a connection — there is no edges/node (and no
             // nodes) wrapper, so the selectionPath must NOT contain them. Order.returns below IS a

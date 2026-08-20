@@ -380,6 +380,17 @@ class ShopifyReturnRefsSupport {
                                                         long floorMillis, long windowEndMillis,
                                                         List<String> warnings) {
         String orderId = bareId(node.get("legacyResourceId") ?: node.get("id"))
+        // ORDER-LEVEL CANCELLATION (2026-08-20). Stamped onto EVERY event row, refund and return
+        // alike, so the missing-in-OMS cancellation-refund suppression can read it off the diff row's
+        // own embedded data instead of making a live OMS point lookup per candidate order.
+        //
+        // The key is ALWAYS written, null when the order is not cancelled — deliberately NOT omitted.
+        // A consumer must be able to tell "this extract predates the field" (key absent) from "this
+        // order is not cancelled" (key present, null): the former has to fall back to the OMS lookup
+        // for a correct answer, the latter must not. Omitting the key on the common not-cancelled
+        // path would collapse those two states into one and silently disable the fallback for every
+        // stored artifact.
+        String orderCancelledAt = normalize(node.get("cancelledAt"))
         List<Map<String, Object>> refundEvents = collectEvents(node.get("refunds"), orderId, "refunds", refundsFirst, warnings)
         List<Map<String, Object>> returnEvents = collectEvents(node.get("returns"), orderId, "returns", returnsFirst, warnings)
 
@@ -393,6 +404,7 @@ class ShopifyReturnRefsSupport {
                     refundOrReturnType: ID_TYPE_REFUND,
                     orderId           : orderId,
                     createdAt         : refund.createdAt,
+                    orderCancelledAt  : orderCancelledAt,
             ] as Map<String, Object>)
         }
         inWindowReturns.each { Map<String, Object> ret ->
@@ -406,6 +418,7 @@ class ShopifyReturnRefsSupport {
                     refundOrReturnType: ID_TYPE_RETURN,
                     orderId           : orderId,
                     createdAt         : ret.createdAt,
+                    orderCancelledAt  : orderCancelledAt,
             ] as Map<String, Object>)
         }
         return records
