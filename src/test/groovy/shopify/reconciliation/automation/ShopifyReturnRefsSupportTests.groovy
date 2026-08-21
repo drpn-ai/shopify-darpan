@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNotNull
 import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
@@ -674,5 +675,89 @@ class ShopifyReturnRefsSupportTests {
             assertTrue(((Map) raw).containsKey("orderCancelledAt"),
                     "every event row must carry the key: ${raw}")
         }
+    }
+
+    // --- CANCELLED-ITEM DETECTION (2026-08-21): a refunded line that never shipped cannot have been
+    // returned. Measured 22/25 on unmatched refunds and 0/8 on matched ones.
+
+    private static Map orderWithFulfilment(String refundId, String refundedLineId, List fulfilledLineIds,
+                                           Map extras = [:]) {
+        Map node = [
+                id              : "gid://shopify/Order/9100",
+                legacyResourceId: "9100",
+                name            : "#9100",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/${refundId}".toString(), createdAt: "2026-05-01T09:00:00Z",
+                                    refundLineItems: [nodes: [[lineItem: [id: "gid://shopify/LineItem/${refundedLineId}".toString()]]]]]],
+                returns         : [nodes: []],
+                fulfillments    : [[fulfillmentLineItems: [nodes: fulfilledLineIds.collect {
+                                        [quantity: 1, lineItem: [id: "gid://shopify/LineItem/${it}".toString()]] }]]],
+        ]
+        node.putAll(extras)
+        return node
+    }
+
+    private Map extractOne(Map node, Map options = [:]) {
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [edges: [[cursor: "c1", node: node]],
+                                              pageInfo: [hasNextPage: false, endCursor: "c1"]]]]
+        }
+        return ShopifyReturnRefsSupport.extractReturnRefs(authConfig(), "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z", options, executor)
+    }
+
+    @Test
+    void aRefundWhoseLineWasShippedIsMarkedFulfilled() {
+        Map result = extractOne(orderWithFulfilment("701", "5001", ["5001"]))
+
+        Map record = (Map) ((List) result.records).find { ((Map) it).refundOrReturnId == "701" }
+        assertEquals(Boolean.TRUE, record.refundLineEverFulfilled)
+    }
+
+    @Test
+    void aRefundWhoseLineNeverShippedIsMarkedUnfulfilled() {
+        // The ORDER has a fulfillment — just not of this line. That is the live shape: every one of
+        // these orders reads displayFulfillmentStatus FULFILLED because the OTHER lines shipped.
+        Map result = extractOne(orderWithFulfilment("702", "5002", ["5999"]))
+
+        Map record = (Map) ((List) result.records).find { ((Map) it).refundOrReturnId == "702" }
+        assertEquals(Boolean.FALSE, record.refundLineEverFulfilled)
+    }
+
+    @Test
+    void aSaturatedFulfilmentListYieldsUnknownRatherThanUnfulfilled() {
+        // Truncation is fatal to this answer: a missed fulfillment page makes a shipped line look
+        // unshipped, which would suppress a real difference. Unknown must not collapse into false.
+        List many = (1..2).collect { "l${it}".toString() }
+        Map node = orderWithFulfilment("703", "5003", many)
+        Map result = extractOne(node, [connectionPageSize: 2])
+
+        Map record = (Map) ((List) result.records).find { ((Map) it).refundOrReturnId == "703" }
+        assertNull(record.refundLineEverFulfilled)
+        assertTrue(((List) result.warnings).any { (it as String).contains("truncated") },
+                "a saturated fulfillment list must say so: ${result.warnings}")
+    }
+
+    @Test
+    void aRefundWithNoLineItemsYieldsUnknown() {
+        Map node = orderWithFulfilment("704", "5004", ["5004"])
+        ((Map) ((List) node.refunds).first()).put("refundLineItems", [nodes: []])
+        Map result = extractOne(node)
+
+        Map record = (Map) ((List) result.records).find { ((Map) it).refundOrReturnId == "704" }
+        assertNull(record.refundLineEverFulfilled)
+    }
+
+    @Test
+    void returnRowsDoNotCarryTheFulfilmentVerdict() {
+        // The verdict is about a REFUND's lines. A RETURN row has none, and carrying a null column
+        // would invite a consumer to read it as "not fulfilled".
+        Map node = orderWithFulfilment("705", "5005", ["5005"])
+        node.put("returns", [nodes: [[id: "gid://shopify/Return/805", createdAt: "2026-05-01T09:05:00Z", refunds: []]]])
+        Map result = extractOne(node)
+
+        Map ret = (Map) ((List) result.records).find { ((Map) it).refundOrReturnType == "RETURN" }
+        assertNotNull(ret)
+        assertFalse(ret.containsKey("refundLineEverFulfilled"))
     }
 }

@@ -152,6 +152,14 @@ class ShopifySourceCatalog {
             "returns.id",
             "returns.createdAt",
             "returns.refunds",
+            // CANCELLED-ITEM DETECTION (2026-08-21). Which lines a refund touched, and which lines the
+            // order ever shipped: a refunded line that appears in NO fulfillment was never shipped, and
+            // an item that never shipped cannot have been returned. Measured over 25 unmatched vs 8
+            // matched refunds: 22/25 vs 0/8 -- perfect separation on the matched side, where
+            // restockType scored 1/8 false positives.
+            "refunds.lineItemId",
+            "fulfillments.lineItemId",
+            "fulfillments.lineItemQuantity",
         ],
         // Bulk is unsupported for this source (see class doc above). This stays an empty list
         // rather than an absent key: copySource() below unconditionally does
@@ -227,6 +235,22 @@ class ShopifySourceCatalog {
             //   neither is done here for one field. The shared value (default 50, clamped to 100) is
             //   still narrow and fully correct for an existence check, since only emptiness is ever
             //   read downstream, never the count.
+            // refunds is a plain LIST already carrying refundsFirst; refundLineItems inside it is a
+            // CONNECTION and needs its own page-size variable, which is what connectionRoot supplies
+            // here -- renderFieldName adds (first: $x) to any field whose name has a matching variable.
+            [fieldPath: "refunds.lineItemId", label: "Refunded Line Item ID", type: "ID",
+             selectionPath: "refunds.refundLineItems.nodes.lineItem.id",
+             connectionRoot: "refundLineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 250],
+            // Two descriptors for one nested path ON PURPOSE: connectionRoot is one-per-descriptor, and
+            // BOTH fulfillments and fulfillmentLineItems need a first: arg. Declaring each against a
+            // different leaf creates both variables; the builder merges the paths into one subtree.
+            // Do not "tidy" these into a single entry -- the inner connection would lose its argument.
+            [fieldPath: "fulfillments.lineItemId", label: "Fulfilled Line Item ID", type: "ID",
+             selectionPath: "fulfillments.fulfillmentLineItems.nodes.lineItem.id",
+             connectionRoot: "fulfillments", connectionDefaultPageSize: 50, connectionMaxPageSize: 250],
+            [fieldPath: "fulfillments.lineItemQuantity", label: "Fulfilled Quantity", type: "Int",
+             selectionPath: "fulfillments.fulfillmentLineItems.nodes.quantity",
+             connectionRoot: "fulfillmentLineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 250],
             [fieldPath: "returns.refunds", label: "Return Has Refund", type: "ID", selectionPath: "returns.nodes.refunds.nodes.id",
              connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
         ],

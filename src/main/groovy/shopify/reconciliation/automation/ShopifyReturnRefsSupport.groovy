@@ -127,9 +127,16 @@ class ShopifyReturnRefsSupport {
                     // and drives resolveSortKey to UPDATED_AT via that filter's own definition.
                     filters             : [updatedAtFrom: normalize(windowStart)],
                     pageSize            : options?.pageSize,
+                    // All five nested connections take the SAME operator knob. The two added for
+                    // cancelled-item detection must be tunable alongside the others: leaving them on
+                    // the catalog default would make a caller that lowered connectionPageSize think it
+                    // had bounded the request when the fulfillment legs were still asking for 50.
                     connectionPageSizes : [
-                            refundsFirst: normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
-                            returnsFirst: normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
+                            refundsFirst             : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
+                            returnsFirst             : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
+                            refundLineItemsFirst     : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
+                            fulfillmentsFirst        : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
+                            fulfillmentLineItemsFirst: normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
                     ],
             ])
         } catch (Exception e) {
@@ -182,6 +189,13 @@ class ShopifyReturnRefsSupport {
         // detection would switch off exactly when truncation begins.
         int refundsFirstEffective = normalizeInt(baseVariables.get("refundsFirst"), DEFAULT_CONNECTION_PAGE_SIZE)
         int returnsFirstEffective = normalizeInt(baseVariables.get("returnsFirst"), DEFAULT_CONNECTION_PAGE_SIZE)
+        // Read back CLAMPED, same as the two above: the builder may lower what options asked for, and
+        // truncation is judged against what was actually requested, not what we wanted.
+        Map<String, Integer> lineFirsts = [
+                refundLineItems     : normalizeInt(baseVariables.get("refundLineItemsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
+                fulfillments        : normalizeInt(baseVariables.get("fulfillmentsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
+                fulfillmentLineItems: normalizeInt(baseVariables.get("fulfillmentLineItemsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
+        ]
         String cursor = null
         int pageCount = 0
         boolean hasNextPage = true
@@ -213,7 +227,7 @@ class ShopifyReturnRefsSupport {
                 if (node == null) return
                 ordersProcessed++
                 records.addAll(toRecords(node, refundsFirstEffective, returnsFirstEffective,
-                        netFloorMillis, windowEndMillis, warnings))
+                        netFloorMillis, windowEndMillis, warnings, lineFirsts))
             }
 
             Map pageInfo = (Map) ordersConnection.get("pageInfo")
@@ -378,7 +392,7 @@ class ShopifyReturnRefsSupport {
      */
     private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,
                                                         long floorMillis, long windowEndMillis,
-                                                        List<String> warnings) {
+                                                        List<String> warnings, Map<String, Integer> lineFirsts = [:]) {
         String orderId = bareId(node.get("legacyResourceId") ?: node.get("id"))
         // ORDER-LEVEL CANCELLATION (2026-08-20). Stamped onto EVERY event row, refund and return
         // alike, so the missing-in-OMS cancellation-refund suppression can read it off the diff row's
@@ -391,6 +405,9 @@ class ShopifyReturnRefsSupport {
         // path would collapse those two states into one and silently disable the fallback for every
         // stored artifact.
         String orderCancelledAt = normalize(node.get("cancelledAt"))
+        Map fulfilledView = readFulfilledLineIds(node, lineFirsts, orderId, warnings)
+        Set<String> fulfilledLineIds = (Set<String>) fulfilledView.lineIds
+        boolean fulfilmentUnknown = fulfilledView.truncated as boolean
         List<Map<String, Object>> refundEvents = collectEvents(node.get("refunds"), orderId, "refunds", refundsFirst, warnings)
         List<Map<String, Object>> returnEvents = collectEvents(node.get("returns"), orderId, "returns", returnsFirst, warnings)
 
@@ -400,11 +417,13 @@ class ShopifyReturnRefsSupport {
         List<Map<String, Object>> records = []
         inWindowRefunds.each { Map<String, Object> refund ->
             records.add([
-                    refundOrReturnId  : refund.id,
-                    refundOrReturnType: ID_TYPE_REFUND,
-                    orderId           : orderId,
-                    createdAt         : refund.createdAt,
-                    orderCancelledAt  : orderCancelledAt,
+                    refundOrReturnId       : refund.id,
+                    refundOrReturnType     : ID_TYPE_REFUND,
+                    orderId                : orderId,
+                    createdAt              : refund.createdAt,
+                    orderCancelledAt       : orderCancelledAt,
+                    refundLineEverFulfilled: refundLineEverFulfilled(refund.raw, fulfilledLineIds,
+                            fulfilmentUnknown, lineFirsts, orderId, warnings),
             ] as Map<String, Object>)
         }
         inWindowReturns.each { Map<String, Object> ret ->
@@ -489,8 +508,94 @@ class ShopifyReturnRefsSupport {
                     id       : bareId(rawNode.get("id")),
                     createdAt: normalize(rawNode.get("createdAt")),
                     hasRefund: hasAtLeastOneRefund(rawNode.get("refunds")),
+                    // Kept so the cancelled-item test can read this refund's own refundLineItems.
+                    // Never emitted on a record -- projection happens in toRecords.
+                    raw      : rawNode,
             ]
         }.findAll { Map event -> event.id } as List<Map<String, Object>>
+    }
+
+
+    /**
+     * CANCELLED-ITEM DETECTION (2026-08-21). Line ids the order has EVER shipped, plus whether that
+     * view might be incomplete.
+     *
+     * A refunded line that appears in no fulfillment was never shipped, and an item that never
+     * shipped cannot have been returned — so such a refund is an item cancellation, which OMS books
+     * as a cancellation rather than a return. That is a structural implication, not a correlation,
+     * which is why this replaced the restockType proxy: measured over 25 unmatched and 8 matched
+     * refunds, "never fulfilled" scored 22/25 and 0/8, while "no RETURN restock" scored 24/25 and
+     * 1/8 — it would have suppressed a refund that really did have an OMS counterpart.
+     *
+     * Two fields that look right and are NOT: lineItem.unfulfilledQuantity is a CURRENT value and the
+     * refund has already zeroed the line, so it reads 0 for returns and cancellations alike; and
+     * order.displayFulfillmentStatus is FULFILLED on every one of these orders, because the OTHER
+     * lines shipped. Only per-line fulfillment history separates them.
+     *
+     * TRUNCATION IS FATAL TO THE ANSWER, so it is reported rather than absorbed: a missed fulfillment
+     * page would make a shipped line look unshipped and wrongly suppress a real difference. When
+     * either connection saturates, the verdict becomes UNKNOWN (null) and the suppression declines to
+     * fire, which leaves the row reported — the safe direction.
+     */
+    protected static Map readFulfilledLineIds(Map node, Map<String, Integer> lineFirsts, String orderId,
+                                              List<String> warnings) {
+        Set<String> lineIds = new HashSet<String>()
+        Object rawFulfilments = node?.get("fulfillments")
+        List fulfilments = (rawFulfilments instanceof List) ? (List) rawFulfilments
+                : (rawFulfilments instanceof Map ? nodesOf((Map) rawFulfilments) : [])
+        int fulfilmentsFirst = normalizeInt(lineFirsts?.get("fulfillments"), 0)
+        boolean truncated = fulfilmentsFirst > 0 && fulfilments.size() >= fulfilmentsFirst
+        int lineFirst = normalizeInt(lineFirsts?.get("fulfillmentLineItems"), 0)
+        fulfilments.each { Object rawFulfilment ->
+            if (!(rawFulfilment instanceof Map)) return
+            List lines = nodesOf((Map) ((Map) rawFulfilment).get("fulfillmentLineItems"))
+            if (lineFirst > 0 && lines.size() >= lineFirst) truncated = true
+            lines.each { Object rawLine ->
+                if (!(rawLine instanceof Map)) return
+                String id = bareId(((Map) ((Map) rawLine).get("lineItem"))?.get("id"))
+                if (id) lineIds.add(id)
+            }
+        }
+        if (truncated) {
+            warnings.add("Order ${orderId} returned the maximum requested fulfillment rows — its shipped-line view may be truncated, so cancelled-item suppression is skipped for it.".toString())
+        }
+        return [lineIds: lineIds, truncated: truncated]
+    }
+
+    /**
+     * TRUE when at least one line this refund touched was shipped, FALSE when none were (an item
+     * cancellation), and NULL when it cannot be known — an unreadable or saturated line list, or a
+     * truncated fulfillment view. Null must never be collapsed into false: that is the difference
+     * between "this was cancelled" and "we could not tell", and only the first may suppress.
+     */
+    protected static Boolean refundLineEverFulfilled(Object rawRefund, Set<String> fulfilledLineIds,
+                                                     boolean fulfilmentUnknown, Map<String, Integer> lineFirsts,
+                                                     String orderId, List<String> warnings) {
+        if (!(rawRefund instanceof Map)) return null
+        List lines = nodesOf((Map) ((Map) rawRefund).get("refundLineItems"))
+        if (lines.isEmpty()) return null
+        int lineFirst = normalizeInt(lineFirsts?.get("refundLineItems"), 0)
+        if (lineFirst > 0 && lines.size() >= lineFirst) {
+            warnings.add("Order ${orderId} returned the maximum requested refund line items — cancelled-item suppression is skipped for that refund.".toString())
+            return null
+        }
+        List<String> ids = lines.collect { Object rawLine ->
+            rawLine instanceof Map ? bareId(((Map) ((Map) rawLine).get("lineItem"))?.get("id")) : null
+        }.findAll { it } as List<String>
+        if (ids.isEmpty()) return null
+        if (fulfilmentUnknown) return null
+        return ids.any { fulfilledLineIds.contains(it) }
+    }
+
+    /** nodes[] or edges[].node, the two connection shapes this file already tolerates elsewhere. */
+    private static List nodesOf(Object rawConnection) {
+        if (!(rawConnection instanceof Map)) return []
+        Map connection = (Map) rawConnection
+        if (connection.get("nodes") instanceof List) return (List) connection.get("nodes")
+        if (connection.get("edges") instanceof List) {
+            return ((List) connection.get("edges")).collect { ((Map) it)?.get("node") }.findAll { it != null }
+        }
+        return []
     }
 
     /**
