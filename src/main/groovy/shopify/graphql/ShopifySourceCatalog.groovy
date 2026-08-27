@@ -150,6 +150,12 @@ class ShopifySourceCatalog {
             "refunds.id",
             "refunds.createdAt",
             "returns.id",
+            // RESTORED 2026-08-27 for return-status exclusion. This is NOT a reversal of the
+            // 2026-08-18 removal: that removed status as the refunded/unrefunded discriminator, and
+            // Return.refunds remains the discriminator (see the returns.refunds field comment below).
+            // This selection answers a different question — the return's own WORKFLOW STAGE, which
+            // operators exclude on to drop in-progress (REQUESTED/OPEN) returns.
+            "returns.status",
             "returns.createdAt",
             "returns.refunds",
             // CANCELLED-ITEM DETECTION (2026-08-21). Which lines a refund touched, and which lines the
@@ -251,6 +257,10 @@ class ShopifySourceCatalog {
             [fieldPath: "fulfillments.lineItemQuantity", label: "Fulfilled Quantity", type: "Int",
              selectionPath: "fulfillments.fulfillmentLineItems.nodes.quantity",
              connectionRoot: "fulfillmentLineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 250],
+            // SCOPE OF THAT REJECTION (2026-08-27): it rejects `status` as the REFUND discriminator
+            // only. `returns.status` is selected again above for return-status exclusion, which asks
+            // the return's workflow stage — a question status does answer. Both selections coexist;
+            // do not "tidy" either away on the strength of the other's comment.
             [fieldPath: "returns.refunds", label: "Return Has Refund", type: "ID", selectionPath: "returns.nodes.refunds.nodes.id",
              connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
         ],

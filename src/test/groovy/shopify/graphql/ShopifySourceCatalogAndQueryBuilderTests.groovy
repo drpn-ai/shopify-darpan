@@ -254,6 +254,37 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
+    void returnRefsQuerySelectsReturnStatusInsideTheReturnsConnection() {
+        // The 2026-08-18 refunded-return narrowing removed returns.status from the selection because
+        // it is the wrong answer to "has this return been refunded" (Return.refunds is the right one,
+        // and that rejection still stands — see ShopifySourceCatalog's field comment). This restores
+        // the selection for a DIFFERENT question: the return's own workflow stage, which operators
+        // exclude on (REQUESTED/OPEN = in progress).
+        //
+        // Asserted on the RENDERED DOCUMENT, not on a response fixture. A fixture is hand-shaped and
+        // only ever validated against itself, so it cannot catch a field that fails to render or
+        // renders in an invalid position — which is exactly how the returns.nodes.refunds selection
+        // bug reached a live store with every test green.
+        Map<String, Object> built = ShopifyGraphqlQueryBuilder.buildQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+                operationName     : "DarpanReturnRefs",
+                filters           : [createdAtFrom: "2026-05-01T00:00:00Z", createdAtTo: "2026-05-02T00:00:00Z"],
+        ])
+        String document = built.queryDocument as String
+
+        int returnsAt = document.indexOf("returns(")
+        assertTrue(returnsAt >= 0, "the returns connection must be selected: ${document}")
+        assertTrue(document.indexOf("status", returnsAt) > returnsAt,
+                "returns.status must render inside the returns selection: ${document}")
+
+        // Catalog-level contract, checked alongside the document so a future edit cannot quietly drop
+        // the path while some unrelated `status` keeps the document assertion green.
+        Map<String, Object> source = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS)
+        assertTrue(((List) source.defaultSelectedFieldPaths).contains("returns.status"),
+                "returns.status must be a default-selected path: ${source.defaultSelectedFieldPaths}")
+    }
+
+    @Test
     void orderSourceBulkContractIsUnchanged() {
         // Ratchet: DAR-BE-018 must not perturb the declared bulk field set that existing
         // reconciliation schemas and $.records[*] rules depend on.
