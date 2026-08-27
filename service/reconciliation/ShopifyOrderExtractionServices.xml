@@ -139,7 +139,14 @@
             nothing prevents a refund existing while a return stays OPEN, so status cannot cleanly
             separate refunded from unrefunded returns in either direction. A return whose Return.refunds
             connection comes back empty gets its own RETURN row; any non-empty result means it is
-            skipped. See ShopifyReturnRefsSupport.toRecords for the full rationale and evidence.</description>
+            skipped. See ShopifyReturnRefsSupport.toRecords for the full rationale and evidence.
+
+            RETURN STATUS (2026-08-27): RETURN rows also carry returnStatus, the Shopify ReturnStatus
+            of that return. It exists so operators can exclude in-progress returns (REQUESTED, OPEN)
+            via the standard sourceFilters mechanism — a return the customer has merely opened has no
+            OMS counterpart yet and would otherwise report as missing-in-OMS on every run until it
+            completes. This is NOT a reversal of the narrowing above: Return.refunds remains the
+            refunded/unrefunded discriminator, and returnStatus is never read as one.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
@@ -180,6 +187,26 @@
                     match (OMS lags Shopify by ~38min, RQ-23). Does not change the reporting window
                     itself — matches ReturnPresenceVerificationSupport.DEFAULT_GRACE_HOURS in the
                     darpan component by default.</description>
+            </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record-exclusion rules, same semantics as the OMS extractors.
+                    Each rule names a top-level record field and a comma-separated list of exact
+                    values; matching records are dropped before the extract file is written and
+                    counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
+                    means no configured exclusions (backward compatible).
+
+                    The field this connector exists to offer is returnStatus (Shopify ReturnStatus:
+                    REQUESTED, OPEN, CLOSED, DECLINED, CANCELED), which is written on RETURN rows
+                    only — a REFUND row carries no returnStatus and can never be matched by a rule on
+                    it. Because the refunded-return narrowing means a return with any refund emits no
+                    RETURN row at all, returnStatus only ever describes an UNREFUNDED return:
+                    excluding OPEN excludes unrefunded OPEN returns.</description>
             </parameter>
             <parameter name="reconciliationRunResultId"/>
             <parameter name="progressStageCode"/>

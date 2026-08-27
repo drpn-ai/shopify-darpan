@@ -118,6 +118,9 @@ Map extraction = ShopifyReturnRefsSupport.extractReturnRefs([
         // event created just before it is still available for the OMS-side forward match (OMS lags
         // Shopify by ~38min, RQ-23). See ShopifyReturnRefsSupport's class doc.
         lookbackHours       : ValueSupport.normalizeInt(lookbackHours, ShopifyReturnRefsSupport.DEFAULT_LOOKBACK_HOURS),
+        // Configured exclusions run CLIENT-side: Shopify's search syntax has no knowledge of tenant
+        // rules, so matching happens in the support class before output. Null when unconfigured.
+        sourceFilters       : sourceFilters,
         connectTimeoutMillis: connectTimeoutMillis,
         readTimeoutMillis   : readTimeoutMillis,
         maxAttempts         : maxAttempts,

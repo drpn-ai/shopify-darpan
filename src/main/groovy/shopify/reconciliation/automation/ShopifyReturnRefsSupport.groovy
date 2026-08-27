@@ -4,6 +4,8 @@ import shopify.graphql.ShopifyGraphqlQueryBuilder
 import shopify.graphql.ShopifyGraphqlTransport
 import shopify.graphql.ShopifySourceCatalog
 
+import darpan.reconciliation.source.SourceFilterSupport
+
 import java.time.Instant
 import java.util.regex.Matcher
 import java.util.regex.Pattern
@@ -109,6 +111,22 @@ class ShopifyReturnRefsSupport {
         Closure exec = executor ?: { Map cfg, String queryDocument, Map variables, Map opts ->
             ShopifyGraphqlTransport.execute(cfg, queryDocument, variables, opts)
         }
+
+        // Parsed ONCE, before any HTTP call, so a malformed rule fails pre-flight rather than
+        // mid-window on some later page — the same contract OmsReturnsSourceSupport follows.
+        //
+        // fieldExpression arrives ALREADY reduced to a bare top-level record field: the callers
+        // (AutomationRuntimeSupport, ReconciliationSavedRunSupport) run stored JSONPath expressions
+        // through SourceFilterSupport.toRecordFieldRules at dispatch. Do NOT reduce it again here.
+        List<Map<String, Object>> parsedFilters
+        try {
+            parsedFilters = SourceFilterSupport.parseRules(options?.sourceFilters)
+        } catch (Exception e) {
+            return [records: [], recordCount: 0, dataAvailable: false, requestMetadata: [:],
+                    warnings: warnings,
+                    errors  : [normalize(e.message) ?: "Configured exclusion rules are invalid."]]
+        }
+        Map<String, Object> exclusionCounts = [:]
 
         // Counts orders actually processed (one increment per edge, regardless of how many event
         // records — zero, one, or several — that order goes on to produce). records.size() can no
@@ -226,8 +244,18 @@ class ShopifyReturnRefsSupport {
                 Map node = (Map) ((Map) rawEdge)?.get("node")
                 if (node == null) return
                 ordersProcessed++
-                records.addAll(toRecords(node, refundsFirstEffective, returnsFirstEffective,
-                        netFloorMillis, windowEndMillis, warnings, lineFirsts))
+                toRecords(node, refundsFirstEffective, returnsFirstEffective,
+                        netFloorMillis, windowEndMillis, warnings, lineFirsts).each { Map<String, Object> record ->
+                    // Tested against the PROJECTED record, never the raw Shopify node: the stored rule
+                    // names returnStatus, a field that exists only after toRecords projects it.
+                    Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
+                    if (match != null) {
+                        String key = String.valueOf(match.get("sequenceNum"))
+                        exclusionCounts.put(key, normalizeInt(exclusionCounts.get(key), 0) + 1)
+                        return
+                    }
+                    records.add(record)
+                }
             }
 
             Map pageInfo = (Map) ordersConnection.get("pageInfo")
@@ -244,14 +272,30 @@ class ShopifyReturnRefsSupport {
                     warnings: warnings, errors: errors]
         }
 
+        Map<String, Object> metadataFilters = [
+                serverReportedOrderCount: ordersProcessed,
+                eventRecordCount        : records.size(),
+        ] as Map<String, Object>
+        if (parsedFilters) {
+            // EVERY configured rule appears, including one that matched nothing (excludedCount 0) —
+            // a missing entry would read as "not applied". Absent entirely when no rules configured.
+            metadataFilters.put("configuredExclusions", parsedFilters.collect { Map<String, Object> rule ->
+                String key = String.valueOf(rule.get("sequenceNum"))
+                return [
+                        sequenceNum    : rule.get("sequenceNum"),
+                        fieldExpression: rule.get("fieldExpression"),
+                        operator       : rule.get("operator"),
+                        values         : rule.get("values"),
+                        excludedCount  : normalizeInt(exclusionCounts.get(key), 0),
+                ]
+            })
+        }
+
         return [
                 records        : records,
                 recordCount    : records.size(),
                 dataAvailable  : !records.isEmpty(),
-                requestMetadata: [filters: [
-                        serverReportedOrderCount: ordersProcessed,
-                        eventRecordCount        : records.size(),
-                ]],
+                requestMetadata: [filters: metadataFilters],
                 warnings       : warnings,
                 errors         : [],
         ]
