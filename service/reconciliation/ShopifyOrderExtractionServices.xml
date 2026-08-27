@@ -141,12 +141,17 @@
             connection comes back empty gets its own RETURN row; any non-empty result means it is
             skipped. See ShopifyReturnRefsSupport.toRecords for the full rationale and evidence.
 
-            RETURN STATUS (2026-08-27): RETURN rows also carry returnStatus, the Shopify ReturnStatus
-            of that return. It exists so operators can exclude in-progress returns (REQUESTED, OPEN)
-            via the standard sourceFilters mechanism — a return the customer has merely opened has no
-            OMS counterpart yet and would otherwise report as missing-in-OMS on every run until it
-            completes. This is NOT a reversal of the narrowing above: Return.refunds remains the
-            refunded/unrefunded discriminator, and returnStatus is never read as one.</description>
+            RETURN WORKFLOW STATUS (2026-08-27): RETURN rows also carry returnWorkflowStatus, the
+            Shopify ReturnStatus of that return. It exists so operators can exclude in-progress
+            returns (REQUESTED, OPEN) via the standard sourceFilters mechanism — a return the customer
+            has merely opened has no OMS counterpart yet and would otherwise report as missing-in-OMS
+            on every run until it completes. This is NOT a reversal of the narrowing above:
+            Return.refunds remains the refunded/unrefunded discriminator, and this field is never read
+            as one. It is deliberately NOT called returnStatus: Shopify's own Order.returnStatus is a
+            DIFFERENT field with a different enum (OrderReturnStatus — IN_PROGRESS,
+            INSPECTION_COMPLETE, NO_RETURN, RETURN_FAILED, RETURN_REQUESTED, RETURNED), an order-wide
+            display aggregate, and the collision made operators exclude on values this field can never
+            hold.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
@@ -201,11 +206,13 @@
                     counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
                     means no configured exclusions (backward compatible).
 
-                    The field this connector exists to offer is returnStatus (Shopify ReturnStatus:
-                    REQUESTED, OPEN, CLOSED, DECLINED, CANCELED), which is written on RETURN rows
-                    only — a REFUND row carries no returnStatus and can never be matched by a rule on
-                    it. Because the refunded-return narrowing means a return with any refund emits no
-                    RETURN row at all, returnStatus only ever describes an UNREFUNDED return:
+                    The field this connector exists to offer is returnWorkflowStatus, holding a
+                    Shopify ReturnStatus (REQUESTED, OPEN, CLOSED, DECLINED, CANCELED — and NOT the
+                    order-level OrderReturnStatus values such as IN_PROGRESS, which belong to a
+                    different Shopify field and can never match here). It is written on RETURN rows
+                    only — a REFUND row carries no returnWorkflowStatus and can never be matched by a
+                    rule on it. Because the refunded-return narrowing means a return with any refund
+                    emits no RETURN row at all, this field only ever describes an UNREFUNDED return:
                     excluding OPEN excludes unrefunded OPEN returns.</description>
             </parameter>
             <parameter name="reconciliationRunResultId"/>

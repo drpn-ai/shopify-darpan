@@ -503,12 +503,12 @@ class ShopifyReturnRefsSupportTests {
         assertEquals("RETURN", returnEvent.refundOrReturnType)
 
         // The status is LIVE-CAPTURED, not synthesized: it came off the real store in the 2026-08-13
-        // probe, so this pins returnStatus against a genuine Shopify value rather than an author's
+        // probe, so this pins returnWorkflowStatus against a genuine Shopify value rather than an author's
         // assumption — unlike the return's `refunds: []`, which the fixture's own _returnRefundsField
         // note flags as synthesized.
-        assertEquals("CLOSED", returnEvent.returnStatus)
-        assertFalse(refundEvent.containsKey("returnStatus"),
-                "the refund-only order's row must carry no returnStatus: ${refundEvent}")
+        assertEquals("CLOSED", returnEvent.returnWorkflowStatus)
+        assertFalse(refundEvent.containsKey("returnWorkflowStatus"),
+                "the refund-only order's row must carry no returnWorkflowStatus: ${refundEvent}")
     }
 
     @Test
@@ -598,11 +598,11 @@ class ShopifyReturnRefsSupportTests {
 
     @Test
     void aReturnRowCarriesItsShopifyStatusAndARefundRowCarriesNoStatusKeyAtAll() {
-        // returnStatus is the field return-status exclusion matches on. It is written on RETURN rows
+        // returnWorkflowStatus is the field return-status exclusion matches on. It is written on RETURN rows
         // only — a refund has no Shopify ReturnStatus — which mirrors refundLineEverFulfilled being
         // written on REFUND rows only. The ABSENCE of the key on refund rows is load-bearing, not
         // incidental: SourceFilterSupport.firstMatchingRule keeps any record whose field is absent or
-        // blank, so this is what stops a returnStatus rule from ever touching a refund.
+        // blank, so this is what stops a returnWorkflowStatus rule from ever touching a refund.
         Map node = [
                 id              : "gid://shopify/Order/7001",
                 legacyResourceId: "7001",
@@ -628,16 +628,56 @@ class ShopifyReturnRefsSupportTests {
         assertNotNull(refundRow, "the refund row is expected: ${records}")
         assertNotNull(returnRow, "the return row is expected: ${records}")
 
-        assertEquals("OPEN", returnRow.returnStatus)
-        assertFalse(refundRow.containsKey("returnStatus"),
-                "a REFUND row must not carry a returnStatus key: ${refundRow}")
+        assertEquals("OPEN", returnRow.returnWorkflowStatus)
+        assertFalse(refundRow.containsKey("returnWorkflowStatus"),
+                "a REFUND row must not carry a returnWorkflowStatus key: ${refundRow}")
+    }
+
+    @Test
+    void aReturnRowNamesTheReturnsOwnWorkflowStageNotShopifysOrderLevelAggregate() {
+        // RENAMED 2026-08-27 after a live prod miss, and the old name is the whole reason for it.
+        // Shopify has TWO fields an operator would call "return status":
+        //   Order.returnStatus -> OrderReturnStatus: IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN,
+        //                         RETURN_FAILED, RETURN_REQUESTED, RETURNED   (order-wide aggregate)
+        //   Return.status      -> ReturnStatus:      REQUESTED, OPEN, CLOSED, DECLINED, CANCELED
+        // We select and store the SECOND, but the key was named after the FIRST. An operator looked
+        // up "returnStatus" in Shopify's docs, excluded on IN_PROGRESS, and nothing was dropped —
+        // and a rule that matches nothing reports excludedCount 0, which is indistinguishable from a
+        // feature that was never deployed. The key now names the question it answers.
+        //
+        // Asserting the OLD key is absent is the load-bearing half: leaving both would keep the
+        // ambiguity alive and let a stale rule keep silently matching nothing.
+        Map node = [
+                id              : "gid://shopify/Order/7005",
+                legacyResourceId: "7005",
+                name            : "#7005",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [[id: "gid://shopify/Return/705", status: "OPEN",
+                                             createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        Map returnRow = (Map) ((List) result.records).find { ((Map) it).refundOrReturnId == "705" }
+        assertNotNull(returnRow, "the return row is expected: ${result.records}")
+        assertEquals("OPEN", returnRow.returnWorkflowStatus)
+        assertFalse(returnRow.containsKey("returnStatus"),
+                "the old colliding key must be gone, not kept alongside: ${returnRow}")
     }
 
     @Test
     void aReturnWhoseStatusShopifyOmittedStillEmitsItsRowWithANullStatus() {
         // Fail toward EMITTING, matching this class's established bias everywhere else (see inWindow's
         // unparseable-createdAt handling): a missing status must never suppress a row. A null
-        // returnStatus is also what makes such a row un-excludable by any returnStatus rule, since
+        // returnWorkflowStatus is also what makes such a row un-excludable by any returnStatus rule, since
         // firstMatchingRule skips a blank candidate — the safe direction.
         Map node = [
                 id              : "gid://shopify/Order/7002",
@@ -661,13 +701,13 @@ class ShopifyReturnRefsSupportTests {
         assertEquals(1, result.recordCount, "a status-less return must still emit its row: ${result.records}")
         Map record = (Map) ((List) result.records)[0]
         assertEquals("703", record.refundOrReturnId)
-        assertNull(record.returnStatus)
+        assertNull(record.returnWorkflowStatus)
     }
 
     @Test
     void aReturnStatusExclusionDropsMatchingReturnRowsAndLeavesRefundRowsAlone() {
         // The feature: an operator excludes in-progress returns. OPEN is dropped, CLOSED survives, and
-        // the refund row is untouched because it carries no returnStatus key for the rule to match.
+        // the refund row is untouched because it carries no returnWorkflowStatus key for the rule to match.
         Map node = [
                 id              : "gid://shopify/Order/8001",
                 legacyResourceId: "8001",
@@ -689,7 +729,7 @@ class ShopifyReturnRefsSupportTests {
         // fieldExpression is the BARE record field, not the stored JSONPath: callers reduce it via
         // SourceFilterSupport.toRecordFieldRules before dispatch (AutomationRuntimeSupport,
         // ReconciliationSavedRunSupport). The getter must never reduce it a second time.
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "returnStatus",
+        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "returnWorkflowStatus",
                                               operator: "EXCLUDE_IN", filterValues: "REQUESTED,OPEN"]]
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -726,7 +766,7 @@ class ShopifyReturnRefsSupportTests {
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
             ]]]
         }
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "returnStatus",
+        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "returnWorkflowStatus",
                                               operator: "EXCLUDE_IN", filterValues: "REQUESTED,OPEN"]]
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -775,7 +815,7 @@ class ShopifyReturnRefsSupportTests {
             return [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false]]]]
         }
         // EXCLUDE_IN is the only supported operator; anything else must be rejected, not ignored.
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "returnStatus",
+        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "returnWorkflowStatus",
                                               operator: "INCLUDE_ONLY", filterValues: "OPEN"]]
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),

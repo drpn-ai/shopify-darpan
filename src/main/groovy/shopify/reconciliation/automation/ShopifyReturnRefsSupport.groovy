@@ -247,7 +247,7 @@ class ShopifyReturnRefsSupport {
                 toRecords(node, refundsFirstEffective, returnsFirstEffective,
                         netFloorMillis, windowEndMillis, warnings, lineFirsts).each { Map<String, Object> record ->
                     // Tested against the PROJECTED record, never the raw Shopify node: the stored rule
-                    // names returnStatus, a field that exists only after toRecords projects it.
+                    // names returnWorkflowStatus, a field that exists only after toRecords projects it.
                     Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
                     if (match != null) {
                         String key = String.valueOf(match.get("sequenceNum"))
@@ -477,18 +477,27 @@ class ShopifyReturnRefsSupport {
             // "AUTHORITATIVE DISCRIMINATOR" sections above. Only an unrefunded return gets a row here.
             if (ret.hasRefund == true) return
             records.add([
-                    refundOrReturnId  : ret.id,
-                    refundOrReturnType: ID_TYPE_RETURN,
-                    orderId           : orderId,
-                    createdAt         : ret.createdAt,
-                    orderCancelledAt  : orderCancelledAt,
+                    refundOrReturnId    : ret.id,
+                    refundOrReturnType  : ID_TYPE_RETURN,
+                    orderId             : orderId,
+                    createdAt           : ret.createdAt,
+                    orderCancelledAt    : orderCancelledAt,
                     // RETURN-ROW ONLY (2026-08-27), mirroring refundLineEverFulfilled on refund rows.
                     // Deliberately NOT written as null on refund rows: the sibling orderCancelledAt is
                     // always written because a consumer must tell "extract predates the field" from
                     // "not cancelled" in order to fall back to an OMS lookup. Nothing falls back on
-                    // returnStatus — there is no second source for a Shopify return's workflow stage —
+                    // this field — there is no second source for a Shopify return's workflow stage —
                     // so a null column on every refund row would buy nothing.
-                    returnStatus      : ret.status,
+                    //
+                    // NAMED returnWorkflowStatus, NOT returnStatus (renamed 2026-08-27, same day it
+                    // shipped). Shopify's OWN `Order.returnStatus` is a different field with a
+                    // different enum — OrderReturnStatus (IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN,
+                    // RETURN_FAILED, RETURN_REQUESTED, RETURNED), an order-wide display aggregate.
+                    // This holds Return.status, a ReturnStatus (REQUESTED, OPEN, CLOSED, DECLINED,
+                    // CANCELED) describing ONE return's own workflow stage. Under the old name an
+                    // operator found Shopify's docs for the aggregate, excluded on IN_PROGRESS, and
+                    // silently matched nothing. Do not "simplify" this name back.
+                    returnWorkflowStatus: ret.status,
             ] as Map<String, Object>)
         }
         return records
@@ -561,7 +570,7 @@ class ShopifyReturnRefsSupport {
                     hasRefund: hasAtLeastOneRefund(rawNode.get("refunds")),
                     // RETURN nodes only. Order.refunds nodes carry no `status` field, so this is
                     // always null on a refund event and is never read there — toRecords emits
-                    // returnStatus on RETURN rows alone.
+                    // returnWorkflowStatus on RETURN rows alone.
                     status   : normalize(rawNode.get("status")),
                     // Kept so the cancelled-item test can read this refund's own refundLineItems.
                     // Never emitted on a record -- projection happens in toRecords.
