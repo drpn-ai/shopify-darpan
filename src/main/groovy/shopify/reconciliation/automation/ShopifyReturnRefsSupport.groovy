@@ -438,6 +438,13 @@ class ShopifyReturnRefsSupport {
                     orderId           : orderId,
                     createdAt         : ret.createdAt,
                     orderCancelledAt  : orderCancelledAt,
+                    // RETURN-ROW ONLY (2026-08-27), mirroring refundLineEverFulfilled on refund rows.
+                    // Deliberately NOT written as null on refund rows: the sibling orderCancelledAt is
+                    // always written because a consumer must tell "extract predates the field" from
+                    // "not cancelled" in order to fall back to an OMS lookup. Nothing falls back on
+                    // returnStatus — there is no second source for a Shopify return's workflow stage —
+                    // so a null column on every refund row would buy nothing.
+                    returnStatus      : ret.status,
             ] as Map<String, Object>)
         }
         return records
@@ -508,6 +515,10 @@ class ShopifyReturnRefsSupport {
                     id       : bareId(rawNode.get("id")),
                     createdAt: normalize(rawNode.get("createdAt")),
                     hasRefund: hasAtLeastOneRefund(rawNode.get("refunds")),
+                    // RETURN nodes only. Order.refunds nodes carry no `status` field, so this is
+                    // always null on a refund event and is never read there — toRecords emits
+                    // returnStatus on RETURN rows alone.
+                    status   : normalize(rawNode.get("status")),
                     // Kept so the cancelled-item test can read this refund's own refundLineItems.
                     // Never emitted on a record -- projection happens in toRecords.
                     raw      : rawNode,

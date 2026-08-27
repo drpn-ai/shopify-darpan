@@ -501,6 +501,14 @@ class ShopifyReturnRefsSupportTests {
         assertTrue(returnEvent != null, "the return-only order must now produce a RETURN event, not just a warning: ${records}")
         assertEquals("44800213036", returnEvent.refundOrReturnId)
         assertEquals("RETURN", returnEvent.refundOrReturnType)
+
+        // The status is LIVE-CAPTURED, not synthesized: it came off the real store in the 2026-08-13
+        // probe, so this pins returnStatus against a genuine Shopify value rather than an author's
+        // assumption — unlike the return's `refunds: []`, which the fixture's own _returnRefundsField
+        // note flags as synthesized.
+        assertEquals("CLOSED", returnEvent.returnStatus)
+        assertFalse(refundEvent.containsKey("returnStatus"),
+                "the refund-only order's row must carry no returnStatus: ${refundEvent}")
     }
 
     @Test
@@ -586,6 +594,74 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
         assertEquals(0, result.recordCount, "a refund before the lookback floor must still be excluded: ${result.records}")
+    }
+
+    @Test
+    void aReturnRowCarriesItsShopifyStatusAndARefundRowCarriesNoStatusKeyAtAll() {
+        // returnStatus is the field return-status exclusion matches on. It is written on RETURN rows
+        // only — a refund has no Shopify ReturnStatus — which mirrors refundLineEverFulfilled being
+        // written on REFUND rows only. The ABSENCE of the key on refund rows is load-bearing, not
+        // incidental: SourceFilterSupport.firstMatchingRule keeps any record whose field is absent or
+        // blank, so this is what stops a returnStatus rule from ever touching a refund.
+        Map node = [
+                id              : "gid://shopify/Order/7001",
+                legacyResourceId: "7001",
+                name            : "#7001",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/701", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [[id: "gid://shopify/Return/702", status: "OPEN",
+                                             createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        List records = (List) result.records
+        Map refundRow = (Map) records.find { ((Map) it).refundOrReturnId == "701" }
+        Map returnRow = (Map) records.find { ((Map) it).refundOrReturnId == "702" }
+        assertNotNull(refundRow, "the refund row is expected: ${records}")
+        assertNotNull(returnRow, "the return row is expected: ${records}")
+
+        assertEquals("OPEN", returnRow.returnStatus)
+        assertFalse(refundRow.containsKey("returnStatus"),
+                "a REFUND row must not carry a returnStatus key: ${refundRow}")
+    }
+
+    @Test
+    void aReturnWhoseStatusShopifyOmittedStillEmitsItsRowWithANullStatus() {
+        // Fail toward EMITTING, matching this class's established bias everywhere else (see inWindow's
+        // unparseable-createdAt handling): a missing status must never suppress a row. A null
+        // returnStatus is also what makes such a row un-excludable by any returnStatus rule, since
+        // firstMatchingRule skips a blank candidate — the safe direction.
+        Map node = [
+                id              : "gid://shopify/Order/7002",
+                legacyResourceId: "7002",
+                name            : "#7002",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [[id: "gid://shopify/Return/703",
+                                             createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(1, result.recordCount, "a status-less return must still emit its row: ${result.records}")
+        Map record = (Map) ((List) result.records)[0]
+        assertEquals("703", record.refundOrReturnId)
+        assertNull(record.returnStatus)
     }
 
     private static Map authConfig() {
