@@ -247,7 +247,7 @@ class ShopifyReturnRefsSupport {
                 toRecords(node, refundsFirstEffective, returnsFirstEffective,
                         netFloorMillis, windowEndMillis, warnings, lineFirsts).each { Map<String, Object> record ->
                     // Tested against the PROJECTED record, never the raw Shopify node: the stored rule
-                    // names returnWorkflowStatus, a field that exists only after toRecords projects it.
+                    // names orderReturnStatus, a field that exists only after toRecords projects it.
                     Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
                     if (match != null) {
                         String key = String.valueOf(match.get("sequenceNum"))
@@ -449,6 +449,34 @@ class ShopifyReturnRefsSupport {
         // path would collapse those two states into one and silently disable the fallback for every
         // stored artifact.
         String orderCancelledAt = normalize(node.get("cancelledAt"))
+        // ORDER-LEVEL RETURN STATUS (2026-09-01, DAR-BE-026). Shopify's own Order.returnStatus, an
+        // OrderReturnStatus (IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN, RETURN_FAILED,
+        // RETURN_REQUESTED, RETURNED) aggregating the whole order for display. It is the ONLY status
+        // this endpoint emits, and it lands on EVERY event row, refund and return alike.
+        //
+        // IT REPLACED A PER-RETURN FIELD THAT WAS WITHDRAWN. This endpoint briefly emitted
+        // Return.status — as `returnStatus` (2026-08-27), then renamed to `returnWorkflowStatus` the
+        // same day. Both are gone; do not reintroduce either. Two measured reasons, from a live probe
+        // of gorjana prod on 2026-09-01:
+        //
+        // 1. Its values were unreachable for operators. Return.status spells the in-progress state
+        //    OPEN, a word that appears on no surface an operator can see: Shopify admin renders
+        //    "Return in progress", the order search spells it `return_status:in_progress`, and the
+        //    rules board shows a pill's label and field path but never its description, while
+        //    SourceSystemConnectorField has no allowed-values column at all. So excluding on
+        //    IN_PROGRESS matched nothing and reported excludedCount 0 — indistinguishable from "the
+        //    feature is not deployed". Order.returnStatus is the value they actually see.
+        // 2. It could not reach REFUND rows. Return.status is meaningless on a refund, so no rule on
+        //    it could ever touch one; 2 of 12 live in-progress orders emitted a refund row.
+        //
+        // CONSEQUENCE, ACCEPTED KNOWINGLY: because this is an order-wide aggregate, excluding
+        // IN_PROGRESS drops an in-progress order's REFUND rows too, not just its return. If OMS holds
+        // that refund it will now report missing-in-Shopify. That widening is the point of the field,
+        // but it is a real trade — see the exclusion test for the worked case.
+        //
+        // Key ALWAYS written, null when Shopify reports nothing — same contract as orderCancelledAt
+        // above, so a consumer can tell "extract predates the field" from "Shopify said nothing".
+        String orderReturnStatus = normalize(node.get("returnStatus"))
         Map fulfilledView = readFulfilledLineIds(node, lineFirsts, orderId, warnings)
         Set<String> fulfilledLineIds = (Set<String>) fulfilledView.lineIds
         boolean fulfilmentUnknown = fulfilledView.truncated as boolean
@@ -466,6 +494,7 @@ class ShopifyReturnRefsSupport {
                     orderId                : orderId,
                     createdAt              : refund.createdAt,
                     orderCancelledAt       : orderCancelledAt,
+                    orderReturnStatus      : orderReturnStatus,
                     refundLineEverFulfilled: refundLineEverFulfilled(refund.raw, fulfilledLineIds,
                             fulfilmentUnknown, lineFirsts, orderId, warnings),
             ] as Map<String, Object>)
@@ -482,22 +511,7 @@ class ShopifyReturnRefsSupport {
                     orderId             : orderId,
                     createdAt           : ret.createdAt,
                     orderCancelledAt    : orderCancelledAt,
-                    // RETURN-ROW ONLY (2026-08-27), mirroring refundLineEverFulfilled on refund rows.
-                    // Deliberately NOT written as null on refund rows: the sibling orderCancelledAt is
-                    // always written because a consumer must tell "extract predates the field" from
-                    // "not cancelled" in order to fall back to an OMS lookup. Nothing falls back on
-                    // this field — there is no second source for a Shopify return's workflow stage —
-                    // so a null column on every refund row would buy nothing.
-                    //
-                    // NAMED returnWorkflowStatus, NOT returnStatus (renamed 2026-08-27, same day it
-                    // shipped). Shopify's OWN `Order.returnStatus` is a different field with a
-                    // different enum — OrderReturnStatus (IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN,
-                    // RETURN_FAILED, RETURN_REQUESTED, RETURNED), an order-wide display aggregate.
-                    // This holds Return.status, a ReturnStatus (REQUESTED, OPEN, CLOSED, DECLINED,
-                    // CANCELED) describing ONE return's own workflow stage. Under the old name an
-                    // operator found Shopify's docs for the aggregate, excluded on IN_PROGRESS, and
-                    // silently matched nothing. Do not "simplify" this name back.
-                    returnWorkflowStatus: ret.status,
+                    orderReturnStatus   : orderReturnStatus,
             ] as Map<String, Object>)
         }
         return records
@@ -568,10 +582,6 @@ class ShopifyReturnRefsSupport {
                     id       : bareId(rawNode.get("id")),
                     createdAt: normalize(rawNode.get("createdAt")),
                     hasRefund: hasAtLeastOneRefund(rawNode.get("refunds")),
-                    // RETURN nodes only. Order.refunds nodes carry no `status` field, so this is
-                    // always null on a refund event and is never read there — toRecords emits
-                    // returnWorkflowStatus on RETURN rows alone.
-                    status   : normalize(rawNode.get("status")),
                     // Kept so the cancelled-item test can read this refund's own refundLineItems.
                     // Never emitted on a record -- projection happens in toRecords.
                     raw      : rawNode,

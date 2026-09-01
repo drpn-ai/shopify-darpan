@@ -147,15 +147,14 @@ class ShopifySourceCatalog {
             // candidate orders. ShopifyReturnRefsSupport.toRecords stamps it onto every event row as
             // orderCancelledAt; ReturnPresenceVerificationSupport reads it from there.
             "cancelledAt",
+            // ORDER-LEVEL RETURN STATUS (2026-09-01, DAR-BE-026). Like cancelledAt above, a plain
+            // scalar on the Order node this source ALREADY fetches, so it costs no extra request and
+            // no extra rate-limit points. It is the OrderReturnStatus aggregate operators see and
+            // search on (return_status:in_progress); returns.status below is a different enum.
+            "returnStatus",
             "refunds.id",
             "refunds.createdAt",
             "returns.id",
-            // RESTORED 2026-08-27 for return-status exclusion. This is NOT a reversal of the
-            // 2026-08-18 removal: that removed status as the refunded/unrefunded discriminator, and
-            // Return.refunds remains the discriminator (see the returns.refunds field comment below).
-            // This selection answers a different question — the return's own WORKFLOW STAGE, which
-            // operators exclude on to drop in-progress (REQUESTED/OPEN) returns.
-            "returns.status",
             "returns.createdAt",
             "returns.refunds",
             // CANCELLED-ITEM DETECTION (2026-08-21). Which lines a refund touched, and which lines the
@@ -191,6 +190,10 @@ class ShopifySourceCatalog {
             // above, so it carries no new document-validation risk of the kind that broke
             // returns.nodes.refunds (see that field's comment below).
             [fieldPath: "cancelledAt", label: "Order Cancelled At", type: "DateTime", selectionPath: "cancelledAt"],
+            // Order.returnStatus — non-null OrderReturnStatus enum, no args. Live-probed on gorjana
+            // 2026-09-01 (API 2024-10, HTTP 200) alongside returns.nodes.status in one document, so
+            // the two coexisting in this selection is verified, not assumed.
+            [fieldPath: "returnStatus", label: "Order Return Status", type: "String", selectionPath: "returnStatus"],
             // LIVE-PROBED 2026-08-13 on API 2026-01: Order.refunds is NON_NULL -> LIST, taking only
             // a `first` arg. It is a PLAIN LIST, not a connection — there is no edges/node (and no
             // nodes) wrapper, so the selectionPath must NOT contain them. Order.returns below IS a
@@ -203,8 +206,6 @@ class ShopifySourceCatalog {
             // returns IS a connection (ReturnConnection). Live-probed shape uses nodes{}, matching
             // ShopifyExchangeStateLookupSupport's existing `returns(first: 10) { nodes { ... } }`.
             [fieldPath: "returns.id", label: "Return ID", type: "ID", selectionPath: "returns.nodes.id",
-             connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "returns.status", label: "Return Status", type: "String", selectionPath: "returns.nodes.status",
              connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
             [fieldPath: "returns.createdAt", label: "Return Created At", type: "DateTime", selectionPath: "returns.nodes.createdAt",
              connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],

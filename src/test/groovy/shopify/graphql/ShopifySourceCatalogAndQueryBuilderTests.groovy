@@ -254,12 +254,14 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
-    void returnRefsQuerySelectsReturnStatusInsideTheReturnsConnection() {
-        // The 2026-08-18 refunded-return narrowing removed returns.status from the selection because
-        // it is the wrong answer to "has this return been refunded" (Return.refunds is the right one,
-        // and that rejection still stands — see ShopifySourceCatalog's field comment). This restores
-        // the selection for a DIFFERENT question: the return's own workflow stage, which operators
-        // exclude on (REQUESTED/OPEN = in progress).
+    void returnRefsQuerySelectsTheOrderLevelReturnStatusAndNoPerReturnStatus() {
+        // WITHDRAWN 2026-09-01 (DAR-BE-026): returns.status is no longer selected. It had been
+        // restored on 2026-08-27 so operators could exclude in-progress returns, but its values are
+        // unreachable for them — Return.status spells the in-progress state OPEN, while every surface
+        // an operator can see (Shopify admin, the return_status: search filter) says IN_PROGRESS.
+        // Order.returnStatus carries that value and is selected instead. The 2026-08-18 rejection of
+        // returns.status as the refunded/unrefunded discriminator is UNRELATED and still stands:
+        // Return.refunds remains the discriminator, and returns.refunds is still selected.
         //
         // Asserted on the RENDERED DOCUMENT, not on a response fixture. A fixture is hand-shaped and
         // only ever validated against itself, so it cannot catch a field that fails to render or
@@ -273,15 +275,23 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         String document = built.queryDocument as String
 
         int returnsAt = document.indexOf("returns(")
-        assertTrue(returnsAt >= 0, "the returns connection must be selected: ${document}")
-        assertTrue(document.indexOf("status", returnsAt) > returnsAt,
-                "returns.status must render inside the returns selection: ${document}")
+        assertTrue(returnsAt >= 0, "the returns connection must still be selected: ${document}")
+        // returnStatus must render at ORDER level — before the returns connection opens, not inside it.
+        int orderStatusAt = document.indexOf("returnStatus")
+        assertTrue(orderStatusAt >= 0, "Order.returnStatus must render: ${document}")
+        assertTrue(orderStatusAt < returnsAt,
+                "returnStatus must render on the Order, not inside the returns selection: ${document}")
 
         // Catalog-level contract, checked alongside the document so a future edit cannot quietly drop
-        // the path while some unrelated `status` keeps the document assertion green.
+        // the path while some unrelated `returnStatus` keeps the document assertion green.
         Map<String, Object> source = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS)
-        assertTrue(((List) source.defaultSelectedFieldPaths).contains("returns.status"),
-                "returns.status must be a default-selected path: ${source.defaultSelectedFieldPaths}")
+        List paths = (List) source.defaultSelectedFieldPaths
+        assertTrue(paths.contains("returnStatus"),
+                "returnStatus must be a default-selected path: ${paths}")
+        assertFalse(paths.contains("returns.status"),
+                "the withdrawn per-return status must not come back: ${paths}")
+        assertTrue(paths.contains("returns.refunds"),
+                "the refunded-return discriminator is unaffected by this withdrawal: ${paths}")
     }
 
     @Test
