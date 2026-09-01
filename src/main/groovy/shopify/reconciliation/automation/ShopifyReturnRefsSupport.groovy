@@ -87,6 +87,10 @@ class ShopifyReturnRefsSupport {
     // class uses for the refund-or-return abstraction.
     static final String ID_TYPE_REFUND = "REFUND"
     static final String ID_TYPE_RETURN = "RETURN"
+    /** Shopify ReturnStatus value for a finished return. See toRecords' CLOSED-UNREFUNDED section. */
+    static final String RETURN_STATUS_CLOSED = "CLOSED"
+    /** requestMetadata.filters key reporting how many rows the CLOSED-unrefunded rule dropped. */
+    static final String CLOSED_UNREFUNDED_SUPPRESSED_KEY = "closedUnrefundedReturnsSuppressed"
 
     private static final Pattern GID_TAIL = Pattern.compile('gid://shopify/[^/]+/(\\d+)(?:\\?.*)?$')
     private static final Pattern TRAILING_DIGITS = Pattern.compile('(\\d+)$')
@@ -127,6 +131,9 @@ class ShopifyReturnRefsSupport {
                     errors  : [normalize(e.message) ?: "Configured exclusion rules are invalid."]]
         }
         Map<String, Object> exclusionCounts = [:]
+        // Mutable accumulator threaded into toRecords the same way `warnings` already is, so the
+        // per-order projection can report what it dropped without changing its return type.
+        Map<String, Integer> suppressionCounters = [:]
 
         // Counts orders actually processed (one increment per edge, regardless of how many event
         // records — zero, one, or several — that order goes on to produce). records.size() can no
@@ -245,7 +252,8 @@ class ShopifyReturnRefsSupport {
                 if (node == null) return
                 ordersProcessed++
                 toRecords(node, refundsFirstEffective, returnsFirstEffective,
-                        netFloorMillis, windowEndMillis, warnings, lineFirsts).each { Map<String, Object> record ->
+                        netFloorMillis, windowEndMillis, warnings, lineFirsts,
+                        suppressionCounters).each { Map<String, Object> record ->
                     // Tested against the PROJECTED record, never the raw Shopify node: the stored rule
                     // names orderReturnStatus, a field that exists only after toRecords projects it.
                     Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
@@ -275,6 +283,11 @@ class ShopifyReturnRefsSupport {
         Map<String, Object> metadataFilters = [
                 serverReportedOrderCount: ordersProcessed,
                 eventRecordCount        : records.size(),
+                // ALWAYS present, zero included — same contract as configuredExclusions' zero-count
+                // entries below. An absent key would read as "this build predates the rule", which is
+                // the exact ambiguity that made the withdrawn IN_PROGRESS pill undiagnosable.
+                (CLOSED_UNREFUNDED_SUPPRESSED_KEY):
+                        normalizeInt(suppressionCounters.get(CLOSED_UNREFUNDED_SUPPRESSED_KEY), 0),
         ] as Map<String, Object>
         if (parsedFilters) {
             // EVERY configured rule appears, including one that matched nothing (excludedCount 0) —
@@ -403,6 +416,16 @@ class ShopifyReturnRefsSupport {
      * refund transaction exists against it — a different question the field was never designed to
      * answer, and both of the failure directions above are live risks from it, not rare corners.
      *
+     * SCOPE OF THAT REJECTION, because it is now adjacent to a rule that DOES read status (2026-09-01,
+     * DAR-BE-027 — see CLOSED-UNREFUNDED SUPPRESSION below): everything above stands, unamended.
+     * status is not, and never becomes, the refunded/unrefunded discriminator; Return.refunds is.
+     * The new rule reads status to answer a THIRD question — has this return finished — and reaches
+     * the opposite conclusion from the very same Shopify fact quoted above. Because CLOSED does not
+     * imply a refund, a CLOSED return whose refunds connection is empty is one that finished without
+     * ever producing the refund OMS keys a return on. The 2026-08-18 text feared exactly that row
+     * being dropped; what changed is not the Shopify side but the OMS side, which is documented where
+     * the new rule is, not here.
+     *
      * THE AUTHORITATIVE DISCRIMINATOR — `Return.refunds` (ShopifySourceCatalog's
      * SHOPIFY_ORDER_RETURN_REFS fields, `returns.refunds` fieldPath / `returns.nodes.refunds.nodes.id`
      * selectionPath — corrected same-day, 2026-08-18, after a live run hit Shopify's GraphQL validator
@@ -418,6 +441,44 @@ class ShopifyReturnRefsSupport {
      * row (sourced independently from the order-level `refunds` list, not from this nested
      * connection) already carries the match. See collectEvents/toRecords below for exactly how this
      * is read; only emptiness is ever consulted, never the nested refund ids or their count.
+     *
+     * CLOSED-UNREFUNDED SUPPRESSION (2026-09-01, DAR-BE-027) — the second half of the same idea, and
+     * a DELIBERATE REVERSAL of what the section above feared. The narrowing removes a return that HAS
+     * a refund; this removes a return that finished and never got one.
+     *
+     * OMS books a return keyed on the REFUND. A Shopify Return carrying no refund therefore has no OMS
+     * counterpart and never had one — there is nothing for it to be missing from, so reporting it
+     * missing-in-OMS is a PERMANENT STRUCTURAL false positive on every run, in the same class as the
+     * phantom row the narrowing above removed. Restricting it to CLOSED is what keeps it safe: an OPEN
+     * or REQUESTED return may still produce its refund later, so it stays reported.
+     *
+     * ORIGINATING EVIDENCE, live: RAILS return 35442393257 on order 7245977551017 (createdAt
+     * 2026-08-31T16:30:15Z, orderReturnStatus RETURNED), reported not-reconciled on a real run. The
+     * app that store uses creates the Shopify Return and its refund as SEPARATE, UNLINKED objects, so
+     * Return.refunds comes back empty and the narrowing above cannot see the refund that in fact
+     * exists. NOT a RAILS peculiarity, and that matters for blast radius: the live-captured gorjana
+     * fixture in this component (#GORTEST27950, Admin API 2026-01, 2026-08-13) carries a CLOSED return
+     * with no refund too — its test is now this rule's regression case.
+     *
+     * WHY IT IS NOT A CONFIGURABLE RULE, decided by Aditi 2026-09-01: it is hardcoded for every tenant.
+     * A tenant-level exclusion would have to read the return's status off the RECORD, which means
+     * re-emitting the per-return status key DAR-BE-026 withdrew hours earlier — a keepFieldsBase edit,
+     * a new SourceSystemConnectorField, upgrade-data, a release and a forced RETIRED_FIELDS sweep per
+     * environment, to make optional a row that is wrong on every store. As an internal discriminator
+     * it costs one GraphQL selection and no record-shape change at all.
+     *
+     * SCOPED TO CLOSED ONLY, also deliberate. DECLINED and CANCELED returns arguably never sync either,
+     * by the same argument — but that is inference and no such row has been observed, so they stay
+     * REPORTED. A false positive an operator can see is a bug report; one a rule quietly ate is not.
+     *
+     * ACCEPTED TRADE: this also drops a closed return resolved by EXCHANGE rather than refund, on
+     * every store. Exchange reconciliation covers those separately, which is why this reads as correct
+     * rather than merely tolerable — but if a store's returns count falls after this deploys, check it
+     * against this rule first, using requestMetadata.filters.closedUnrefundedReturnsSuppressed, which
+     * is always present and reports zero rather than going absent.
+     *
+     * ORDER OF THE TWO CHECKS IS LOAD-BEARING: hasRefund is tested FIRST, so a CLOSED return that does
+     * have a refund is attributed to the 2026-08-18 narrowing and never inflates this rule's count.
      *
      * ACCEPTED COST NOW CLOSED: a refunded return previously produced two rows; it now produces
      * exactly one (its refund's). The remaining known limitation is narrower: this narrowing trusts
@@ -436,7 +497,8 @@ class ShopifyReturnRefsSupport {
      */
     private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,
                                                         long floorMillis, long windowEndMillis,
-                                                        List<String> warnings, Map<String, Integer> lineFirsts = [:]) {
+                                                        List<String> warnings, Map<String, Integer> lineFirsts = [:],
+                                                        Map<String, Integer> counters = [:]) {
         String orderId = bareId(node.get("legacyResourceId") ?: node.get("id"))
         // ORDER-LEVEL CANCELLATION (2026-08-20). Stamped onto EVERY event row, refund and return
         // alike, so the missing-in-OMS cancellation-refund suppression can read it off the diff row's
@@ -505,6 +567,15 @@ class ShopifyReturnRefsSupport {
             // refund's own REFUND row alone — see the class doc's "REFUNDED-RETURN NARROWING" and
             // "AUTHORITATIVE DISCRIMINATOR" sections above. Only an unrefunded return gets a row here.
             if (ret.hasRefund == true) return
+            // CLOSED-unrefunded suppression (2026-09-01, DAR-BE-027) — see the section of this
+            // method's doc under that name. A finished return carrying no refund has no OMS
+            // counterpart and never had one, so reporting it missing-in-OMS is a permanent false
+            // positive. Any other status, and an absent/unreadable one, still emits.
+            if (ret.status == RETURN_STATUS_CLOSED) {
+                counters.put(CLOSED_UNREFUNDED_SUPPRESSED_KEY,
+                        normalizeInt(counters.get(CLOSED_UNREFUNDED_SUPPRESSED_KEY), 0) + 1)
+                return
+            }
             records.add([
                     refundOrReturnId    : ret.id,
                     refundOrReturnType  : ID_TYPE_RETURN,
@@ -582,6 +653,10 @@ class ShopifyReturnRefsSupport {
                     id       : bareId(rawNode.get("id")),
                     createdAt: normalize(rawNode.get("createdAt")),
                     hasRefund: hasAtLeastOneRefund(rawNode.get("refunds")),
+                    // Return.status, read ONLY by toRecords' CLOSED-unrefunded suppression. Like raw
+                    // and hasRefund it is never projected onto a record — DAR-BE-026 withdrew the
+                    // per-return status from the record SHAPE and that withdrawal stands.
+                    status   : normalize(rawNode.get("status")),
                     // Kept so the cancelled-item test can read this refund's own refundLineItems.
                     // Never emitted on a record -- projection happens in toRecords.
                     raw      : rawNode,

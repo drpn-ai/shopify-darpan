@@ -206,14 +206,29 @@
                     counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
                     means no configured exclusions (backward compatible).
 
-                    The field this connector exists to offer is returnWorkflowStatus, holding a
-                    Shopify ReturnStatus (REQUESTED, OPEN, CLOSED, DECLINED, CANCELED — and NOT the
-                    order-level OrderReturnStatus values such as IN_PROGRESS, which belong to a
-                    different Shopify field and can never match here). It is written on RETURN rows
-                    only — a REFUND row carries no returnWorkflowStatus and can never be matched by a
-                    rule on it. Because the refunded-return narrowing means a return with any refund
-                    emits no RETURN row at all, this field only ever describes an UNREFUNDED return:
-                    excluding OPEN excludes unrefunded OPEN returns.</description>
+                    The field this connector exists to offer is orderReturnStatus, holding Shopify's
+                    own Order.returnStatus (IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN, RETURN_FAILED,
+                    RETURN_REQUESTED, RETURNED) — the values Shopify's own admin and order search show,
+                    so a rule works as typed. Corrected 2026-09-01: this paragraph named
+                    returnWorkflowStatus, a per-return field WITHDRAWN by DAR-BE-026 earlier the same
+                    day. Do not write a rule against that name or the older returnStatus; both are
+                    retired and a rule naming either matches nothing, silently, forever.
+
+                    orderReturnStatus is an ORDER-WIDE aggregate written on EVERY row, refunds
+                    included. That is deliberate — the withdrawn per-return field could never reach a
+                    refund row at all — but it widens the blast radius: excluding IN_PROGRESS drops an
+                    in-progress order's REFUND rows too, and if OMS holds such a refund it will then
+                    report missing-in-Shopify.
+
+                    TWO SUPPRESSIONS ARE ALWAYS ON, ahead of any rule you configure, and they explain
+                    RETURN rows you may expect to see and do not. A return that HAS a refund emits no
+                    RETURN row (2026-08-18) — its refund's own row is the OMS counterpart. A CLOSED
+                    return with NO refund emits no row either (DAR-BE-027, 2026-09-01) — OMS books a
+                    return keyed on the refund, so an unrefunded one never synced and reporting it
+                    missing-in-OMS is a permanent false positive. The second is counted in
+                    requestMetadata.filters.closedUnrefundedReturnsSuppressed, always present, zero
+                    included. Between them, a surviving RETURN row is always an unrefunded return that
+                    has not finished: OPEN, REQUESTED, DECLINED or CANCELED.</description>
             </parameter>
             <parameter name="reconciliationRunResultId"/>
             <parameter name="progressStageCode"/>

@@ -254,14 +254,24 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
-    void returnRefsQuerySelectsTheOrderLevelReturnStatusAndNoPerReturnStatus() {
-        // WITHDRAWN 2026-09-01 (DAR-BE-026): returns.status is no longer selected. It had been
-        // restored on 2026-08-27 so operators could exclude in-progress returns, but its values are
-        // unreachable for them — Return.status spells the in-progress state OPEN, while every surface
-        // an operator can see (Shopify admin, the return_status: search filter) says IN_PROGRESS.
-        // Order.returnStatus carries that value and is selected instead. The 2026-08-18 rejection of
-        // returns.status as the refunded/unrefunded discriminator is UNRELATED and still stands:
-        // Return.refunds remains the discriminator, and returns.refunds is still selected.
+    void returnRefsQuerySelectsTheOrderLevelReturnStatusAndThePerReturnStatusDiscriminator() {
+        // TWO STATUS SELECTIONS, DIFFERENT JOBS, and the difference is the whole reason this test
+        // reads the way it does.
+        //
+        // Order.returnStatus (order level) is the OPERATOR-FACING one: it backs the rules-board pill,
+        // so its values must be words an operator can see. That is why DAR-BE-026 withdrew the
+        // per-return status from the record shape hours earlier on 2026-09-01 — Return.status spells
+        // the in-progress state OPEN, while Shopify admin and the return_status: search filter both
+        // say IN_PROGRESS, so a rule typed as IN_PROGRESS matched nothing.
+        //
+        // Return.status (inside the returns connection) is RESTORED HERE by DAR-BE-027 for a job that
+        // withdrawal never touched: an INTERNAL discriminator nobody types, selected exactly like
+        // returns.refunds beside it. A CLOSED return carrying no refund never synced to OMS at all, so
+        // toRecords suppresses its row. It is never emitted as a record key and never offered as a
+        // pill — assert that in ShopifyReturnRefsSupportTests, not here.
+        //
+        // The 2026-08-18 rejection of returns.status as the refunded/unrefunded discriminator is a
+        // THIRD question and still stands: Return.refunds remains that discriminator.
         //
         // Asserted on the RENDERED DOCUMENT, not on a response fixture. A fixture is hand-shaped and
         // only ever validated against itself, so it cannot catch a field that fails to render or
@@ -281,6 +291,11 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         assertTrue(orderStatusAt >= 0, "Order.returnStatus must render: ${document}")
         assertTrue(orderStatusAt < returnsAt,
                 "returnStatus must render on the Order, not inside the returns selection: ${document}")
+        // The per-return leaf renders INSIDE the returns selection. Searching from returnsAt is safe
+        // precisely because the assertion above already proved the order-level returnStatus renders
+        // before it, so this cannot be that same field matching on its trailing substring.
+        assertTrue(document.indexOf("status", returnsAt) >= 0,
+                "Return.status must render inside the returns selection: ${document}")
 
         // Catalog-level contract, checked alongside the document so a future edit cannot quietly drop
         // the path while some unrelated `returnStatus` keeps the document assertion green.
@@ -288,10 +303,10 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         List paths = (List) source.defaultSelectedFieldPaths
         assertTrue(paths.contains("returnStatus"),
                 "returnStatus must be a default-selected path: ${paths}")
-        assertFalse(paths.contains("returns.status"),
-                "the withdrawn per-return status must not come back: ${paths}")
+        assertTrue(paths.contains("returns.status"),
+                "returns.status must be selected again as the closed-unrefunded discriminator (DAR-BE-027): ${paths}")
         assertTrue(paths.contains("returns.refunds"),
-                "the refunded-return discriminator is unaffected by this withdrawal: ${paths}")
+                "the refunded-return discriminator is unaffected by either change: ${paths}")
     }
 
     @Test

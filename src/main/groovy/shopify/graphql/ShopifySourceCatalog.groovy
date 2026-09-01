@@ -156,6 +156,13 @@ class ShopifySourceCatalog {
             "refunds.createdAt",
             "returns.id",
             "returns.createdAt",
+            // CLOSED-UNREFUNDED SUPPRESSION (2026-09-01, DAR-BE-027). Return.status, restored as an
+            // INTERNAL discriminator only — never a record key, never a rules-board pill. That is the
+            // distinction the DAR-BE-026 withdrawal hours earlier turned on: its values are unusable
+            // for an operator TYPING a rule (it spells the in-progress state OPEN, a word no Shopify
+            // surface shows), which says nothing about code reading it. See ShopifyReturnRefsSupport
+            // .toRecords for why CLOSED + no refund means "never synced to OMS".
+            "returns.status",
             "returns.refunds",
             // CANCELLED-ITEM DETECTION (2026-08-21). Which lines a refund touched, and which lines the
             // order ever shipped: a refunded line that appears in NO fulfillment was never shipped, and
@@ -258,10 +265,19 @@ class ShopifySourceCatalog {
             [fieldPath: "fulfillments.lineItemQuantity", label: "Fulfilled Quantity", type: "Int",
              selectionPath: "fulfillments.fulfillmentLineItems.nodes.quantity",
              connectionRoot: "fulfillmentLineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 250],
-            // SCOPE OF THAT REJECTION (2026-08-27): it rejects `status` as the REFUND discriminator
-            // only. `returns.status` is selected again above for return-status exclusion, which asks
-            // the return's workflow stage — a question status does answer. Both selections coexist;
-            // do not "tidy" either away on the strength of the other's comment.
+            // Return.status — a ReturnStatus enum (REQUESTED, OPEN, CLOSED, DECLINED, CANCELED), no
+            // args. Live-probed on gorjana 2026-09-01 (API 2024-10, HTTP 200) in one document
+            // alongside the order-level returnStatus above, so the two coexisting is verified.
+            //
+            // SCOPE OF THE 2026-08-18 REJECTION, restated because this field keeps attracting it: that
+            // rejection is about `status` as the REFUNDED/UNREFUNDED discriminator, and it still
+            // stands — Return.refunds below answers that, because a return can reach CLOSED with zero
+            // refunds. DAR-BE-027 uses status for a DIFFERENT question, and reaches the opposite
+            // conclusion from the same Shopify fact: precisely because CLOSED does not imply a refund,
+            // a CLOSED return whose refunds connection is empty is one OMS never booked. Both fields
+            // are read, neither substitutes for the other; do not "tidy" either away.
+            [fieldPath: "returns.status", label: "Return Status", type: "String", selectionPath: "returns.nodes.status",
+             connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
             [fieldPath: "returns.refunds", label: "Return Has Refund", type: "ID", selectionPath: "returns.nodes.refunds.nodes.id",
              connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
         ],

@@ -29,6 +29,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * prevents a refund existing while a return stays OPEN). See ShopifyReturnRefsSupport.toRecords for
  * the full evidence.
  *
+ * CLOSED-UNREFUNDED SUPPRESSION (2026-09-01, DAR-BE-027): the mirror of the narrowing above — a
+ * return that FINISHED and never got a refund is dropped too. OMS books a return keyed on the refund,
+ * so an unrefunded one has no counterpart and never had one. That is why the paragraph above is not
+ * contradicted by it: status still does not decide "is this refunded" (Return.refunds does), it
+ * decides "is this finished", and the two rules answer different questions. Only CLOSED qualifies —
+ * OPEN, REQUESTED, DECLINED and CANCELED all still emit, each pinned by its own test below.
+ *
  * Cursor path, not bulk: refunds and returns are connections, and buildBulkQuery rejects those.
  */
 class ShopifyReturnRefsSupportTests {
@@ -47,6 +54,9 @@ class ShopifyReturnRefsSupportTests {
         // each, and createdAt must be that event's own date, not the order's or any other event's.
         // The return's own `refunds` is explicitly empty — it is UNREFUNDED, distinct from either of
         // the two order-level refunds (201, 202), so the narrowing does not suppress its row.
+        // Status is OPEN and that is now load-bearing rather than arbitrary: it was CLOSED until
+        // 2026-09-01, chosen when status meant nothing here, and DAR-BE-027 gave it meaning. This
+        // test is about the per-event GRAIN, so its return must be one that survives both narrowings.
         Map node = [
                 id              : "gid://shopify/Order/2020",
                 legacyResourceId: "2020",
@@ -56,7 +66,7 @@ class ShopifyReturnRefsSupportTests {
                         [id: "gid://shopify/Refund/201", createdAt: "2026-05-01T09:00:00Z"],
                         [id: "gid://shopify/Refund/202", createdAt: "2026-05-01T10:00:00Z"],
                 ],
-                returns         : [nodes: [[id: "gid://shopify/Return/301", status: "CLOSED", createdAt: "2026-05-01T09:05:00Z", refunds: []]]],
+                returns         : [nodes: [[id: "gid://shopify/Return/301", status: "OPEN", createdAt: "2026-05-01T09:05:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: [orders: [
@@ -295,14 +305,28 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void statusDoesNotAffectTheOutcomeAClosedReturnWithNoRefundsStillEmitsAReturnRow() {
-        // Investigated 2026-08-18: a narrowing using returns.nodes.status as the discriminator was
-        // considered and REJECTED on direct evidence (see ShopifyReturnRefsSupport.toRecords doc):
-        // Shopify's own returnClose mutation doc confirms a return can reach CLOSED with zero refunds
-        // ("simply when it has been marked as returned in the system"), and nothing prevents a refund
-        // existing while a return stays OPEN. Return.refunds — not status — is the actual gate. This
-        // test locks that in: a CLOSED return with an explicitly empty refunds connection must still
-        // emit its RETURN row, proving CLOSED is not read as "has a refund".
+    void aClosedReturnWithNoRefundIsSuppressedBecauseItNeverSyncedToOms() {
+        // DAR-BE-027, 2026-09-01. THIS TEST IS THE INVERSE OF THE ONE IT REPLACED, on purpose — read
+        // this before "restoring" the old behaviour.
+        //
+        // What it used to assert, and why that was right at the time: a 2026-08-18 narrowing had
+        // considered returns.nodes.status as a REFUNDED/UNREFUNDED discriminator and rejected it, on
+        // Shopify's own returnClose doc ("either when a refund has been made and items restocked, or
+        // simply when it has been marked as returned in the system"). CLOSED does not imply refunded,
+        // so reading it as "has a refund" would have dropped an exchange-resolved return that OMS was
+        // believed to expect. Return.refunds is still that discriminator and is untouched here.
+        //
+        // What changed is the OMS-side fact, not the Shopify-side one. OMS books a return keyed on the
+        // REFUND. A closed return carrying no refund therefore has no OMS counterpart and never did —
+        // there is nothing for it to be missing from. Originating evidence is a live RAILS row,
+        // return 35442393257 on order 7245977551017: the app that store uses creates the Shopify
+        // Return and its refund as separate, unlinked objects, so the return reaches this extractor
+        // with an empty refunds connection and is reported missing-in-OMS on every single run. A
+        // permanent structural false positive, not a timing gap.
+        //
+        // Deliberately still reported (see the two tests below): OPEN, DECLINED and CANCELED returns.
+        // Scope is CLOSED only, so a second class of false positive would stay VISIBLE rather than be
+        // silently explained away by a rule that had quietly grown.
         Map node = [
                 id              : "gid://shopify/Order/9004",
                 legacyResourceId: "9004",
@@ -322,11 +346,106 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        assertEquals(1, result.recordCount,
-                "a CLOSED return with no refunds must still emit its RETURN row — status is not the gate: ${result.records}")
-        Map record = (Map) ((List) result.records)[0]
-        assertEquals("942", record.refundOrReturnId)
-        assertEquals("RETURN", record.refundOrReturnType)
+        assertEquals(0, result.recordCount,
+                "a CLOSED return carrying no refund has no OMS counterpart and must not be emitted: ${result.records}")
+    }
+
+    @Test
+    void aDeclinedOrCanceledReturnWithNoRefundStillEmitsItsRow() {
+        // The scope boundary, pinned so it cannot drift by accident. DECLINED and CANCELED returns
+        // arguably never sync to OMS either — by the same argument that suppresses CLOSED — but that
+        // is inference, and no such row has been observed. Aditi scoped this to CLOSED only
+        // (2026-09-01) so those two stay reported: a false positive you can see is a bug report, a
+        // false positive a rule silently ate is not. Widening is a decision, not a tidy-up.
+        Map node = [
+                id              : "gid://shopify/Order/9005",
+                legacyResourceId: "9005",
+                name            : "#9005",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [
+                        [id: "gid://shopify/Return/951", status: "DECLINED", createdAt: "2026-05-01T08:30:00Z", refunds: []],
+                        [id: "gid://shopify/Return/952", status: "CANCELED", createdAt: "2026-05-01T08:40:00Z", refunds: []],
+                ]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(2, result.recordCount,
+                "only CLOSED is suppressed; DECLINED and CANCELED must stay visible: ${result.records}")
+        List records = (List) result.records
+        assertTrue(records.any { ((Map) it).refundOrReturnId == "951" })
+        assertTrue(records.any { ((Map) it).refundOrReturnId == "952" })
+    }
+
+    @Test
+    void theClosedUnrefundedSuppressionIsCountedInTheRequestMetadata() {
+        // Not silent. The 2026-08-18 refunded-return narrowing suppresses rows with no count anywhere,
+        // which makes "the rule fired" and "there was nothing to fire on" the same observation from
+        // outside. This one reports what it dropped, so a returns-count fall after deploy can be
+        // attributed instead of investigated.
+        Map node = [
+                id              : "gid://shopify/Order/9006",
+                legacyResourceId: "9006",
+                name            : "#9006",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [
+                        [id: "gid://shopify/Return/961", status: "CLOSED", createdAt: "2026-05-01T08:30:00Z", refunds: []],
+                        [id: "gid://shopify/Return/962", status: "CLOSED", createdAt: "2026-05-01T08:40:00Z", refunds: []],
+                        [id: "gid://shopify/Return/963", status: "OPEN", createdAt: "2026-05-01T08:50:00Z", refunds: []],
+                ]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals(1, result.recordCount, "only the OPEN return survives: ${result.records}")
+        Map metadataFilters = (Map) ((Map) result.requestMetadata).get("filters")
+        assertEquals(2, metadataFilters.get("closedUnrefundedReturnsSuppressed"),
+                "the suppression must report its own count: ${metadataFilters}")
+    }
+
+    @Test
+    void theSuppressionCountIsAlwaysPresentEvenWhenNothingWasSuppressed() {
+        // Same reasoning as configuredExclusions' zero-count entries just below: an ABSENT key reads
+        // as "this build does not have the rule", which is exactly the ambiguity that made the
+        // withdrawn IN_PROGRESS pill undiagnosable. Zero must be stated, not implied.
+        Map node = [
+                id              : "gid://shopify/Order/9007",
+                legacyResourceId: "9007",
+                name            : "#9007",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [],
+                returns         : [nodes: [[id: "gid://shopify/Return/971", status: "OPEN",
+                                             createdAt: "2026-05-01T08:30:00Z", refunds: []]]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        Map metadataFilters = (Map) ((Map) result.requestMetadata).get("filters")
+        assertEquals(0, metadataFilters.get("closedUnrefundedReturnsSuppressed"),
+                "a run that suppressed nothing must still say so: ${metadataFilters}")
     }
 
     @Test
@@ -470,17 +589,24 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void refundOnlyAndReturnOnlyOrdersBothProduceRecordsUnderTheEventShape() {
+    void refundOnlyOrderSurvivesTheWidenedTrimWhileTheCapturedClosedUnrefundedReturnIsSuppressed() {
         // C1: live-captured fixture (gorjana-sandbox.myshopify.com, Admin API 2026-01, 2026-08-13).
         // #GORTEST27948 is a refund-only order — no Return object attached — which a bare
         // `-return_status:no_return` trim silently drops (probed: 25 orders back, all with
         // returns >= 1, zero refund-only). The OR-widened trim this class builds must let it survive
-        // extraction end to end, as a REFUND event row.
-        // #GORTEST27950 is return-only. Under the earlier per-refund shape this produced no record at
-        // all, only a warning — exactly the gap this revision closes: it now produces its own RETURN
-        // event row directly. Its return's `refunds: []` is a 2026-08-18 SYNTHESIZED addition (the
-        // original probe never selected Return.refunds — see the fixture's own `_returnRefundsField`
-        // note), consistent with this order's live-captured, unchanged order-level `refunds: []`.
+        // extraction end to end, as a REFUND event row. That half is unchanged and is still the point.
+        //
+        // THE OTHER HALF INVERTED ON 2026-09-01 (DAR-BE-027), and this fixture is the best evidence
+        // in the suite for why, BECAUSE IT IS REAL: #GORTEST27950 is return-only, and its return's
+        // status — CLOSED — is live-captured, not invented. Its `refunds: []` is a 2026-08-18
+        // synthesized addition (the original probe never selected Return.refunds; see the fixture's
+        // own `_returnRefundsField` note) consistent with the order's live, unchanged `refunds: []`.
+        // So a closed return carrying no refund is not a RAILS peculiarity — gorjana produced one on
+        // the day this fixture was captured. Under DAR-BE-018 it emitted a RETURN row; OMS books a
+        // return keyed on the REFUND, so that row had no counterpart to match and reported
+        // missing-in-OMS forever. It is now suppressed, and the fixture is deliberately left
+        // BYTE-FOR-BYTE UNCHANGED — editing captured data to make an assertion pass would destroy the
+        // only live evidence this test carries.
         Map fixture = loadFixture()
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             return [ok: true, data: fixture.data]
@@ -490,25 +616,24 @@ class ShopifyReturnRefsSupportTests {
                 "2026-08-12T00:00:00Z", "2026-08-13T00:00:00Z", [:], executor)
 
         List records = (List) result.records
-        assertEquals(2, records.size(), "both the refund-only and the return-only order must each produce one record: ${records}")
+        assertEquals(1, records.size(), "only the refund-only order still produces a row: ${records}")
 
         Map refundEvent = (Map) records.find { ((Map) it).orderId == "6942591025196" }
         assertTrue(refundEvent != null, "the refund-only order must produce a REFUND event: ${records}")
         assertEquals("1005422084140", refundEvent.refundOrReturnId)
         assertEquals("REFUND", refundEvent.refundOrReturnType)
 
-        Map returnEvent = (Map) records.find { ((Map) it).orderId == "6942747197484" }
-        assertTrue(returnEvent != null, "the return-only order must now produce a RETURN event, not just a warning: ${records}")
-        assertEquals("44800213036", returnEvent.refundOrReturnId)
-        assertEquals("RETURN", returnEvent.refundOrReturnType)
+        assertTrue(records.every { ((Map) it).orderId != "6942747197484" },
+                "the captured CLOSED unrefunded return has no OMS counterpart and must not be emitted: ${records}")
+        Map metadataFilters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(1, metadataFilters.get("closedUnrefundedReturnsSuppressed"),
+                "and the run must say so rather than just showing one fewer row: ${metadataFilters}")
 
         // This fixture was captured 2026-08-13, before Order.returnStatus was selected, so its nodes
         // carry no returnStatus at all. That is exactly the "extract predates the field" case the key
         // must stay PRESENT for: absent key and null value are different answers, and a stored
         // artifact from before the field must not read as "Shopify said nothing".
-        assertTrue(returnEvent.containsKey("orderReturnStatus"), "key must be present: ${returnEvent}")
         assertTrue(refundEvent.containsKey("orderReturnStatus"), "key must be present: ${refundEvent}")
-        assertNull(returnEvent.orderReturnStatus)
         assertNull(refundEvent.orderReturnStatus)
     }
 
@@ -719,17 +844,26 @@ class ShopifyReturnRefsSupportTests {
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [sourceFilters: filters], executor)
 
         List records = (List) result.records
-        assertEquals(2, result.recordCount, "only the RETURNED order's two rows survive: ${records}")
+        // TWO RULES ARE RUNNING HERE and the counts are what tell them apart — read this before
+        // "fixing" the number below back to 2. The control order 8010 is RETURNED with a CLOSED,
+        // unrefunded return, which is a realistic Shopify shape and also exactly the one DAR-BE-027
+        // suppresses, so its return row (812) is gone for a reason that has nothing to do with the
+        // exclusion under test. The exclusion's own excludedCount still says 2, proving it took the
+        // in-progress order's two rows and nothing else.
+        assertEquals(1, result.recordCount, "the RETURNED order's refund is the only survivor: ${records}")
         assertTrue(records.any { ((Map) it).refundOrReturnId == "811" }, "its refund must survive: ${records}")
-        assertTrue(records.any { ((Map) it).refundOrReturnId == "812" }, "its return must survive: ${records}")
         assertTrue(records.every { ((Map) it).refundOrReturnId != "801" },
                 "the in-progress order's REFUND row must be excluded too — the widening this field exists for: ${records}")
         assertTrue(records.every { ((Map) it).refundOrReturnId != "802" },
                 "the in-progress order's return must be excluded: ${records}")
 
-        List configured = (List) ((Map) ((Map) result.requestMetadata).filters).configuredExclusions
+        Map metadataFilters = (Map) ((Map) result.requestMetadata).filters
+        List configured = (List) metadataFilters.configuredExclusions
         assertEquals(1, configured.size())
-        assertEquals(2, ((Map) configured[0]).excludedCount, "both rows of the one order count")
+        assertEquals(2, ((Map) configured[0]).excludedCount,
+                "both rows of the in-progress order count against the RULE, and only those: ${configured}")
+        assertEquals(1, metadataFilters.get("closedUnrefundedReturnsSuppressed"),
+                "812 was dropped by the closed-unrefunded rule, not by the exclusion: ${metadataFilters}")
     }
 
     @Test
@@ -742,7 +876,11 @@ class ShopifyReturnRefsSupportTests {
                 name            : "#8002",
                 createdAt       : "2026-05-01T08:00:00Z",
                 returnStatus    : "RETURNED",
-                refunds         : [],
+                // The refund is what makes this order emit a row at all since DAR-BE-027: its CLOSED
+                // unrefunded return is suppressed. Left CLOSED deliberately rather than flipped to
+                // OPEN — a RETURNED order whose return is still OPEN is not a shape Shopify produces,
+                // and this test has no reason to invent one.
+                refunds         : [[id: "gid://shopify/Refund/804", createdAt: "2026-05-01T09:20:00Z"]],
                 returns         : [nodes: [[id: "gid://shopify/Return/805", status: "CLOSED",
                                              createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
         ]
@@ -843,7 +981,10 @@ class ShopifyReturnRefsSupportTests {
                 // Do not make these match each other. Real captured response:
                 // src/test/resources/fixtures/shopify-order-return-refs-response.json
                 refunds         : refundGids.collect { [id: it, createdAt: refundsCreatedAt] },
-                returns         : [nodes: returnGids.collect { [id: it, status: "CLOSED", createdAt: returnsCreatedAt] }],
+                // OPEN, not CLOSED (changed 2026-09-01, DAR-BE-027): this helper backs tests about
+                // ids, windows and grain, none of which want their return suppressed. CLOSED here was
+                // an arbitrary default from when status was read by nothing.
+                returns         : [nodes: returnGids.collect { [id: it, status: "OPEN", createdAt: returnsCreatedAt] }],
         ]
     }
 
