@@ -191,4 +191,43 @@ class ShopifyRefundOrReturnLookupSupportTests {
 
         assertTrue(query.contains("nodes(ids:"), "must resolve by id, not by search: ${query}")
     }
+
+    @Test
+    void oneFailedChunkStrandsOnlyItsOwnIds() {
+        // DAR-BE-036: at 17,172 ids the pass is 138 sequential calls, so aborting the WHOLE pass on
+        // the first throttled chunk turns one transient 429 into ~17,000 false differences. Ids a
+        // successful chunk answered for must keep their answer.
+        List<String> ids = (1..130).collect { it.toString() }
+        int calls = 0
+        Map<String, Object> result = ShopifyRefundOrReturnLookupSupport.lookupRefundOrReturnIds(authConfig(), ids, [
+                httpExecutor: { Map request ->
+                    calls++
+                    List gids = (List) ((Map) ((Map) request.body).variables).ids
+                    return calls == 1 ? nodesFor(gids, gids as List<String>) : [statusCode: 500, body: "boom"]
+                },
+                maxAttempts : 1,
+        ])
+
+        assertTrue((Boolean) result.ok, result.errors?.toString())
+        assertEquals(2, calls, "the failed chunk must not short-circuit the ids already answered")
+        assertEquals((1..125).collect { it.toString() }, result.foundIds)
+        // The stranded chunk is UNKNOWN, never "missing" — reporting it as missing is the exact
+        // failure shape that let a blind spot read as evidence of absence.
+        assertEquals([], result.missingIds)
+        assertEquals((126..130).collect { it.toString() }, result.unresolvedIds)
+        assertTrue(((List) result.errors).size() > 0)
+    }
+
+    @Test
+    void everyChunkFailingClassifiesNothingAndStaysNotOk() {
+        List<String> ids = (1..130).collect { it.toString() }
+        Map<String, Object> result = ShopifyRefundOrReturnLookupSupport.lookupRefundOrReturnIds(authConfig(), ids, [
+                httpExecutor: { Map request -> [statusCode: 500, body: "boom"] },
+                maxAttempts : 1,
+        ])
+
+        assertFalse((Boolean) result.ok)
+        assertEquals([], result.foundIds)
+        assertEquals([], result.missingIds)
+    }
 }

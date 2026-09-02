@@ -46,7 +46,7 @@ class ShopifyRefundOrReturnLookupSupport {
      */
     static Map<String, Object> lookupRefundOrReturnIds(Map authConfig, List<Object> refundOrReturnIds, Map options = [:]) {
         List<String> requested = (refundOrReturnIds ?: []).collect { ValueSupport.normalize(it) }.findAll { it } as List<String>
-        if (!requested) return [ok: true, foundIds: [], missingIds: [], errors: []]
+        if (!requested) return [ok: true, foundIds: [], missingIds: [], unresolvedIds: [], errors: []]
 
         Map<String, List<String>> gidFormsByRequested = new LinkedHashMap<>()
         requested.each { String rawId ->
@@ -61,11 +61,21 @@ class ShopifyRefundOrReturnLookupSupport {
         List<String> queryable = gidFormsByRequested.findAll { !it.value.isEmpty() }*.key as List<String>
         List<String> errors = []
         Set<String> foundGids = new LinkedHashSet<>()
+        Set<String> strandedIds = new LinkedHashSet<>()
+        int chunkCount = 0
+        int failedChunkCount = 0
         queryable.collate(MAX_IDS_PER_QUERY).each { List<String> idChunk ->
-            if (errors) return
+            chunkCount++
             List<String> gidChunk = idChunk.collectMany { gidFormsByRequested.get(it) } as List<String>
             Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig, NODES_QUERY, [ids: gidChunk], options ?: [:])
             if (!result.ok) {
+                // PARTIAL CREDIT (DAR-BE-036). Aborting the remaining chunks here is safe at five
+                // chunks and ruinous at a hundred and thirty-eight: a month-long gorjana window sends
+                // 17,172 ids, and discarding every answer over one transient 429 republishes ~17,000
+                // differences that a completed pass would have dissolved. So a failed chunk strands
+                // ITS OWN ids and nothing else.
+                failedChunkCount++
+                strandedIds.addAll(idChunk)
                 List resultErrors = result.errors instanceof List ? (List) result.errors : []
                 errors.addAll(resultErrors ? resultErrors.collect { it?.toString() } : ["Shopify refund/return lookup failed."])
                 return
@@ -76,13 +86,24 @@ class ShopifyRefundOrReturnLookupSupport {
                 if (gid) foundGids.add(gid)
             }
         }
-        if (errors) return [ok: false, foundIds: [], missingIds: [], errors: errors]
+        // Every chunk failing is a dead lookup, not a partial answer. Keep the original all-or-nothing
+        // posture for that case so the caller reports a lookup failure rather than a set of ids it
+        // would otherwise be entitled to call confirmed-missing.
+        if (chunkCount > 0 && failedChunkCount == chunkCount) {
+            return [ok: false, foundIds: [], missingIds: [], unresolvedIds: [], errors: errors.unique()]
+        }
 
         List<String> foundIds = []
         List<String> missingIds = []
+        List<String> unresolvedIds = []
         gidFormsByRequested.each { String rawId, List<String> forms ->
+            // An id whose chunk never got an answer is UNKNOWN. It must not fall through to
+            // missingIds: the caller turns that list into "confirmed missing", and a blind spot
+            // reported as evidence of absence is the failure this pass exists to prevent.
+            if (strandedIds.contains(rawId)) { unresolvedIds.add(rawId); return }
             (forms.any { foundGids.contains(it) } ? foundIds : missingIds).add(rawId)
         }
-        return [ok: true, foundIds: foundIds, missingIds: missingIds, errors: []]
+        return [ok: true, foundIds: foundIds, missingIds: missingIds, unresolvedIds: unresolvedIds,
+                errors: errors.unique()]
     }
 }
