@@ -40,6 +40,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  */
 class ShopifyReturnRefsSupportTests {
 
+    /**
+     * DAR-BE-037. The extract no longer discovers orders through orders(query:) — that net was
+     * live-probed at 33.4% coverage — but through return-dated events, then nodes(ids:) for the
+     * orders those events name. These tests are overwhelmingly about how an Order NODE projects into
+     * records, not about discovery, so rather than restate every fixture this adapter answers the new
+     * two-call protocol from the old orders-shaped response: the events leg synthesises one
+     * return_created event per order in the fixture, and the fetch leg hands back those same nodes.
+     *
+     * Discovery itself is covered directly by the tests that assert on the events query and paging.
+     */
+    private static Map adapt(String doc, Map ordersResponse) {
+        List edges = (List) ((Map) ((Map) ordersResponse.data)?.orders)?.edges ?: []
+        List nodes = edges.collect { ((Map) it).node }.findAll { it != null }
+        if (doc?.contains("events(")) {
+            return [ok: true, data: [events: [
+                    nodes   : nodes.withIndex().collect { Object n, int i ->
+                        [action: "return_created", subjectType: "Order",
+                         subjectId: (((Map) n).id ?: "gid://shopify/Order/${900000 + i}").toString()]
+                    },
+                    pageInfo: [hasNextPage: false, endCursor: null],
+            ]]]
+        }
+        return [ok: true, data: [nodes: nodes]]
+    }
+
     @Test
     void stripsGidPrefixesFromBothRefundAndReturnIds() {
         assertEquals("1234567890", ShopifyReturnRefsSupport.bareId("gid://shopify/Refund/1234567890"))
@@ -69,10 +94,10 @@ class ShopifyReturnRefsSupportTests {
                 returns         : [nodes: [[id: "gid://shopify/Return/301", status: "OPEN", createdAt: "2026-05-01T09:05:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -111,14 +136,14 @@ class ShopifyReturnRefsSupportTests {
         // The real-world common case: the order can be months old, but a refund minted THIS window
         // must still be picked up. Windowing is on the refund's own createdAt, never the order's.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("888",
                             ["gid://shopify/Refund/81"], [],
                             "2025-01-01T00:00:00Z",   // order createdAt: months before the window
                             "2026-05-01T12:00:00Z",   // refund createdAt: INSIDE the window
                             "2026-05-01T10:30:00Z")]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -147,10 +172,10 @@ class ShopifyReturnRefsSupportTests {
                                              createdAt: "2026-04-15T00:00:00Z"]]],   // BEFORE the window
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -163,14 +188,14 @@ class ShopifyReturnRefsSupportTests {
     void aRecentOrderWithAnOutOfWindowRefundIsNotEmitted() {
         // C1: the refund-side counterpart of the return case above.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("777",
                             ["gid://shopify/Refund/71"], [],
                             "2026-01-01T00:00:00Z",
                             "2026-04-15T00:00:00Z",   // refund createdAt: BEFORE the window
                             "2026-05-01T10:30:00Z")]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -187,10 +212,10 @@ class ShopifyReturnRefsSupportTests {
         // join against at all and would misreport as missing-in-Shopify. Now it gets a genuine RETURN
         // row, no warning needed, nothing dropped.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("9999", [], ["gid://shopify/Return/8801"])]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -223,10 +248,10 @@ class ShopifyReturnRefsSupportTests {
                                              refunds: [[id: "gid://shopify/Refund/911"]]]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -254,10 +279,10 @@ class ShopifyReturnRefsSupportTests {
                                              refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -288,10 +313,10 @@ class ShopifyReturnRefsSupportTests {
                 ]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -337,10 +362,10 @@ class ShopifyReturnRefsSupportTests {
                                              refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -369,10 +394,10 @@ class ShopifyReturnRefsSupportTests {
                 ]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -404,10 +429,10 @@ class ShopifyReturnRefsSupportTests {
                 ]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -434,10 +459,10 @@ class ShopifyReturnRefsSupportTests {
                                              createdAt: "2026-05-01T08:30:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -451,10 +476,10 @@ class ShopifyReturnRefsSupportTests {
     @Test
     void anOrderWithNeitherRefundsNorReturnsInWindowEmitsNoRecordAndNoWarning() {
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("333", [], [])]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -465,29 +490,33 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void followsCursorPaginationUntilHasNextPageIsFalse() {
-        int calls = 0
+    void followsEventCursorPaginationUntilHasNextPageIsFalse() {
+        // Pagination moved with discovery: it is the EVENTS connection that pages now, not orders.
+        // Two event pages naming two different orders, then one nodes(ids:) fetch for both.
+        List<String> documents = []
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            calls++
-            if (calls == 1) {
-                return [ok: true, data: [orders: [
-                        edges   : [[cursor: "c1", node: orderNode("111", ["gid://shopify/Refund/1"], [])]],
-                        pageInfo: [hasNextPage: true, endCursor: "c1"],
+            documents.add(doc.contains("events(") ? "events" : "nodes")
+            if (doc.contains("events(")) {
+                boolean firstPage = vars.after == null
+                return [ok: true, data: [events: [
+                        nodes   : [[action: "return_created", subjectType: "Order",
+                                    subjectId: firstPage ? "gid://shopify/Order/111" : "gid://shopify/Order/222"]],
+                        pageInfo: [hasNextPage: firstPage, endCursor: firstPage ? "e1" : null],
                 ]]]
             }
-            return [ok: true, data: [orders: [
-                    edges   : [[cursor: "c2", node: orderNode("222", ["gid://shopify/Refund/2"], [])]],
-                    pageInfo: [hasNextPage: false, endCursor: "c2"],
+            return [ok: true, data: [nodes: [
+                    orderNode("111", ["gid://shopify/Refund/1"], []),
+                    orderNode("222", ["gid://shopify/Refund/2"], []),
             ]]]
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        assertEquals(2, calls)
+        assertEquals(["events", "events", "nodes"], documents,
+                "both event pages must be read before a single by-id fetch")
         assertEquals(2, result.recordCount)
-        List refundOrReturnIds = ((List) result.records).collect { ((Map) it).refundOrReturnId }
-        assertEquals(["1", "2"] as Set, refundOrReturnIds as Set)
+        assertEquals(["1", "2"] as Set, ((List) result.records).collect { ((Map) it).refundOrReturnId } as Set)
     }
 
     @Test
@@ -499,10 +528,10 @@ class ShopifyReturnRefsSupportTests {
         // by construction, so this cannot be passing by accident on hand-injected pageInfo.
         List returnGids = ["gid://shopify/Return/1", "gid://shopify/Return/2"]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("444", [], returnGids)]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -522,11 +551,11 @@ class ShopifyReturnRefsSupportTests {
         // That over-warns on an order with exactly N refunds; a spurious warning is far cheaper
         // than a silently truncated id set.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("555",
                             ["gid://shopify/Refund/1", "gid://shopify/Refund/2"], [])]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -547,10 +576,10 @@ class ShopifyReturnRefsSupportTests {
         // for.
         List returnGids = (1..100).collect { "gid://shopify/Return/${it}".toString() }
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("666", [], returnGids)]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -575,10 +604,10 @@ class ShopifyReturnRefsSupportTests {
                 returns         : [nodes: []],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -609,7 +638,7 @@ class ShopifyReturnRefsSupportTests {
         // only live evidence this test carries.
         Map fixture = loadFixture()
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: fixture.data]
+            return adapt(doc, [ok: true, data: fixture.data])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -638,44 +667,45 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
-    void buildsTheWidenedLowerBoundOnlySearchQueryWithUpdatedAtSortKey() {
-        // Live-verified 2026-08-13 (HTTP 200): the exact search text and sort key C1 requires. No
-        // upper bound — later, unrelated order activity must never hide an in-window event. The
-        // floor itself is windowStart minus the default 3h lookback (Important #3, fix-wave-C
-        // re-review): OMS lags Shopify by ~38min (RQ-23), so the net must reach back far enough that
-        // a Shopify event just before windowStart is still fetched for the OMS-side forward match.
+    void discoversOrdersFromReturnDatedEventsRatherThanAnOrderUpdatedAtNet() {
+        // DAR-BE-037. The retired net searched orders on updated_at, which orders(query:) can filter
+        // but which is NOT when a return was created — and creating a Return does not reliably bump
+        // it. Live-probed, that net reached 33.4% of the OMS return population against
+        // return_created's 96.7%. The floor is still windowStart minus the default 3h lookback
+        // (Important #3): OMS lags Shopify by ~38min (RQ-23), so discovery must reach back far enough
+        // that an event just before windowStart is still seen for the forward match.
         Map captured = [:]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            captured.doc = doc
-            captured.vars = vars
-            return [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false, endCursor: null]]]]
+            if (doc.contains("events(")) { captured.doc = doc; captured.query = vars.query }
+            return adapt(doc, [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false, endCursor: null]]]])
         }
 
         ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
 
-        String query = captured.vars.query as String
-        assertEquals("updated_at:>='2026-04-30T21:00:00Z' AND ((-return_status:no_return) OR " +
-                "(financial_status:refunded) OR (financial_status:partially_refunded))", query)
-        assertFalse(query.contains("updated_at:<"), "the net must carry no upper bound: ${query}")
-        assertTrue((captured.doc as String).contains("sortKey: UPDATED_AT"),
-                "the rendered document must sort on UPDATED_AT: ${captured.doc}")
+        String query = captured.query as String
+        assertEquals("subject_type:Order AND (action:return_created OR action:refund_created) " +
+                "AND created_at:>='2026-04-30T21:00:00Z' AND created_at:<'2026-05-02T00:00:00Z'", query)
+        // The event window is CLOSED at both ends, unlike the retired net: an event carries its own
+        // date, so there is no reason to fetch past windowEnd and filter it out again client-side.
+        assertTrue(query.contains("created_at:<"), "the event window must carry an upper bound: ${query}")
+        assertFalse((captured.doc as String).contains("updated_at"),
+                "discovery must not reference the retired order net: ${captured.doc}")
     }
 
     @Test
-    void lookbackHoursOptionOverridesTheDefaultAndMovesTheNetFloor() {
+    void lookbackHoursOptionOverridesTheDefaultAndMovesTheDiscoveryFloor() {
         Map captured = [:]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            captured.vars = vars
-            return [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false, endCursor: null]]]]
+            if (doc.contains("events(")) captured.query = vars.query
+            return adapt(doc, [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false, endCursor: null]]]])
         }
 
         ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [lookbackHours: 1], executor)
 
-        String query = captured.vars.query as String
-        assertTrue(query.startsWith("updated_at:>='2026-04-30T23:00:00Z'"),
-                "a caller-supplied lookbackHours must move the net floor: ${query}")
+        assertTrue((captured.query as String).contains("created_at:>='2026-04-30T23:00:00Z'"),
+                "a caller-supplied lookbackHours must move the discovery floor: ${captured.query}")
     }
 
     @Test
@@ -684,14 +714,14 @@ class ShopifyReturnRefsSupportTests {
         // default 3h lookback so a refund minted just before windowStart is still available for the
         // OMS-side forward match once the (later-arriving) OMS return shows up just inside the window.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("1111",
                             ["gid://shopify/Refund/111"], [],
                             "2026-01-01T00:00:00Z",
                             "2026-04-30T22:00:00Z",   // 2h before windowStart -- inside the 3h lookback
                             "2026-05-01T10:30:00Z")]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -706,14 +736,14 @@ class ShopifyReturnRefsSupportTests {
         // The lookback is bounded -- an event further back than lookbackHours must still be
         // excluded, exactly like the pre-fix window boundary was.
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: orderNode("1112",
                             ["gid://shopify/Refund/112"], [],
                             "2026-01-01T00:00:00Z",
                             "2026-04-30T20:00:00Z",   // 4h before windowStart -- outside the 3h lookback
                             "2026-05-01T10:30:00Z")]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -744,10 +774,10 @@ class ShopifyReturnRefsSupportTests {
                                              createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -778,10 +808,10 @@ class ShopifyReturnRefsSupportTests {
                                              createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -829,10 +859,10 @@ class ShopifyReturnRefsSupportTests {
                 ]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: inProgress], [cursor: "c2", node: finished]],
                     pageInfo: [hasNextPage: false, endCursor: "c2"],
-            ]]]
+            ]]])
         }
         // fieldExpression is the BARE record field, not the stored JSONPath: callers reduce it via
         // SourceFilterSupport.toRecordFieldRules before dispatch (AutomationRuntimeSupport,
@@ -885,10 +915,10 @@ class ShopifyReturnRefsSupportTests {
                                              createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
         List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
                                               operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"]]
@@ -914,10 +944,10 @@ class ShopifyReturnRefsSupportTests {
                                              createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: node]],
                     pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -936,7 +966,7 @@ class ShopifyReturnRefsSupportTests {
         List<String> executorCalls = []
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
             executorCalls.add("called")
-            return [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false]]]]
+            return adapt(doc, [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false]]]])
         }
         // EXCLUDE_IN is the only supported operator; anything else must be rejected, not ignored.
         List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
@@ -1012,10 +1042,10 @@ class ShopifyReturnRefsSupportTests {
                 returns         : [nodes: []],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: cancelled], [cursor: "c2", node: live]],
                     pageInfo: [hasNextPage: false, endCursor: "c2"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -1078,10 +1108,10 @@ class ShopifyReturnRefsSupportTests {
                 returns         : [nodes: []],
         ]
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [
+            return adapt(doc, [ok: true, data: [orders: [
                     edges   : [[cursor: "c1", node: inProgress], [cursor: "c2", node: silent]],
                     pageInfo: [hasNextPage: false, endCursor: "c2"],
-            ]]]
+            ]]])
         }
 
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
@@ -1132,8 +1162,8 @@ class ShopifyReturnRefsSupportTests {
 
     private Map extractOne(Map node, Map options = [:]) {
         Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return [ok: true, data: [orders: [edges: [[cursor: "c1", node: node]],
-                                              pageInfo: [hasNextPage: false, endCursor: "c1"]]]]
+            return adapt(doc, [ok: true, data: [orders: [edges: [[cursor: "c1", node: node]],
+                                              pageInfo: [hasNextPage: false, endCursor: "c1"]]]])
         }
         return ShopifyReturnRefsSupport.extractReturnRefs(authConfig(), "2026-05-01T00:00:00Z",
                 "2026-05-02T00:00:00Z", options, executor)

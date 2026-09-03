@@ -229,6 +229,71 @@ class ShopifyGraphqlQueryBuilder {
         }
     }
 
+    /**
+     * A by-id fetch of the SAME node selection {@link #buildQuery} renders for a search.
+     *
+     * <p>DAR-BE-037. The returns pair stopped discovering orders through {@code orders(query:)} —
+     * live-probed at 33.4% coverage of the OMS population, because {@code orders(query:)} offers no
+     * filter keyed on when a return was CREATED and an order's {@code updated_at} is not reliably
+     * bumped when one is. Discovery moved to return-dated events, which yield order IDS, and those
+     * are resolved here.</p>
+     *
+     * <p>Rendered from the same catalog and the same selection tree as the search document on
+     * purpose: two hand-kept selections would drift, and the record shape downstream
+     * ({@code toRecords}) has to be identical whichever way the order arrived. There is no
+     * {@code $query}, {@code $first}, {@code $after} or sort key — a by-id fetch has no search,
+     * no page and no order.</p>
+     */
+    static Map<String, Object> buildNodesQuery(Map<String, Object> requirements) {
+        String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
+        String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
+        Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
+        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
+
+        List<String> selectedFieldPaths = resolveSelectedFieldPaths(source, requirements?.selectedFieldPaths as Collection)
+        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
+        if (invalidFields) {
+            throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
+        }
+        String nodeType = normalize(source.nodeType)
+        if (!nodeType) {
+            throw new IllegalArgumentException("Source ${source.sourceDefinitionId} declares no nodeType; nodes(ids:) needs a concrete type to fragment on.")
+        }
+
+        Map<String, Object> connectionPageSizes = resolveConnectionPageSizes(fieldsByPath, selectedFieldPaths, requirements?.connectionPageSizes as Map)
+        Map<String, Map> selectionTree = buildSelectionTree(fieldsByPath, selectedFieldPaths)
+        String operationName = "${operationNameFor(source.sourceDefinitionId as String)}ByIds"
+        String queryDocument = renderNodesQueryDocument(source, nodeType, selectionTree, operationName,
+                connectionPageSizes.keySet() as Set<String>)
+
+        Map<String, Object> variables = [:]
+        connectionPageSizes.each { String key, Object value -> variables[key] = value }
+        return [
+            sourceDefinitionId : source.sourceDefinitionId,
+            operationName      : operationName,
+            queryDocument      : queryDocument,
+            variables          : variables,
+            connectionPageSizes: connectionPageSizes,
+            nodeType           : nodeType,
+        ] as Map<String, Object>
+    }
+
+    private static String renderNodesQueryDocument(Map<String, Object> source, String nodeType,
+            Map<String, Map> selectionTree, String operationName, Set<String> connectionPageSizeVariables) {
+        List<String> variableDefinitions = ["\$ids: [ID!]!"]
+        connectionPageSizeVariables.sort().each { String variableName ->
+            variableDefinitions.add("\$${variableName}: Int!")
+        }
+        String nodeSelections = renderSelectionTree(selectionTree, 4, connectionPageSizeVariables)
+        return """query ${operationName}(${variableDefinitions.join(', ')}) {
+  nodes(ids: \$ids) {
+    ... on ${nodeType} {
+${nodeSelections}
+    }
+  }
+}"""
+    }
+
     private static String renderQueryDocument(Map<String, Object> source, Map<String, Map> selectionTree, String operationName,
             Set<String> connectionPageSizeVariables, String sortKey) {
         List<String> variableDefinitions = [

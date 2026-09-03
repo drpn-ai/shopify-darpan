@@ -95,6 +95,35 @@ class ShopifyReturnRefsSupport {
     private static final Pattern GID_TAIL = Pattern.compile('gid://shopify/[^/]+/(\\d+)(?:\\?.*)?$')
     private static final Pattern TRAILING_DIGITS = Pattern.compile('(\\d+)$')
 
+    /**
+     * DAR-BE-037 discovery verbs, taken from the STORE's own vocabulary rather than the docs. An
+     * unfiltered events(subject_type:Order) sample on gorjana prod returned return_created /
+     * refund_created / return_closed / return_tracking_info_created; the REST docs'
+     * refund_success|_pending|_failure are payment-gateway verbs and none is the Refund object's.
+     * Every verb guessed from the docs (return_requested, return_approved, exchange_created,
+     * returns_request) returned zero rows.
+     *
+     * Coverage of the OMS return population over the captured 2026-08-16..17 window: the retired
+     * orders(updated_at) net 33.4%, refund_success 29.3%, refund_created 13.1%, return_created 96.7%,
+     * return_created OR refund_created 97.1%. Adding return_closed doubled event volume for +0.1% and
+     * is deliberately excluded.
+     */
+    static final String DISCOVERY_ACTIONS = "action:return_created OR action:refund_created"
+    /** events() is a plain connection; 250 is the Admin API's per-connection ceiling. */
+    static final int EVENTS_PAGE_SIZE = 250
+    /** nodes(ids:) caps at 250 ids per call. */
+    static final int MAX_IDS_PER_NODES_CALL = 250
+    /** Shopify retains event data for one year — documented, and the hard limit on this path. */
+    static final int EVENT_RETENTION_DAYS = 365
+    private static final long EVENT_RETENTION_MILLIS = EVENT_RETENTION_DAYS * 86_400_000L
+
+    private static final String EVENTS_DOCUMENT = '''query DarpanShopifyReturnEventDiscovery($first: Int!, $after: String, $query: String) {
+  events(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on BasicEvent { action subjectId subjectType } }
+  }
+}'''
+
     /** Mirrors CompareDatasetSupport.applyIdNormalizer's SHOPIFY_GID_TAIL so both sides agree. */
     static String bareId(Object rawId) {
         String value = normalize(rawId)
@@ -142,6 +171,19 @@ class ShopifyReturnRefsSupport {
         // with two refunds and one return contributes three records to a single ordersProcessed++.
         int ordersProcessed = 0
 
+        // ONE page-size map, used by BOTH the validation build and the by-id fetch. buildQuery does
+        // not echo connectionPageSizes back, so reading them off its result would silently fall back
+        // to catalog defaults and drop a caller's connectionPageSize — which is exactly what the
+        // saturation heuristic in toRecords is graded against.
+        int connectionPageSize = normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE)
+        Map<String, Object> requestedConnectionPageSizes = [
+                refundsFirst             : connectionPageSize,
+                returnsFirst             : connectionPageSize,
+                refundLineItemsFirst     : connectionPageSize,
+                fulfillmentsFirst        : connectionPageSize,
+                fulfillmentLineItemsFirst: connectionPageSize,
+        ] as Map<String, Object>
+
         Map<String, Object> built
         try {
             built = ShopifyGraphqlQueryBuilder.buildQuery([
@@ -156,13 +198,7 @@ class ShopifyReturnRefsSupport {
                     // cancelled-item detection must be tunable alongside the others: leaving them on
                     // the catalog default would make a caller that lowered connectionPageSize think it
                     // had bounded the request when the fulfillment legs were still asking for 50.
-                    connectionPageSizes : [
-                            refundsFirst             : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
-                            returnsFirst             : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
-                            refundLineItemsFirst     : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
-                            fulfillmentsFirst        : normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
-                            fulfillmentLineItemsFirst: normalizeInt(options?.connectionPageSize, DEFAULT_CONNECTION_PAGE_SIZE),
-                    ],
+                    connectionPageSizes : requestedConnectionPageSizes,
             ])
         } catch (Exception e) {
             return [records: [], recordCount: 0, dataAvailable: false, requestMetadata: [:],
@@ -191,87 +227,96 @@ class ShopifyReturnRefsSupport {
         long netFloorMillis = windowStartMillis - (lookbackHours * 3600_000L)
         String netFloorIso = Instant.ofEpochMilli(netFloorMillis).toString()
 
-        // The Shopify-side NET (live-verified 2026-08-13, HTTP 200): a wide, lower-bound-only search
-        // — see the class doc for why a plain `-return_status:no_return` trim is wrong. The
-        // authoritative window filter is applied client-side below, against each event's own
-        // createdAt, never against this net.
-        ((Map) built.variables).put("query", ("updated_at:>='${netFloorIso}' AND " +
-                "((-return_status:no_return) OR (financial_status:refunded) OR (financial_status:partially_refunded))").toString())
+        // ORDER DISCOVERY (DAR-BE-037). What stood here was a Shopify-side NET —
+        // orders(query: "updated_at:>='<floor>' AND ((-return_status:no_return) OR
+        // (financial_status:refunded) OR (financial_status:partially_refunded))") — live-probed
+        // against gorjana prod at 33.4% coverage of the OMS return population. It is retired.
+        //
+        // The cause is a schema limit, not a mistuned predicate: orders(query:) offers NO filter keyed
+        // on when a return or refund was CREATED (only order-level created_at/updated_at plus outcome
+        // filters), so an order net cannot express "returns created in my window", and creating a
+        // Return does not reliably bump its order's updated_at. Measured on the captured 2026-08-18
+        // run: 449 of the 601 false "missing in Shopify" rows carried ids INSIDE the RETURN id range
+        // the extract itself fetched, while it emitted only 98 RETURN rows.
+        //
+        // The top-level events connection IS dated by the event, so discovery resolves order ids from
+        // return-dated events (96.7% coverage on the same window) and those orders are fetched by id.
+        if (netFloorMillis < System.currentTimeMillis() - EVENT_RETENTION_MILLIS) {
+            warnings.add(("Window starts beyond Shopify's " + EVENT_RETENTION_DAYS + "-day event retention; " +
+                    "orders whose return events have aged out cannot be discovered and may be missing.").toString())
+        }
 
-        String queryDocument = built.queryDocument as String
-        // buildQuery already resolves first/after/query/reverse/<root>First into one variables map
-        // consistent with the rendered document's declared variables ($reverse, $refundsFirst and
-        // $returnsFirst are all non-null!). Each page must start from a copy of it and only touch
-        // "after" — rebuilding a fresh {first, after} map from scratch would silently drop $query
-        // (the window filter itself), $reverse, $refundsFirst and $returnsFirst, and Shopify would
-        // reject every request at GraphQL variable-validation time, before the search query is even
-        // evaluated.
-        Map<String, Object> baseVariables = (Map<String, Object>) built.variables
-        // Read the CLAMPED per-connection page sizes back off the built query rather than off raw
-        // options: ShopifyGraphqlQueryBuilder clamps refundsFirst/returnsFirst to the catalog's
-        // connectionMaxPageSize (100). An unclamped options.connectionPageSize (e.g. 200) would make
-        // the saturation heuristic below warn only at >=200 while Shopify itself truncates at 100 —
-        // detection would switch off exactly when truncation begins.
-        int refundsFirstEffective = normalizeInt(baseVariables.get("refundsFirst"), DEFAULT_CONNECTION_PAGE_SIZE)
-        int returnsFirstEffective = normalizeInt(baseVariables.get("returnsFirst"), DEFAULT_CONNECTION_PAGE_SIZE)
-        // Read back CLAMPED, same as the two above: the builder may lower what options asked for, and
-        // truncation is judged against what was actually requested, not what we wanted.
+        // Same Order selection as the retired net, rendered from the SAME catalog, so the record shape
+        // downstream is identical whichever way an order arrived.
+        Map<String, Object> byId
+        try {
+            byId = ShopifyGraphqlQueryBuilder.buildNodesQuery([
+                    sourceDefinitionId : ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+                    connectionPageSizes: requestedConnectionPageSizes,
+            ])
+        } catch (Exception e) {
+            return [records: [], recordCount: 0, dataAvailable: false, requestMetadata: [:],
+                    warnings: warnings,
+                    errors  : [normalize(e.message) ?: "Shopify return-refs by-id query could not be built."]]
+        }
+        String byIdDocument = byId.queryDocument as String
+        Map<String, Object> byIdVariables = (Map<String, Object>) byId.variables
+        // Read the CLAMPED per-connection page sizes back off the BUILT query rather than off raw
+        // options: the builder clamps refundsFirst/returnsFirst to the catalog's connectionMaxPageSize
+        // (100). An unclamped options.connectionPageSize (e.g. 200) would make the saturation
+        // heuristic in toRecords warn only at >=200 while Shopify itself truncates at 100 — detection
+        // would switch off exactly when truncation begins.
+        int refundsFirstEffective = normalizeInt(byIdVariables.get("refundsFirst"), DEFAULT_CONNECTION_PAGE_SIZE)
+        int returnsFirstEffective = normalizeInt(byIdVariables.get("returnsFirst"), DEFAULT_CONNECTION_PAGE_SIZE)
         Map<String, Integer> lineFirsts = [
-                refundLineItems     : normalizeInt(baseVariables.get("refundLineItemsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
-                fulfillments        : normalizeInt(baseVariables.get("fulfillmentsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
-                fulfillmentLineItems: normalizeInt(baseVariables.get("fulfillmentLineItemsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
+                refundLineItems     : normalizeInt(byIdVariables.get("refundLineItemsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
+                fulfillments        : normalizeInt(byIdVariables.get("fulfillmentsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
+                fulfillmentLineItems: normalizeInt(byIdVariables.get("fulfillmentLineItemsFirst"), DEFAULT_CONNECTION_PAGE_SIZE),
         ]
-        String cursor = null
-        int pageCount = 0
-        boolean hasNextPage = true
 
-        while (hasNextPage) {
-            if (pageCount++ >= MAX_PAGE_COUNT) {
-                warnings.add("Return-refs extraction stopped at the ${MAX_PAGE_COUNT}-page ceiling; the window may be incomplete.".toString())
-                break
-            }
-            Map<String, Object> variables = new LinkedHashMap<>(baseVariables)
-            if (cursor) variables.put("after", cursor)
+        String windowEndIso = Instant.ofEpochMilli(windowEndMillis).toString()
+        Map<String, Object> discovery = discoverOrderIds(authConfig, netFloorIso, windowEndIso, exec, options, warnings)
+        if (discovery.get("ok") != true) {
+            errors.addAll(((List) (discovery.get("errors") ?: ["Shopify return-event discovery failed."]))
+                    .collect { normalize(it) }.findAll { it })
+        }
+        List<String> discoveredOrderIds = (List<String>) (discovery.get("orderIds") ?: [])
 
-            Map response = (Map) exec(authConfig, queryDocument, variables, options ?: [:])
-            if (response?.ok != true) {
-                errors.addAll(((List) (response?.errors ?: ["Shopify return-refs request failed."]))
-                        .collect { normalize(it) }.findAll { it })
-                break
-            }
-
-            Map ordersConnection = (Map) walk(response, ["data", "orders"])
-            if (ordersConnection == null) {
-                errors.add("Shopify return-refs response had no orders connection.")
-                break
-            }
-
-            List edges = (ordersConnection.get("edges") instanceof List) ? (List) ordersConnection.get("edges") : []
-            edges.each { Object rawEdge ->
-                Map node = (Map) ((Map) rawEdge)?.get("node")
-                if (node == null) return
-                ordersProcessed++
-                toRecords(node, refundsFirstEffective, returnsFirstEffective,
-                        netFloorMillis, windowEndMillis, warnings, lineFirsts,
-                        suppressionCounters).each { Map<String, Object> record ->
-                    // Tested against the PROJECTED record, never the raw Shopify node: the stored rule
-                    // names orderReturnStatus, a field that exists only after toRecords projects it.
-                    Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
-                    if (match != null) {
-                        String key = String.valueOf(match.get("sequenceNum"))
-                        exclusionCounts.put(key, normalizeInt(exclusionCounts.get(key), 0) + 1)
-                        return
-                    }
-                    records.add(record)
+        if (!errors) {
+            discoveredOrderIds.collate(MAX_IDS_PER_NODES_CALL).each { List<String> idChunk ->
+                if (errors) return
+                Map<String, Object> variables = new LinkedHashMap<>(byIdVariables)
+                variables.put("ids", idChunk.collect { ("gid://shopify/Order/" + it).toString() })
+                Map response = (Map) exec(authConfig, byIdDocument, variables, options ?: [:])
+                if (response?.ok != true) {
+                    errors.addAll(((List) (response?.errors ?: ["Shopify return-refs by-id fetch failed."]))
+                            .collect { normalize(it) }.findAll { it })
+                    return
                 }
-            }
-
-            Map pageInfo = (Map) ordersConnection.get("pageInfo")
-            hasNextPage = pageInfo?.get("hasNextPage") == true
-            cursor = normalize(pageInfo?.get("endCursor"))
-            if (hasNextPage && !cursor) {
-                warnings.add("Shopify reported another page but returned no cursor; extraction stopped early.")
-                break
+                Object rawNodes = walk(response, ["data", "nodes"])
+                if (!(rawNodes instanceof List)) {
+                    errors.add("Shopify return-refs response had no nodes list.")
+                    return
+                }
+                ((List) rawNodes).each { Object rawNode ->
+                    // nodes(ids:) answers null for an id that resolved to nothing. Skipping is correct:
+                    // discovery named it, so its absence is Shopify's answer, not a fault.
+                    if (!(rawNode instanceof Map)) return
+                    ordersProcessed++
+                    toRecords((Map) rawNode, refundsFirstEffective, returnsFirstEffective,
+                            netFloorMillis, windowEndMillis, warnings, lineFirsts,
+                            suppressionCounters).each { Map<String, Object> record ->
+                        // Tested against the PROJECTED record, never the raw Shopify node: the stored
+                        // rule names orderReturnStatus, which exists only after toRecords projects it.
+                        Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
+                        if (match != null) {
+                            String key = String.valueOf(match.get("sequenceNum"))
+                            exclusionCounts.put(key, normalizeInt(exclusionCounts.get(key), 0) + 1)
+                            return
+                        }
+                        records.add(record)
+                    }
+                }
             }
         }
 
@@ -495,6 +540,55 @@ class ShopifyReturnRefsSupport {
      * from here without re-reading that class's own doc first (it has at least one behavior — a
      * per-order forward-match suppression — that is not a plain join and needs a deliberate call).
      */
+    /**
+     * Resolve the orders that had return/refund activity in [floorIso, windowEndIso) from the
+     * top-level events connection — the only Shopify surface dated by the EVENT rather than by the
+     * order. Returns [ok, orderIds, errors].
+     *
+     * <p>Ids come back de-duplicated and in first-seen order: one order commonly carries several
+     * events in a window (a return created and its refund created), and it must be fetched once.</p>
+     */
+    private static Map<String, Object> discoverOrderIds(Map authConfig, String floorIso, String windowEndIso,
+                                                        Closure exec, Map options, List<String> warnings) {
+        String searchQuery = ("subject_type:Order AND (" + DISCOVERY_ACTIONS + ") " +
+                "AND created_at:>='" + floorIso + "' AND created_at:<'" + windowEndIso + "'").toString()
+        Set<String> orderIds = new LinkedHashSet<String>()
+        String cursor = null
+        int pageCount = 0
+        while (true) {
+            if (pageCount++ >= MAX_PAGE_COUNT) {
+                warnings.add(("Return-event discovery stopped at the " + MAX_PAGE_COUNT +
+                        "-page ceiling; the window may be incomplete.").toString())
+                break
+            }
+            Map<String, Object> variables = [first: EVENTS_PAGE_SIZE, after: cursor, query: searchQuery]
+            Map response = (Map) exec(authConfig, EVENTS_DOCUMENT, variables, options ?: [:])
+            if (response?.ok != true) {
+                return [ok: false, orderIds: [],
+                        errors: (response?.errors ?: ["Shopify return-event discovery request failed."])]
+            }
+            Map eventsConnection = (Map) walk(response, ["data", "events"])
+            if (eventsConnection == null) {
+                return [ok: false, orderIds: [],
+                        errors: ["Shopify return-event discovery response had no events connection."]]
+            }
+            List nodes = (eventsConnection.get("nodes") instanceof List) ? (List) eventsConnection.get("nodes") : []
+            nodes.each { Object rawNode ->
+                if (!(rawNode instanceof Map)) return
+                String subjectId = bareId(((Map) rawNode).get("subjectId"))
+                if (subjectId) orderIds.add(subjectId)
+            }
+            Map pageInfo = (Map) eventsConnection.get("pageInfo")
+            if (pageInfo?.get("hasNextPage") != true) break
+            cursor = normalize(pageInfo?.get("endCursor"))
+            if (!cursor) {
+                warnings.add("Shopify reported another page of return events but returned no cursor; discovery stopped early.")
+                break
+            }
+        }
+        return [ok: true, orderIds: new ArrayList<String>(orderIds), errors: []]
+    }
+
     private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,
                                                         long floorMillis, long windowEndMillis,
                                                         List<String> warnings, Map<String, Integer> lineFirsts = [:],

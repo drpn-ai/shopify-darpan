@@ -318,4 +318,37 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         assertFalse(bulkPaths.any { it.startsWith("refunds") || it.startsWith("returns") },
                 "returns/refunds must not leak into the orders bulk contract: ${bulkPaths}")
     }
+
+    // ------------------------------------------------ DAR-BE-037 by-id fetch for the returns pair
+
+    @Test
+    void buildNodesQueryRendersTheSameOrderSelectionUnderANodesRoot() {
+        // The returns extract stops discovering orders through orders(query:) — live-probed at 33.4%
+        // coverage — and instead resolves order ids from return-dated events. Those ids are fetched
+        // with nodes(ids:), which must carry the SAME Order selection the net used, rendered from the
+        // same catalog, or the two paths would drift into different record shapes.
+        Map<String, Object> net = ShopifyGraphqlQueryBuilder.buildQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+                filters           : [updatedAtFrom: "2026-08-16T14:00:00Z"],
+        ])
+        Map<String, Object> byId = ShopifyGraphqlQueryBuilder.buildNodesQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_RETURN_REFS,
+        ])
+        String doc = byId.queryDocument as String
+
+        assertTrue(doc.contains("nodes(ids: \$ids)"), "must fetch by id, not by search: ${doc}")
+        assertTrue(doc.contains("... on Order"), "nodes() is polymorphic and needs the Order fragment: ${doc}")
+        assertTrue(doc.contains("\$ids: [ID!]!"), "ids must be a required non-null ID list: ${doc}")
+        assertFalse(doc.contains("\$query"), "a by-id fetch must not carry a search argument: ${doc}")
+
+        // Same leaves as the net's document — proves both come from one catalog rather than a
+        // hand-copied selection that will rot.
+        ["refunds", "returns", "cancelledAt", "returnStatus"].each { String leaf ->
+            assertTrue(doc.contains(leaf), "by-id document lost ${leaf}: ${doc}")
+            assertTrue((net.queryDocument as String).contains(leaf), "net document lost ${leaf}")
+        }
+        // Connection page sizes stay variables so the caller keeps the clamping it already relies on.
+        assertTrue(((Map) byId.variables).containsKey("returnsFirst"), "variables: ${byId.variables}")
+        assertTrue(((Map) byId.variables).containsKey("refundsFirst"), "variables: ${byId.variables}")
+    }
 }
