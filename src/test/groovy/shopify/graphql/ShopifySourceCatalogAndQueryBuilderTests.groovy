@@ -166,6 +166,59 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
+    void theLineUnitsSourceCarriesTheFieldsTheUnitRecordNeeds() {
+        Map<String, Object> source = ShopifySourceCatalog.requireSource(
+                ShopifySourceCatalog.SHOPIFY_ORDER_LINE_UNITS, "2024-10")
+
+        // allowsBulkConnections must survive requireSource. copySource whitelists keys explicitly,
+        // so a flag added to the source map and NOT to that whitelist is silently stripped before
+        // buildBulkQuery ever reads it - and the source would then be rejected by the very guard
+        // it opts out of, with an error naming lineItems rather than the missing copy.
+        assertTrue(source.allowsBulkConnections as boolean)
+
+        List<String> defaults = source.defaultBulkSelectedFieldPaths as List<String>
+        // legacyResourceId is not decoration: OMS stores the NUMERIC Shopify order id, so without
+        // it every record keys on a gid and the whole window reports as 100% different.
+        assertTrue(defaults.contains("legacyResourceId"))
+        assertTrue(defaults.contains("lineItems.id"))
+        assertTrue(defaults.contains("lineItems.quantity"))
+    }
+
+    @Test
+    void theLineUnitsSourceIsAvailableOnTheApiVersionProductionRuns() {
+        // gorjana prod runs 2024-10 while SUPPORTED_API_VERSIONS starts at 2025-07 (observed on
+        // DAR-BE-034). A source this feature cannot use on the one tenant it was built for is
+        // useless, so this source declares its own list. The shared constant is NOT widened:
+        // it is a contract the other sources rely on.
+        assertNotNull(ShopifySourceCatalog.getSource(
+                ShopifySourceCatalog.SHOPIFY_ORDER_LINE_UNITS, "2024-10"))
+        assertNotNull(ShopifySourceCatalog.getSource(
+                ShopifySourceCatalog.SHOPIFY_ORDER_LINE_UNITS, "2026-04"))
+        assertFalse(((List<String>) ShopifySourceCatalog.SUPPORTED_API_VERSIONS).contains("2024-10"),
+                "the shared version list must stay untouched")
+    }
+
+    @Test
+    void theOrdersSourceStillRejectsConnectionFieldsWhileLineUnitsAcceptsThem() {
+        // The matched pair for the per-source opt-in. Only a source whose parser EXPECTS
+        // __parentId child lines may accept a connection in a bulk query.
+        assertThrows(IllegalArgumentException) {
+            ShopifyGraphqlQueryBuilder.buildBulkQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDERS,
+                selectedFieldPaths: ["id", "lineItems.id"],
+            ])
+        }
+
+        Map<String, Object> built = ShopifyGraphqlQueryBuilder.buildBulkQuery([
+            sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_LINE_UNITS,
+            apiVersion        : "2024-10",
+            selectedFieldPaths: ["id", "legacyResourceId", "lineItems.id", "lineItems.quantity"],
+        ])
+
+        assertTrue((built.queryDocument as String).contains("lineItems"))
+    }
+
+    @Test
     void queryBuilderRejectsUnsupportedFilters() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException) {
             ShopifyGraphqlQueryBuilder.buildQuery([

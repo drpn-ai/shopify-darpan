@@ -5,6 +5,7 @@ import static darpan.common.ValueSupport.normalize
 class ShopifySourceCatalog {
     static final String SHOPIFY_ORDERS = "SHOPIFY_ORDERS"
     static final String SHOPIFY_ORDER_RETURN_REFS = "SHOPIFY_ORDER_RETURN_REFS"
+    static final String SHOPIFY_ORDER_LINE_UNITS = "SHOPIFY_ORDER_LINE_UNITS"
     static final List<String> SUPPORTED_API_VERSIONS = [
         "2025-07",
         "2025-10",
@@ -285,9 +286,70 @@ class ShopifySourceCatalog {
         ],
     ].asImmutable()
 
+    /**
+     * DAR-BE-050. One record per ORDER LINE UNIT, for the Shopify -> OMS unit presence pair.
+     *
+     * Shares ORDER_SOURCE's field definitions - the lineItems.* paths already exist there for the
+     * cursor path - and differs in exactly two ways.
+     *
+     * allowsBulkConnections: this source's extractor EXPECTS __parentId child lines, because they
+     * ARE its records. Measured against gorjana production 2026-09-02: bulk `orders { lineItems }`
+     * is READABLE on the live token while fulfillmentOrders is DENIED, so this is the sweep that
+     * works today rather than the one the vendor's docs point at.
+     *
+     * supportedApiVersions: its own list, including 2024-10. gorjana production runs 2024-10 while
+     * the shared SUPPORTED_API_VERSIONS starts at 2025-07, so a source restricted to the shared
+     * list could not run on the one tenant this feature was built for. The shared constant is
+     * deliberately NOT widened - it is a contract the other sources rely on - and this divergence
+     * is narrow, intentional, and confined to the source that needs it.
+     *
+     * DECLARATION ORDER IS LOAD-BEARING: this must stay ABOVE SOURCES_BY_ID. Static fields
+     * initialise top-down, so a source declared below the registry is still null when the registry
+     * captures it, and every lookup then fails with "not available for API version" - an error
+     * that points at the version list rather than at the ordering.
+     */
+    private static final Map<String, Object> ORDER_LINE_UNITS_SOURCE = [
+        sourceDefinitionId          : SHOPIFY_ORDER_LINE_UNITS,
+        label                       : "Shopify Order Line Units",
+        description                 : "One record per Shopify order line UNIT for order-line presence reconciliation.",
+        requiredEndpointSystemEnumId: "SHOPIFY_ORDER_LINE_UNITS",
+        queryRoot                   : "orders",
+        nodeType                    : "Order",
+        graphqlType                 : "Order",
+        allowsBulkConnections       : true,
+        defaultSortKey              : "CREATED_AT",
+        paginationStrategy          : "CURSOR",
+        defaultPageSize             : 100,
+        maxPageSize                 : 250,
+        supportedApiVersions        : (["2024-10"] + SUPPORTED_API_VERSIONS).unique().asImmutable(),
+        defaultSelectedFieldPaths   : [
+            "id",
+            "legacyResourceId",
+            "name",
+            "createdAt",
+        ].asImmutable(),
+        // The JSONL record shape is a downstream contract for the unit compare key.
+        // legacyResourceId is load-bearing rather than informational: OMS stores the NUMERIC
+        // Shopify order id, so dropping it makes every record key on a gid and the whole window
+        // read as 100% different.
+        defaultBulkSelectedFieldPaths: [
+            "id",
+            "legacyResourceId",
+            "name",
+            "createdAt",
+            "lineItems.id",
+            "lineItems.quantity",
+            "lineItems.sku",
+            "lineItems.name",
+        ].asImmutable(),
+        supportedFilters            : ORDER_SOURCE.supportedFilters,
+        fields                      : ORDER_SOURCE.fields,
+    ].asImmutable()
+
     private static final Map<String, Map<String, Object>> SOURCES_BY_ID = [
         (SHOPIFY_ORDERS)            : ORDER_SOURCE,
         (SHOPIFY_ORDER_RETURN_REFS): ORDER_RETURN_REFS_SOURCE,
+        (SHOPIFY_ORDER_LINE_UNITS): ORDER_LINE_UNITS_SOURCE,
     ].asImmutable()
 
     static List<Map<String, Object>> listSources(Object apiVersion = null) {
@@ -356,6 +418,12 @@ class ShopifySourceCatalog {
             paginationStrategy       : source.paginationStrategy,
             defaultPageSize          : source.defaultPageSize,
             maxPageSize              : source.maxPageSize,
+            // DAR-BE-050: this whitelist is why a flag must be COPIED as well as declared.
+            // buildBulkQuery reads the source through requireSource -> copySource, so a key added
+            // to a source map but not here is silently stripped, and the source is then rejected
+            // by the very guard it opts out of - with an error naming lineItems rather than the
+            // omission that actually caused it.
+            allowsBulkConnections    : source.allowsBulkConnections == true,
             supportedApiVersions     : new ArrayList(source.supportedApiVersions as List),
             defaultSelectedFieldPaths: new ArrayList(source.defaultSelectedFieldPaths as List),
             defaultBulkSelectedFieldPaths: new ArrayList(source.defaultBulkSelectedFieldPaths as List),
