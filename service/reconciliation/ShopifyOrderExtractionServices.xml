@@ -90,6 +90,119 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="ShopifyOrderLineUnits" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyOrderLineUnits.groovy">
+        <description>Extract Shopify order lines as ONE RECORD PER UNIT for the DAR-BE-050
+            Shopify-to-OMS unit presence pair, via a Bulk Operation over the orders connection
+            filtered on created_at, writing normalized JSON output to the automation data-manager
+            folder.
+
+            WHY UNITS AND NOT LINES: OMS explodes a Shopify line of quantity N into N single-unit
+            OrderItems, and the Spark compare core is a left_anti join followed by .distinct() -
+            set semantics. At line grain a line OMS imported SHORT still matches a complete Shopify
+            line, so the pair reports clean on exactly the defect it exists to find. Each record
+            carries a unitOrdinal and the compare key is
+            (shopifyOrderId, shopifyLineId, unitOrdinal), matching extract#HotWaxOmsOrderLineUnits.
+
+            HOW IT DIFFERS FROM extract#ShopifyOrders: only the record-assembly step. It uses the
+            SHOPIFY_ORDER_LINE_UNITS source, whose allowsBulkConnections opt-in lets lineItems into
+            a bulk query; the resulting JSONL child lines are this extractor's records rather than
+            something to be misread as orders. Bulk submit, poll, download and file writing are
+            deliberately identical.
+
+            WINDOWING: created_at, matching the OMS side's orderDate. Changing one side only
+            produces the DAR-BE-038 skew - structurally guaranteed false positives on every run.
+
+            orphanLineItemCount and droppedZeroQuantity are always present in requestMetadata, and
+            an orphan also raises a run warning: a unit lost in assembly vanishes from the Shopify
+            side, where the anti-join reports it as a genuine difference.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true">
+                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
+            </parameter>
+            <parameter name="automationId">
+                <description>Automation id passed through for metadata.</description>
+            </parameter>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="fileSide">
+                <description>Logical file side being extracted.</description>
+            </parameter>
+            <parameter name="systemEnumId">
+                <description>Source system identifier passed through for metadata.</description>
+            </parameter>
+            <parameter name="sourceTypeEnumId">
+                <description>Source type identifier passed through for metadata.</description>
+            </parameter>
+            <parameter name="windowStart" required="true">
+                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="windowEnd" required="true">
+                <description>End of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="preserveWindowInstants" type="Boolean" default-value="false">
+                <description>When true, treat windowStart and windowEnd as already normalized instants instead of reinterpreting UTC-midnight values through the Shopify config timezone.</description>
+            </parameter>
+            <parameter name="windowStartDate">
+                <description>Raw parent window start passed by the automation executor.</description>
+            </parameter>
+            <parameter name="windowEndDate">
+                <description>Raw parent window end passed by the automation executor.</description>
+            </parameter>
+            <parameter name="outputLocation">
+                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
+            </parameter>
+            <parameter name="fileName">
+                <description>Optional output file name. Defaults to shopify-orders-{fromMillis}-{thruMillis}.json.</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id for live extract progress. Accepted for
+                    dispatch-contract symmetry with the OMS extractor; Shopify progress emission
+                    (bulk-operation objectCount heartbeats) is a planned follow-up.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total for progress percent. Accepted, not yet used.</description>
+            </parameter>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
+                <description>HTTP connect timeout for Shopify GraphQL and Bulk Operations download requests.</description>
+            </parameter>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
+                <description>HTTP read timeout for Shopify GraphQL and Bulk Operations download requests.</description>
+            </parameter>
+            <parameter name="maxAttempts" type="Integer" default-value="2">
+                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
+            </parameter>
+            <parameter name="maxBulkPollAttempts" type="Integer" default-value="60">
+                <description>Maximum Shopify Bulk Operations status polls before the extraction fails.</description>
+            </parameter>
+            <parameter name="bulkPollIntervalMillis" type="Integer" default-value="5000">
+                <description>Delay between Shopify Bulk Operations status polls.</description>
+            </parameter>
+            <parameter name="bulkStartRetryAttempts" type="Integer" default-value="10">
+                <description>Number of retries when Shopify rejects the start request because another Bulk Operation is already running.</description>
+            </parameter>
+            <parameter name="bulkStartRetryDelayMillis" type="Integer" default-value="120000">
+                <description>Delay between Bulk Operation start retries when another operation is already running.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="fileTypeEnumId"/>
+            <parameter name="recordCount" type="Integer">
+                <description>Number of UNITS written, not orders.</description>
+            </parameter>
+            <parameter name="requestMetadata" type="Map"/>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="extract" noun="ShopifyOrderReturnRefs" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyReturnRefs.groovy">
         <description>Extract per-EVENT Shopify records for a window, for returns reconciliation
