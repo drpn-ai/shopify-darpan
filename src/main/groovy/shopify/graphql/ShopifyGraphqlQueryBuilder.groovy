@@ -98,7 +98,16 @@ class ShopifyGraphqlQueryBuilder {
         }
         // Bulk JSONL returns nested-connection children as separate __parentId lines that the order
         // record parser would misread as orders, so connection-bearing fields are rejected here.
-        List<String> connectionFields = selectedFieldPaths.findAll { String fieldPath -> normalize(fieldsByPath[fieldPath]?.connectionRoot) }
+        //
+        // DAR-BE-050: an ITEM-grain source inverts that - the child lines ARE its records - so a
+        // source may opt out explicitly. The flag lives on the SOURCE and never on the field,
+        // because the same lineItems.* field definitions are shared with the cursor path and with
+        // the orders source, which must keep rejecting them. Relaxing this per-FIELD would quietly
+        // let a connection into the ORDERS bulk query, which is the exact misreading the comment
+        // above warns about.
+        boolean allowsBulkConnections = source.allowsBulkConnections == true
+        List<String> connectionFields = allowsBulkConnections ? [] :
+                selectedFieldPaths.findAll { String fieldPath -> normalize(fieldsByPath[fieldPath]?.connectionRoot) }
         if (connectionFields) {
             throw new IllegalArgumentException("Shopify bulk extraction does not support connection field(s): ${connectionFields.join(', ')}.")
         }
