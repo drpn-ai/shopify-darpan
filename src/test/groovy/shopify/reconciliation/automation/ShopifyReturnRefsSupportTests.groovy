@@ -761,7 +761,7 @@ class ShopifyReturnRefsSupportTests {
         // own Order.returnStatus — the value operators actually see and search on.
         //
         // Asserting both old keys are ABSENT is the load-bearing half: a stale rule naming either one
-        // must not keep silently matching nothing, and firstMatchingRule keeps any record whose field
+        // must not keep silently matching nothing, and an EXCLUDE_IN rule keeps any record whose field
         // is absent, so a lingering key would be a permanent silent no-op.
         Map node = [
                 id              : "gid://shopify/Order/7005",
@@ -797,7 +797,7 @@ class ShopifyReturnRefsSupportTests {
         // Fail toward EMITTING, matching this class's established bias everywhere else (see inWindow's
         // unparseable-createdAt handling): a missing status must never suppress a row. A null
         // orderReturnStatus is also what makes such a row un-excludable by any status rule, since
-        // firstMatchingRule skips a blank candidate — the safe direction.
+        // an EXCLUDE_IN rule skips a blank candidate — the safe direction.
         Map node = [
                 id              : "gid://shopify/Order/7002",
                 legacyResourceId: "7002",
