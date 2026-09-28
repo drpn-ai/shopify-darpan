@@ -160,6 +160,7 @@ class ShopifyReturnRefsSupport {
                     errors  : [normalize(e.message) ?: "Configured exclusion rules are invalid."]]
         }
         Map<String, Object> exclusionCounts = [:]
+        Map<String, Object> fieldAbsentCounts = [:]
         // Mutable accumulator threaded into toRecords the same way `warnings` already is, so the
         // per-order projection can report what it dropped without changing its return type.
         Map<String, Integer> suppressionCounters = [:]
@@ -308,10 +309,16 @@ class ShopifyReturnRefsSupport {
                             suppressionCounters).each { Map<String, Object> record ->
                         // Tested against the PROJECTED record, never the raw Shopify node: the stored
                         // rule names orderReturnStatus, which exists only after toRecords projects it.
-                        Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
-                        if (match != null) {
-                            String key = String.valueOf(match.get("sequenceNum"))
-                            exclusionCounts.put(key, normalizeInt(exclusionCounts.get(key), 0) + 1)
+                        Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
+                        if (verdict != null) {
+                            String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
+                            // Two buckets, one rejection. orderReturnStatus is stamped on every row,
+                            // so a FIELD_ABSENT here means Shopify returned no returnStatus at all —
+                            // a different fault from a value the rule does not allow.
+                            Map<String, Object> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
+                                    ? fieldAbsentCounts
+                                    : exclusionCounts
+                            bucket.put(key, normalizeInt(bucket.get(key), 0) + 1)
                             return
                         }
                         records.add(record)
@@ -343,8 +350,11 @@ class ShopifyReturnRefsSupport {
                         sequenceNum    : rule.get("sequenceNum"),
                         fieldExpression: rule.get("fieldExpression"),
                         operator       : rule.get("operator"),
-                        values         : rule.get("values"),
-                        excludedCount  : normalizeInt(exclusionCounts.get(key), 0),
+                        values          : rule.get("values"),
+                        excludedCount   : normalizeInt(exclusionCounts.get(key), 0),
+                        // Present on every rule including EXCLUDE_IN ones, where it is structurally
+                        // zero: a reader should not need to know which keys apply to which mode.
+                        fieldAbsentCount: normalizeInt(fieldAbsentCounts.get(key), 0),
                 ]
             })
         }

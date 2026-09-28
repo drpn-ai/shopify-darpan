@@ -933,6 +933,46 @@ class ShopifyReturnRefsSupportTests {
     }
 
     @Test
+    void anIncludeRuleKeepsOnlyListedStatusesAndCountsAbsentSeparately() {
+        // DAR-BE-054. orderReturnStatus is stamped on every row by toRecords, so a FIELD_ABSENT drop
+        // here means Shopify itself returned no returnStatus for the order — worth counting apart
+        // from a value the rule simply does not allow, because the two call for different fixes.
+        Closure orderNode = { String id, Object returnStatus ->
+            Map node = [
+                    id              : "gid://shopify/Order/${id}".toString(),
+                    legacyResourceId: id,
+                    name            : "#${id}".toString(),
+                    createdAt       : "2026-05-01T08:00:00Z",
+                    refunds         : [[id: "gid://shopify/Refund/9${id}".toString(),
+                                        createdAt: "2026-05-01T09:20:00Z"]],
+                    returns         : [nodes: [[id: "gid://shopify/Return/8${id}".toString(), status: "CLOSED",
+                                                 createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
+            ]
+            if (returnStatus != null) node.put("returnStatus", returnStatus)
+            return node
+        }
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return adapt(doc, [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: orderNode("8101", "RETURNED")],
+                               [cursor: "c2", node: orderNode("8102", "IN_PROGRESS")],
+                               [cursor: "c3", node: orderNode("8103", null)]],
+                    pageInfo: [hasNextPage: false, endCursor: "c3"],
+            ]]])
+        }
+        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
+                                              operator: "INCLUDE_IN", filterValues: "RETURNED"]]
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [sourceFilters: filters], executor)
+
+        assertEquals(1, result.recordCount, "only the RETURNED order qualifies")
+        Map entry = (Map) ((List) ((Map) ((Map) result.requestMetadata).filters).configuredExclusions)[0]
+        assertEquals("INCLUDE_IN", entry.operator)
+        assertEquals(1, entry.excludedCount, "IN_PROGRESS, dropped on its value")
+        assertEquals(1, entry.fieldAbsentCount, "no returnStatus from Shopify at all")
+    }
+
+    @Test
     void noConfiguredRulesLeavesConfiguredExclusionsAbsentEntirely() {
         Map node = [
                 id              : "gid://shopify/Order/8003",
