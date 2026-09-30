@@ -62,6 +62,20 @@
             <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
                 <description>HTTP read timeout for Shopify GraphQL and Bulk Operations download requests.</description>
             </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>DAR-BE-063. Optional record rules (EXCLUDE_IN / INCLUDE_IN) on a top-level ORDER
+                    field, evaluated per order after the bulk read. Dropped orders are written to the
+                    excluded-records sidecar and every rule is counted in
+                    requestMetadata.filters.configuredExclusions. Parsed before the bulk operation is
+                    submitted, so a malformed rule fails pre-flight. Absent or empty means no rules and output
+                    identical to an unfiltered extract.</description>
+            </parameter>
             <parameter name="maxAttempts" type="Integer" default-value="2">
                 <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
             </parameter>

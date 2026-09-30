@@ -2,6 +2,8 @@ import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
+import darpan.reconciliation.source.SourceFilterSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
@@ -107,6 +109,19 @@ if (outputErrors) {
     return
 }
 
+// DAR-BE-063: tenant source filters run CLIENT-side per order (Shopify search syntax knows nothing of
+// them). Parsed BEFORE the bulk operation is submitted, so a malformed rule fails in seconds.
+List<Map<String, Object>> parsedSourceFilters
+try {
+    parsedSourceFilters = SourceFilterSupport.parseRules(sourceFilters)
+} catch (Exception e) {
+    errors = [normalize(e.message) ?: "Configured exclusion rules are invalid."]
+    warnings = outputWarnings
+    dataAvailable = false
+    recordCount = 0
+    return
+}
+
 String sourceTimeZone = normalize(authConfig?.timeZone) ?: TenantAccessSupport.resolveActiveTenantTimeZone(ec)
 boolean preserveWindowInstantsValue = ValueSupport.normalizeBool(preserveWindowInstants, false)
 Map<String, Object> sourceWindow = preserveWindowInstantsValue ?
@@ -164,6 +179,9 @@ if (bulkOperationResult.ok == false) {
             .findAll { Object record -> record instanceof Map }
             .collect { Object record -> normalizeShopifyOrderRecord.call((Map<String, Object>) record) } as List<Map<String, Object>>
 }
+Map filteredOrders = SourceFilterSupport.applyToRecords(records, parsedSourceFilters)
+int extractedRecordCount = records.size()
+records = (List<Map<String, Object>>) filteredOrders.records
 if (outputErrors) {
     errors = outputErrors
     warnings = outputWarnings
@@ -193,6 +211,16 @@ if (rawJsonlText) {
 fileName = outputFileName
 fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
 fileTypeEnumId = "DftJson"
+// DAR-UI-044 / DAR-BE-063: what the source filters dropped, beside the extract, for the conclude pass.
+Map excludedCollector = (Map) filteredOrders.excludedCollector
+if (excludedCollector && ((excludedCollector.total ?: 0) as int) > 0) {
+    try {
+        DataManagerSupport.writeText(ec, DataManagerSupport.childLocation(outputBaseLocation,
+                ExcludedRecordsSidecar.fileNameFor(outputFileName)), ExcludedRecordsSidecar.toJson(excludedCollector, outputFileName))
+    } catch (Exception sidecarError) {
+        outputWarnings.add("Excluded-records sidecar not written: ${sidecarError.message}".toString())
+    }
+}
 recordCount = records.size()
 dataAvailable = records.size() > 0
 requestMetadata = [
@@ -219,7 +247,11 @@ requestMetadata = [
         bulkJsonlLineCount    : bulkOperationResult.jsonlLineCount,
         rawJsonlFileName      : rawJsonlFileName,
         rawJsonlLocation      : rawJsonlLocation,
-        extractedRecordCount  : records.size(),
+        extractedRecordCount  : extractedRecordCount,
+        keptRecordCount       : records.size(),
+        // Absent (not an empty block) when no rules are configured, matching the line-units extract.
+        filters               : filteredOrders.configuredExclusions != null ?
+                [configuredExclusions: filteredOrders.configuredExclusions] : null,
 ].findAll { it.value != null } as Map<String, Object>
 DataManagerSupport.writeText(ec, fileLocation as String, JsonOutput.toJson([
         metadata: requestMetadata,

@@ -58,6 +58,9 @@ class ShopifySourceCatalog {
             "totalPriceSet.shopMoney.currencyCode",
             "subtotalPriceSet.shopMoney.amount",
             "subtotalPriceSet.shopMoney.currencyCode",
+            // DAR-BE-063: additive, for the Shopify -> NetSuite billed run (POS / draft / digital orders).
+            "sourceName",
+            "requiresShipping",
         ],
         supportedFilters         : [
             updatedAtFrom : [queryName: "updated_at", comparator: ">=", type: "datetime", sortKey: "UPDATED_AT"],
@@ -89,6 +92,8 @@ class ShopifySourceCatalog {
             [fieldPath: "currentTotalTaxSet.shopMoney.currencyCode", label: "Current Total Tax Currency", type: "CurrencyCode", selectionPath: "currentTotalTaxSet.shopMoney.currencyCode"],
             [fieldPath: "subtotalPriceSet.shopMoney.amount", label: "Subtotal Amount", type: "Decimal", selectionPath: "subtotalPriceSet.shopMoney.amount"],
             [fieldPath: "subtotalPriceSet.shopMoney.currencyCode", label: "Subtotal Currency", type: "CurrencyCode", selectionPath: "subtotalPriceSet.shopMoney.currencyCode"],
+            [fieldPath: "sourceName", label: "Order Source Name", type: "String", selectionPath: "sourceName"],
+            [fieldPath: "requiresShipping", label: "Requires Shipping", type: "Boolean", selectionPath: "requiresShipping"],
             [fieldPath: "customer.id", label: "Customer ID", type: "ID", selectionPath: "customer.id"],
             [fieldPath: "customer.email", label: "Customer Email", type: "String", selectionPath: "customer.email"],
             [fieldPath: "shippingAddress.city", label: "Shipping City", type: "String", selectionPath: "shippingAddress.city"],

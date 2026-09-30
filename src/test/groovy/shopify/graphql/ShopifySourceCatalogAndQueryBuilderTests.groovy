@@ -136,7 +136,8 @@ class ShopifySourceCatalogAndQueryBuilderTests {
             "totalPriceSet.shopMoney.amount", "totalPriceSet.shopMoney.currencyCode",
             "subtotalPriceSet.shopMoney.amount", "subtotalPriceSet.shopMoney.currencyCode",
         ] as Set
-        assertEquals(legacyBulkSelection, ((List<String>) result.selectedFieldPaths) as Set)
+        // DAR-BE-063 added sourceName and requiresShipping ON PURPOSE (additive: the legacy set is intact).
+        assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping"] as Set), ((List<String>) result.selectedFieldPaths) as Set)
 
         String queryDocument = result.queryDocument as String
         assertTrue(queryDocument.contains("query DarpanShopifyOrdersByDateWindow {"))
@@ -209,7 +210,9 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         // Scoped to line units: the ORDERS catalog and its bulk contract are untouched.
         Map<String, Object> orders = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDERS)
         List<String> orderFieldPaths = ((List<Map>) orders.fields).collect { it.fieldPath as String }
-        ["returnStatus", "lineItems.currentQuantity", "lineItems.unfulfilledQuantity", "sourceName"].each { String path ->
+        // sourceName left this list on purpose (DAR-BE-063): the ORDERS source now carries it for the
+        // Shopify -> NetSuite billed run's POS / draft conclusions. Additive: nothing was dropped or renamed.
+        ["returnStatus", "lineItems.currentQuantity", "lineItems.unfulfilledQuantity"].each { String path ->
             assertFalse(orderFieldPaths.contains(path), "${path} leaked into the ORDERS field catalog")
             assertFalse((orders.defaultBulkSelectedFieldPaths as List).contains(path),
                     "${path} leaked into the ORDERS bulk contract")
@@ -435,5 +438,18 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         // Connection page sizes stay variables so the caller keeps the clamping it already relies on.
         assertTrue(((Map) byId.variables).containsKey("returnsFirst"), "variables: ${byId.variables}")
         assertTrue(((Map) byId.variables).containsKey("refundsFirst"), "variables: ${byId.variables}")
+    }
+
+    @Test
+    void theOrdersBulkContractCarriesSourceNameAndRequiresShippingAdditively() {
+        Map<String, Object> orders = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDERS)
+        List<String> bulk = orders.defaultBulkSelectedFieldPaths as List<String>
+        assertTrue(bulk.contains("sourceName"))
+        assertTrue(bulk.contains("requiresShipping"))
+        assertTrue(bulk.containsAll(["legacyResourceId", "displayFulfillmentStatus", "displayFinancialStatus",
+                                     "cancelledAt", "totalPriceSet.shopMoney.amount", "currentTotalPriceSet.shopMoney.amount"]),
+                "the pre-DAR-BE-063 contract is intact")
+        List<String> fieldPaths = ((List<Map>) orders.fields).collect { it.fieldPath as String }
+        assertTrue(fieldPaths.containsAll(["sourceName", "requiresShipping"]))
     }
 }
