@@ -290,7 +290,8 @@ class ShopifySourceCatalog {
      * DAR-BE-050. One record per ORDER LINE UNIT, for the Shopify -> OMS unit presence pair.
      *
      * Shares ORDER_SOURCE's field definitions - the lineItems.* paths already exist there for the
-     * cursor path - and differs in exactly two ways.
+     * cursor path - plus three state scalars of its own (see fields below), and otherwise differs
+     * in exactly two ways.
      *
      * allowsBulkConnections: this source's extractor EXPECTS __parentId child lines, because they
      * ARE its records. Measured against gorjana production 2026-09-02: bulk `orders { lineItems }`
@@ -341,9 +342,27 @@ class ShopifySourceCatalog {
             "lineItems.quantity",
             "lineItems.sku",
             "lineItems.name",
+            // Tri-system unit state (spec 2026-09-30 D1). All three are plain scalars, so they are
+            // bulk-legal, and all three were live-probed on gorjana prod (API 2024-10).
+            // ShopifyOrderLineUnitSupport derives each unit's OPEN / FULFILLED / REMOVED state from
+            // the two quantities and stamps returnStatus onto every unit as orderReturnStatus.
+            "returnStatus",
+            "lineItems.currentQuantity",
+            "lineItems.unfulfilledQuantity",
+            // The channel, stamped onto every unit as orderSourceName. POS refunds create no Return
+            // object, so a POS return reads returnStatus NO_RETURN; A-cancel excludes pos by this.
+            "sourceName",
         ].asImmutable(),
         supportedFilters            : ORDER_SOURCE.supportedFilters,
-        fields                      : ORDER_SOURCE.fields,
+        // ORDER_SOURCE's definitions PLUS the three state scalars. They are appended here and not
+        // added to ORDER_SOURCE, so the ORDERS field catalog (what the field picker offers) does
+        // not change.
+        fields                      : (ORDER_SOURCE.fields + [
+            [fieldPath: "returnStatus", label: "Order Return Status", type: "String", selectionPath: "returnStatus"],
+            [fieldPath: "sourceName", label: "Order Source Name", type: "String", selectionPath: "sourceName"],
+            [fieldPath: "lineItems.currentQuantity", label: "Line Item Current Quantity", type: "Integer", selectionPath: "lineItems.edges.node.currentQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            [fieldPath: "lineItems.unfulfilledQuantity", label: "Line Item Unfulfilled Quantity", type: "Integer", selectionPath: "lineItems.edges.node.unfulfilledQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+        ]).asImmutable(),
     ].asImmutable()
 
     private static final Map<String, Map<String, Object>> SOURCES_BY_ID = [

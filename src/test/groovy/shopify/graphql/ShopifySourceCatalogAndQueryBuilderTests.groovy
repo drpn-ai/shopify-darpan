@@ -185,6 +185,38 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
+    void theLineUnitsBulkQuerySelectsTheThreeStateScalarsAndTheOrdersSourceDoesNot() {
+        // Tri-system unit state (spec 2026-09-30 D1). Pinned deliberately: the full ordered list is
+        // the JSONL contract ShopifyOrderLineUnitSupport.assembleUnits reads.
+        Map<String, Object> source = ShopifySourceCatalog.requireSource(
+                ShopifySourceCatalog.SHOPIFY_ORDER_LINE_UNITS, "2024-10")
+        assertEquals([
+                "id", "legacyResourceId", "name", "createdAt",
+                "lineItems.id", "lineItems.quantity", "lineItems.sku", "lineItems.name",
+                "returnStatus", "lineItems.currentQuantity", "lineItems.unfulfilledQuantity",
+                "sourceName",
+        ], source.defaultBulkSelectedFieldPaths)
+
+        String document = ShopifyGraphqlQueryBuilder.buildBulkQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDER_LINE_UNITS,
+                apiVersion        : "2024-10",
+        ]).queryDocument as String
+        assertTrue(document.contains("returnStatus"), document)
+        assertTrue(document.contains("currentQuantity"), document)
+        assertTrue(document.contains("unfulfilledQuantity"), document)
+        assertTrue(document.contains("sourceName"), document)
+
+        // Scoped to line units: the ORDERS catalog and its bulk contract are untouched.
+        Map<String, Object> orders = ShopifySourceCatalog.getSource(ShopifySourceCatalog.SHOPIFY_ORDERS)
+        List<String> orderFieldPaths = ((List<Map>) orders.fields).collect { it.fieldPath as String }
+        ["returnStatus", "lineItems.currentQuantity", "lineItems.unfulfilledQuantity", "sourceName"].each { String path ->
+            assertFalse(orderFieldPaths.contains(path), "${path} leaked into the ORDERS field catalog")
+            assertFalse((orders.defaultBulkSelectedFieldPaths as List).contains(path),
+                    "${path} leaked into the ORDERS bulk contract")
+        }
+    }
+
+    @Test
     void theLineUnitsSourceIsAvailableOnTheApiVersionProductionRuns() {
         // gorjana prod runs 2024-10 while SUPPORTED_API_VERSIONS starts at 2025-07 (observed on
         // DAR-BE-034). A source this feature cannot use on the one tenant it was built for is

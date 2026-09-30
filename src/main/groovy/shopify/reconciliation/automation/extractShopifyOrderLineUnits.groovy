@@ -6,6 +6,7 @@ import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
@@ -127,6 +128,20 @@ try {
     recordCount = 0
     return
 }
+// Configured source filters run CLIENT-side on each emitted UNIT: Shopify's search syntax knows
+// nothing of tenant rules, and unitState does not exist until assembly derives it. Parsed here,
+// BEFORE the bulk operation is submitted, so a malformed rule fails in seconds rather than after a
+// multi-minute bulk run. Empty when unconfigured.
+List<Map<String, Object>> parsedSourceFilters
+try {
+    parsedSourceFilters = ShopifyOrderLineUnitSupport.parseSourceFilters(sourceFilters)
+} catch (Exception e) {
+    errors = [normalize(e.message) ?: "Configured exclusion rules are invalid."]
+    warnings = outputWarnings
+    dataAvailable = false
+    recordCount = 0
+    return
+}
 String searchQuery = (String) builtBulkQuery.searchQuery
 String bulkQueryDocument = (String) builtBulkQuery.queryDocument
 Integer bulkMaxPollAttempts = Math.max(1, ValueSupport.normalizeInt(maxBulkPollAttempts, ShopifyBulkOperationClient.DEFAULT_MAX_POLL_ATTEMPTS))
@@ -149,7 +164,9 @@ Map<String, Object> bulkOperationResult = ShopifyBulkOperationClient.runQuery([
 ])
 
 List<Map<String, Object>> records = []
-Map assembledUnits = [units: [], orphanLineItemCount: 0, droppedZeroQuantity: 0]
+Map assembledUnits = [units: [], orphanLineItemCount: 0, droppedZeroQuantity: 0,
+                      unknownStateLineCount: 0, clampedStateLineCount: 0]
+Map filteredUnits = [units: [], configuredExclusions: null]
 if (bulkOperationResult.ok == false) {
     outputErrors.addAll(((List) (bulkOperationResult.errors ?: ["Shopify bulk operation request failed."]))
             .collect { Object error -> normalize(error) }
@@ -160,7 +177,10 @@ if (bulkOperationResult.ok == false) {
     // one entry per UNIT. ShopifyBulkOperationClient.parseJsonlRecords needed no change for this -
     // it already parses every line into a Map, grain-agnostic.
     assembledUnits = ShopifyOrderLineUnitSupport.assembleUnits((List) (bulkOperationResult.records ?: []))
-    records = (List<Map<String, Object>>) assembledUnits.units
+    // Tested against the assembled UNIT, never the raw JSONL line: a rule may name unitState,
+    // which exists only after assembly, or orderReturnStatus, which assembly stamps on every unit.
+    filteredUnits = ShopifyOrderLineUnitSupport.applySourceFilters((List) assembledUnits.units, parsedSourceFilters)
+    records = (List<Map<String, Object>>) filteredUnits.units
 }
 if (outputErrors) {
     errors = outputErrors
@@ -191,6 +211,16 @@ if (rawJsonlText) {
 fileName = outputFileName
 fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
 fileTypeEnumId = "DftJson"
+// DAR-UI-044: what the source filters dropped, beside the extract, for the conclude pass. Advisory.
+Map excludedCollector = (Map) filteredUnits?.excludedCollector
+if (excludedCollector && ((excludedCollector.total ?: 0) as int) > 0) {
+    try {
+        DataManagerSupport.writeText(ec, DataManagerSupport.childLocation(outputBaseLocation,
+                ExcludedRecordsSidecar.fileNameFor(outputFileName)), ExcludedRecordsSidecar.toJson(excludedCollector, outputFileName))
+    } catch (Exception sidecarError) {
+        outputWarnings.add("Excluded-records sidecar not written: ${sidecarError.message}".toString())
+    }
+}
 recordCount = records.size()
 dataAvailable = records.size() > 0
 requestMetadata = [
@@ -223,10 +253,23 @@ requestMetadata = [
         // run must be able to tell a real finding from a parse loss without opening the JSONL.
         orphanLineItemCount   : assembledUnits.orphanLineItemCount,
         droppedZeroQuantity   : assembledUnits.droppedZeroQuantity,
+        // Lines with no currentQuantity / unfulfilledQuantity: their units carry unitState UNKNOWN
+        // and an include rule on a state drops them. Always present for the same reason as above.
+        unknownStateLineCount : assembledUnits.unknownStateLineCount,
+        clampedStateLineCount : assembledUnits.clampedStateLineCount,
+        // Absent (not an empty block) when no rules are configured, matching the OMS getters: a
+        // block on every extract would read as "a filter always applies". Every configured rule
+        // is listed, a zero-count one included.
+        filters               : filteredUnits.configuredExclusions != null ?
+                [configuredExclusions: filteredUnits.configuredExclusions] : null,
 ].findAll { it.value != null } as Map<String, Object>
 int orphanLineItemCount = (assembledUnits.orphanLineItemCount ?: 0) as int
 if (orphanLineItemCount > 0) {
     outputWarnings.add("${orphanLineItemCount} line item(s) had no parent order in the bulk JSONL and were not compared.".toString())
+}
+int unknownStateLineCount = (assembledUnits.unknownStateLineCount ?: 0) as int
+if (unknownStateLineCount > 0) {
+    outputWarnings.add("${unknownStateLineCount} line item(s) had no current or unfulfilled quantity; their units carry unitState UNKNOWN.".toString())
 }
 DataManagerSupport.writeText(ec, fileLocation as String, JsonOutput.toJson([
         metadata: requestMetadata,

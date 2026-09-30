@@ -167,6 +167,27 @@
             <parameter name="expectedRecordCount" type="Integer">
                 <description>Optional expected total for progress percent. Accepted, not yet used.</description>
             </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record rules, same semantics as the OMS extractors (EXCLUDE_IN /
+                    INCLUDE_IN). Each rule names a top-level UNIT field and a comma-separated list of
+                    exact values; it is evaluated against every emitted unit, after assembly, and
+                    rejected units are dropped before the extract file is written and counted per rule
+                    in requestMetadata.filters.configuredExclusions (excludedCount, plus
+                    fieldAbsentCount for an INCLUDE_IN rule whose field is missing). Parsed before the
+                    bulk operation is submitted, so a malformed rule fails pre-flight. Absent or empty
+                    means no rules and output identical to an unfiltered extract.
+
+                    The fields this exists for (spec 2026-09-30 D1, D2): unitState (OPEN, FULFILLED,
+                    REMOVED, or UNKNOWN when Shopify sent no quantities) and orderReturnStatus
+                    (Shopify's Order.returnStatus - NO_RETURN, RETURN_REQUESTED, IN_PROGRESS,
+                    INSPECTION_COMPLETE, RETURNED, RETURN_FAILED), stamped on every unit.</description>
+            </parameter>
             <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
                 <description>HTTP connect timeout for Shopify GraphQL and Bulk Operations download requests.</description>
             </parameter>
