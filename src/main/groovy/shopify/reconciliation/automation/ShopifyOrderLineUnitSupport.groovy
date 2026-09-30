@@ -1,6 +1,5 @@
 package shopify.reconciliation.automation
 
-import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
 
 /**
@@ -150,48 +149,11 @@ class ShopifyOrderLineUnitSupport {
      *          configuredExclusions: one entry per rule, or null when no rules are configured]
      */
     static Map applySourceFilters(List units, List<Map<String, Object>> parsedFilters) {
-        // No rules: hand back the input untouched, so an unconfigured connector's output is
-        // byte-identical to the build before filters existed.
-        if (!parsedFilters) return [units: units, configuredExclusions: null]
-
-        List<Map> kept = []
-        // DAR-UI-044: the dropped units, whole, for the conclude pass.
-        Map excludedCollector = ExcludedRecordsSidecar.newCollector()
-        Map<String, Integer> exclusionCounts = [:]
-        Map<String, Integer> fieldAbsentCounts = [:]
-        for (Object raw : (units ?: [])) {
-            Map unit = (Map) raw
-            Map<String, Object> verdict = SourceFilterSupport.evaluate(unit, parsedFilters)
-            if (verdict == null) {
-                kept.add(unit)
-                continue
-            }
-            ExcludedRecordsSidecar.collect(excludedCollector, unit, (Map) verdict.get("rule"))
-            String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
-            // Two buckets, one rejection. orderReturnStatus is stamped on every unit, so a
-            // FIELD_ABSENT here means Shopify returned no returnStatus for the order - a different
-            // fault from a value the rule does not allow.
-            Map<String, Integer> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
-                    ? fieldAbsentCounts
-                    : exclusionCounts
-            bucket.put(key, (bucket.get(key) ?: 0) + 1)
-        }
-        // EVERY configured rule appears, including one that matched nothing (excludedCount 0) - a
-        // missing entry would read as "not applied".
-        List<Map<String, Object>> configuredExclusions = parsedFilters.collect { Map<String, Object> rule ->
-            String key = String.valueOf(rule.get("sequenceNum"))
-            return [
-                    sequenceNum     : rule.get("sequenceNum"),
-                    fieldExpression : rule.get("fieldExpression"),
-                    operator        : rule.get("operator"),
-                    values          : new ArrayList<String>((List) rule.get("values")),
-                    excludedCount   : exclusionCounts.get(key) ?: 0,
-                    // Present on every rule including EXCLUDE_IN ones, where it is structurally
-                    // zero: a reader should not need to know which keys apply to which mode.
-                    fieldAbsentCount: fieldAbsentCounts.get(key) ?: 0,
-            ] as Map<String, Object>
-        }
-        return [units: kept, configuredExclusions: configuredExclusions, excludedCollector: excludedCollector]
+        // DAR-BE-063: one filter-and-sidecar loop for every extractor lives in core.
+        Map applied = SourceFilterSupport.applyToRecords(units, parsedFilters)
+        if (applied.configuredExclusions == null) return [units: units, configuredExclusions: null]
+        return [units: applied.records, configuredExclusions: applied.configuredExclusions,
+                excludedCollector: applied.excludedCollector]
     }
 
     /** gid://shopify/LineItem/15210699161731 -> 15210699161731; already-numeric passes through. */
