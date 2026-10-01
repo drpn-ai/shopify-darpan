@@ -61,6 +61,11 @@ class ShopifySourceCatalog {
             // DAR-BE-063: additive, for the Shopify -> NetSuite billed run (POS / draft / digital orders).
             "sourceName",
             "requiresShipping",
+            // DAR-BE-064: Order.transactions is a plain LIST (no connection), so bulk returns it inline
+            // on the order line with no __parentId children. Feeds hasPaymentTransaction.
+            "transactions.kind",
+            "transactions.status",
+            "transactions.gateway",
         ],
         supportedFilters         : [
             updatedAtFrom : [queryName: "updated_at", comparator: ">=", type: "datetime", sortKey: "UPDATED_AT"],
@@ -94,6 +99,9 @@ class ShopifySourceCatalog {
             [fieldPath: "subtotalPriceSet.shopMoney.currencyCode", label: "Subtotal Currency", type: "CurrencyCode", selectionPath: "subtotalPriceSet.shopMoney.currencyCode"],
             [fieldPath: "sourceName", label: "Order Source Name", type: "String", selectionPath: "sourceName"],
             [fieldPath: "requiresShipping", label: "Requires Shipping", type: "Boolean", selectionPath: "requiresShipping"],
+            [fieldPath: "transactions.kind", label: "Transaction Kind", type: "String", selectionPath: "transactions.kind"],
+            [fieldPath: "transactions.status", label: "Transaction Status", type: "String", selectionPath: "transactions.status"],
+            [fieldPath: "transactions.gateway", label: "Transaction Gateway", type: "String", selectionPath: "transactions.gateway"],
             [fieldPath: "customer.id", label: "Customer ID", type: "ID", selectionPath: "customer.id"],
             [fieldPath: "customer.email", label: "Customer Email", type: "String", selectionPath: "customer.email"],
             [fieldPath: "shippingAddress.city", label: "Shipping City", type: "String", selectionPath: "shippingAddress.city"],

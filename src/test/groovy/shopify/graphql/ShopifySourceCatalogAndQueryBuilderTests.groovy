@@ -136,8 +136,10 @@ class ShopifySourceCatalogAndQueryBuilderTests {
             "totalPriceSet.shopMoney.amount", "totalPriceSet.shopMoney.currencyCode",
             "subtotalPriceSet.shopMoney.amount", "subtotalPriceSet.shopMoney.currencyCode",
         ] as Set
-        // DAR-BE-063 added sourceName and requiresShipping ON PURPOSE (additive: the legacy set is intact).
-        assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping"] as Set), ((List<String>) result.selectedFieldPaths) as Set)
+        // DAR-BE-063 added sourceName and requiresShipping; DAR-BE-064 added transactions.kind/status
+        // (a plain LIST, not a connection, so bulk returns it inline). All additive: the legacy set is intact.
+        assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping", "transactions.kind", "transactions.status", "transactions.gateway"] as Set),
+                ((List<String>) result.selectedFieldPaths) as Set)
 
         String queryDocument = result.queryDocument as String
         assertTrue(queryDocument.contains("query DarpanShopifyOrdersByDateWindow {"))
@@ -145,6 +147,8 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         assertTrue(queryDocument.contains("legacyResourceId"))
         assertTrue(queryDocument.contains("cancelledAt"))
         assertTrue(queryDocument.contains("currentTotalTaxSet {"))
+        assertTrue(queryDocument.contains("transactions {"), "transactions must render as a plain list selection")
+        assertTrue(!queryDocument.contains("transactions(first"), "bulk ignores first; a first arg here is noise")
         assertTrue(queryDocument.contains("subtotalPriceSet {"))
         assertTrue(queryDocument.contains("shopMoney {"))
         // bulkOperationRunQuery rejects variables; bulk documents carry no pagination artifacts

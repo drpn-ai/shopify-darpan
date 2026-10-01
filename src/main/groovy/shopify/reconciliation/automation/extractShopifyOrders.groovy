@@ -7,6 +7,7 @@ import darpan.reconciliation.source.SourceFilterSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
+import shopify.reconciliation.automation.ShopifyOrderPaymentSignal
 import shopify.graphql.ShopifyGraphqlQueryBuilder
 import shopify.graphql.ShopifySourceCatalog
 
@@ -83,6 +84,8 @@ Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object>
         normalizedRecord.legacyResourceId = legacyId
         normalizedRecord.id = legacyId
     }
+    // DAR-BE-064: derived before the source filters run, so a filter and the presence OPP rule can both read it.
+    normalizedRecord.hasPaymentTransaction = ShopifyOrderPaymentSignal.hasPaymentTransaction(normalizedRecord.transactions)
     return normalizedRecord
 }
 String configIdValue = normalize(shopifyAuthConfigId)
