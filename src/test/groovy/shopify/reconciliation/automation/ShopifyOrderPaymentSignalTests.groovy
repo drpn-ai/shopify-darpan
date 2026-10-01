@@ -38,4 +38,32 @@ class ShopifyOrderPaymentSignalTests {
         org.junit.jupiter.api.Assertions.assertTrue(
                 script.contains("normalizedRecord.hasPaymentTransaction = ShopifyOrderPaymentSignal.hasPaymentTransaction("))
     }
+
+    @Test
+    void summarizeCountsPaidAndUnpaidOrders() {
+        assertEquals([paymentTransactionYCount: 2, paymentTransactionNCount: 1],
+                ShopifyOrderPaymentSignal.summarize([[hasPaymentTransaction: "Y"], [hasPaymentTransaction: "N"], [hasPaymentTransaction: "Y"]]))
+    }
+
+    @Test
+    void aNonEmptyExtractWithNoPaidOrderRaisesTheCanary() {
+        // Review I3: under the one-directional rule a missing signal reads clean forever. P0 baseline is ~90% Y.
+        String warning = ShopifyOrderPaymentSignal.canaryWarning([paymentTransactionYCount: 0, paymentTransactionNCount: 40])
+        org.junit.jupiter.api.Assertions.assertNotNull(warning)
+        org.junit.jupiter.api.Assertions.assertTrue(warning.contains("hasPaymentTransaction"))
+    }
+
+    @Test
+    void noCanaryOnAnEmptyOrMixedExtract() {
+        assertEquals(null, ShopifyOrderPaymentSignal.canaryWarning([paymentTransactionYCount: 0, paymentTransactionNCount: 0]))
+        assertEquals(null, ShopifyOrderPaymentSignal.canaryWarning([paymentTransactionYCount: 3, paymentTransactionNCount: 40]))
+    }
+
+    @Test
+    void theOrderExtractReportsTheCountsAndTheCanary() {
+        String script = new File(System.getProperty("user.dir"),
+                "src/main/groovy/shopify/reconciliation/automation/extractShopifyOrders.groovy").getText("UTF-8")
+        org.junit.jupiter.api.Assertions.assertTrue(script.contains("ShopifyOrderPaymentSignal.summarize("))
+        org.junit.jupiter.api.Assertions.assertTrue(script.contains("ShopifyOrderPaymentSignal.canaryWarning("))
+    }
 }

@@ -224,6 +224,10 @@ if (excludedCollector && ((excludedCollector.total ?: 0) as int) > 0) {
         outputWarnings.add("Excluded-records sidecar not written: ${sidecarError.message}".toString())
     }
 }
+// DAR-BE-064 canary: the presence OPP rule (<=) cannot see a missing signal, so report it here.
+Map paymentSummary = ShopifyOrderPaymentSignal.summarize(records)
+String paymentCanary = ShopifyOrderPaymentSignal.canaryWarning(paymentSummary)
+if (paymentCanary) outputWarnings.add(paymentCanary)
 recordCount = records.size()
 dataAvailable = records.size() > 0
 requestMetadata = [
@@ -252,6 +256,8 @@ requestMetadata = [
         rawJsonlLocation      : rawJsonlLocation,
         extractedRecordCount  : extractedRecordCount,
         keptRecordCount       : records.size(),
+        paymentTransactionYCount: paymentSummary.paymentTransactionYCount,
+        paymentTransactionNCount: paymentSummary.paymentTransactionNCount,
         // Absent (not an empty block) when no rules are configured, matching the line-units extract.
         filters               : filteredOrders.configuredExclusions != null ?
                 [configuredExclusions: filteredOrders.configuredExclusions] : null,

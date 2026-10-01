@@ -17,4 +17,26 @@ class ShopifyOrderPaymentSignal {
         }
         return paid ? "Y" : "N"
     }
+
+    /** Y/N counts over an extract's records, for requestMetadata. */
+    static Map<String, Integer> summarize(List records) {
+        int y = 0, n = 0
+        (records ?: []).each { Object r ->
+            if (r instanceof Map && ((Map) r).get("hasPaymentTransaction") == "Y") y++ else n++
+        }
+        return [paymentTransactionYCount: y, paymentTransactionNCount: n]
+    }
+
+    /**
+     * Canary (review I3). The presence OPP rule is one-directional (<=), so a Shopify side whose signal
+     * went missing — every order N — would read clean forever. A non-empty extract with no paid order is
+     * the symptom: gorjana's baseline is ~90% Y.
+     */
+    static String canaryWarning(Map summary) {
+        int y = (summary?.paymentTransactionYCount ?: 0) as int
+        int n = (summary?.paymentTransactionNCount ?: 0) as int
+        if (n == 0 || y > 0) return null
+        return "No order in this Shopify extract has hasPaymentTransaction=Y (${n} orders). The transactions " +
+                "selection may not have come back; the presence OPP rule cannot fire on this run."
+    }
 }
