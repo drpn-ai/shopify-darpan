@@ -432,6 +432,7 @@
             <parameter name="ok" type="Boolean"/>
             <parameter name="foundIds" type="List"/>
             <parameter name="missingIds" type="List"/>
+            <parameter name="unresolvedIds" type="List"/>
             <parameter name="errors" type="List"/>
         </out-parameters>
     </service>

@@ -8,6 +8,7 @@ String companyUserGroupIdValue = ValueSupport.normalize(companyUserGroupId)
 ok = false
 foundIds = []
 missingIds = []
+unresolvedIds = []
 errors = []
 
 if (!configIdValue) {
@@ -38,4 +39,5 @@ Map<String, Object> result = ShopifyRefundOrReturnLookupSupport.lookupRefundOrRe
 ok = result.ok
 foundIds = result.foundIds
 missingIds = result.missingIds
+unresolvedIds = result.unresolvedIds ?: []
 errors = result.errors
