@@ -141,7 +141,7 @@ class ShopifySourceCatalog {
      */
     private static final Map<String, Object> ORDER_RETURN_REFS_SOURCE = [
         sourceDefinitionId       : SHOPIFY_ORDER_RETURN_REFS,
-        label                    : "Shopify Order Return References",
+        label                    : "Shopify returns",
         description              : "Per-order Shopify refund ids and return ids for returns reconciliation.",
         requiredEndpointSystemEnumId: "SHOPIFY_RETURN_REFS",
         queryRoot                : "orders",
@@ -324,7 +324,7 @@ class ShopifySourceCatalog {
      */
     private static final Map<String, Object> ORDER_LINE_UNITS_SOURCE = [
         sourceDefinitionId          : SHOPIFY_ORDER_LINE_UNITS,
-        label                       : "Shopify Order Line Units",
+        label                       : "Shopify order lines",
         description                 : "One record per Shopify order line UNIT for order-line presence reconciliation.",
         requiredEndpointSystemEnumId: "SHOPIFY_ORDER_LINE_UNITS",
         queryRoot                   : "orders",
