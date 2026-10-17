@@ -183,6 +183,18 @@ class ShopifyAuthConfigSupport {
         return config
     }
 
+    /**
+     * The three fields of a resolved config the GraphQL transport needs, for the extract and lookup
+     * script services; nothing else of the config is handed on.
+     */
+    static Map<String, Object> transportConfig(def authConfig) {
+        return [
+                shopApiUrl : authConfig.shopApiUrl,
+                apiVersion : authConfig.apiVersion,
+                accessToken: authConfig.accessToken,
+        ]
+    }
+
     static Map<String, Object> listAuthConfigs(def ec, Object query, Object pageIndex, Object pageSize) {
         int page = Math.max(0, ValueSupport.normalizeInt(pageIndex, 0))
         int size = Math.max(1, Math.min(200, ValueSupport.normalizeInt(pageSize, 20)))

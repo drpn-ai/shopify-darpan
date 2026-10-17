@@ -1,0 +1,123 @@
+{
+    "result": {
+        "requestMetadata": {
+            "sourceType": "SHOPIFY_GRAPHQL_ORDERS",
+            "extractionMode": "BULK_OPERATION_DATE_FILTER",
+            "graphqlExecutionMode": "BULK_OPERATION",
+            "shopifyAuthConfigId": "CFG_CHAR",
+            "automationId": "AUTO_1",
+            "fileSide": "FILE_1",
+            "systemEnumId": "SHOPIFY",
+            "sourceTypeEnumId": "API",
+            "sourceTimeZone": "UTC",
+            "calendarDateNormalized": false,
+            "exactWindowPreserved": true,
+            "filterFields": [
+                "created_at"
+            ],
+            "searchQueries": [
+                "created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'"
+            ],
+            "windowStartUtc": "2026-08-01T00:00:00Z",
+            "windowEndUtc": "2026-08-02T00:00:00Z",
+            "bulkOperation": {
+                "id": "gid://shopify/BulkOperation/1",
+                "status": "COMPLETED",
+                "objectCount": 3
+            },
+            "bulkPollCount": 2,
+            "bulkStatusHistory": [
+                {
+                    "status": "CREATED"
+                },
+                {
+                    "status": "RUNNING"
+                },
+                {
+                    "status": "COMPLETED"
+                }
+            ],
+            "bulkStartRetryCount": 1,
+            "bulkStartRetryHistory": [
+                {
+                    "attempt": 1,
+                    "errors": [
+                        "A bulk query operation for this app and shop is already in progress"
+                    ]
+                }
+            ],
+            "bulkJsonlLineCount": 3,
+            "rawJsonlFileName": "shopify-orders-1785542400000-1785628800000.jsonl",
+            "rawJsonlLocation": "runtime://tmp/shopify-characterization/extract/orders-happy/shopify-orders-1785542400000-1785628800000.jsonl",
+            "extractedRecordCount": 3,
+            "keptRecordCount": 2,
+            "paymentTransactionYCount": 1,
+            "paymentTransactionNCount": 1,
+            "filters": {
+                "configuredExclusions": [
+                    {
+                        "sequenceNum": 1,
+                        "fieldExpression": "displayFinancialStatus",
+                        "operator": "EXCLUDE_IN",
+                        "values": [
+                            "VOIDED"
+                        ],
+                        "excludedCount": 1,
+                        "fieldAbsentCount": 0
+                    }
+                ]
+            }
+        },
+        "fileName": "shopify-orders-1785542400000-1785628800000.json",
+        "fileTypeEnumId": "DftJson",
+        "recordCount": 2,
+        "warnings": [
+            
+        ],
+        "dataAvailable": true,
+        "fileLocation": "runtime://tmp/shopify-characterization/extract/orders-happy/shopify-orders-1785542400000-1785628800000.json",
+        "errors": [
+            
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY"
+            }
+        }
+    ],
+    "bulkCalls": [
+        {
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "queryDocument": "query DarpanShopifyOrdersByDateWindow {\n  orders(query: \"created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'\", sortKey: CREATED_AT) {\n    edges {\n      node {\n        cancelledAt\n        createdAt\n        currencyCode\n        currentTotalPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        currentTotalTaxSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        displayFinancialStatus\n        displayFulfillmentStatus\n        email\n        id\n        legacyResourceId\n        name\n        processedAt\n        requiresShipping\n        sourceName\n        subtotalPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        totalPrice\n        totalPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        transactions {\n          gateway\n          kind\n          status\n        }\n        updatedAt\n      }\n    }\n  }\n}",
+            "options": {
+                "connectTimeoutMillis": 30000,
+                "readTimeoutMillis": 60000,
+                "maxAttempts": 2,
+                "maxPollAttempts": 60,
+                "pollIntervalMillis": 5000,
+                "startRetryAttempts": 10,
+                "startRetryDelayMillis": 120000
+            }
+        }
+    ],
+    "returnRefsCalls": [
+        
+    ],
+    "files": {
+        "shopify-orders-1785542400000-1785628800000.excluded.json": "{\"sourceFileName\":\"shopify-orders-1785542400000-1785628800000.json\",\"truncated\":false,\"total\":1,\"records\":[{\"id\":\"1003\",\"name\":\"#1003\",\"displayFinancialStatus\":\"VOIDED\",\"transactions\":[{\"kind\":\"AUTHORIZATION\",\"status\":\"SUCCESS\",\"gateway\":\"manual\"}],\"shopifyGid\":\"gid://shopify/Order/1003\",\"legacyResourceId\":\"1003\",\"hasPaymentTransaction\":\"Y\",\"_excludedBy\":\"1:displayFinancialStatus\"}]}",
+        "shopify-orders-1785542400000-1785628800000.json": "{\"metadata\":{\"sourceType\":\"SHOPIFY_GRAPHQL_ORDERS\",\"extractionMode\":\"BULK_OPERATION_DATE_FILTER\",\"graphqlExecutionMode\":\"BULK_OPERATION\",\"shopifyAuthConfigId\":\"CFG_CHAR\",\"automationId\":\"AUTO_1\",\"fileSide\":\"FILE_1\",\"systemEnumId\":\"SHOPIFY\",\"sourceTypeEnumId\":\"API\",\"sourceTimeZone\":\"UTC\",\"calendarDateNormalized\":false,\"exactWindowPreserved\":true,\"filterFields\":[\"created_at\"],\"searchQueries\":[\"created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'\"],\"windowStartUtc\":\"2026-08-01T00:00:00Z\",\"windowEndUtc\":\"2026-08-02T00:00:00Z\",\"bulkOperation\":{\"id\":\"gid://shopify/BulkOperation/1\",\"status\":\"COMPLETED\",\"objectCount\":3},\"bulkPollCount\":2,\"bulkStatusHistory\":[{\"status\":\"CREATED\"},{\"status\":\"RUNNING\"},{\"status\":\"COMPLETED\"}],\"bulkStartRetryCount\":1,\"bulkStartRetryHistory\":[{\"attempt\":1,\"errors\":[\"A bulk query operation for this app and shop is already in progress\"]}],\"bulkJsonlLineCount\":3,\"rawJsonlFileName\":\"shopify-orders-1785542400000-1785628800000.jsonl\",\"rawJsonlLocation\":\"runtime://tmp/shopify-characterization/extract/orders-happy/shopify-orders-1785542400000-1785628800000.jsonl\",\"extractedRecordCount\":3,\"keptRecordCount\":2,\"paymentTransactionYCount\":1,\"paymentTransactionNCount\":1,\"filters\":{\"configuredExclusions\":[{\"sequenceNum\":1,\"fieldExpression\":\"displayFinancialStatus\",\"operator\":\"EXCLUDE_IN\",\"values\":[\"VOIDED\"],\"excludedCount\":1,\"fieldAbsentCount\":0}]}},\"records\":[{\"id\":\"1001\",\"name\":\"#1001\",\"displayFinancialStatus\":\"PAID\",\"transactions\":[{\"kind\":\"SALE\",\"status\":\"SUCCESS\",\"gateway\":\"shopify_payments\"}],\"shopifyGid\":\"gid://shopify/Order/1001\",\"legacyResourceId\":\"1001\",\"hasPaymentTransaction\":\"Y\"},{\"id\":\"1002\",\"legacyResourceId\":\"1002\",\"name\":\"#1002\",\"displayFinancialStatus\":\"PENDING\",\"transactions\":[],\"shopifyGid\":\"gid://shopify/Order/1002\",\"hasPaymentTransaction\":\"N\"}]}",
+        "shopify-orders-1785542400000-1785628800000.jsonl": "{\"id\":\"gid://shopify/Order/1001\"}\n{\"id\":\"gid://shopify/Order/1002\"}\n{\"id\":\"gid://shopify/Order/1003\"}\n"
+    }
+}

@@ -1,0 +1,55 @@
+{
+    "result": {
+        "requestMetadata": {
+            "sourceType": "X"
+        },
+        "recordCount": 0,
+        "warnings": [
+            "partial page"
+        ],
+        "dataAvailable": false,
+        "errors": [
+            "Shopify GraphQL throttled"
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY_RETURN_REFS"
+            }
+        }
+    ],
+    "bulkCalls": [
+        
+    ],
+    "returnRefsCalls": [
+        {
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "windowStart": "2026-08-01T00:00:00Z",
+            "windowEnd": "2026-08-02T00:00:00Z",
+            "options": {
+                "pageSize": 100,
+                "connectionPageSize": 50,
+                "lookbackHours": 3,
+                "sourceFilters": null,
+                "connectTimeoutMillis": 30000,
+                "readTimeoutMillis": 60000,
+                "maxAttempts": 2
+            },
+            "executorPassed": false
+        }
+    ],
+    "files": {
+        
+    }
+}

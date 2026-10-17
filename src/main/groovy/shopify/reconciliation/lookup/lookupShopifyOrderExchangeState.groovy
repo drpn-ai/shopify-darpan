@@ -1,39 +1,19 @@
-import darpan.common.ValueSupport
-import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.reconciliation.lookup.ShopifyExchangeStateLookupSupport
-
-String configIdValue = ValueSupport.normalize(shopifyAuthConfigId)
-String companyUserGroupIdValue = ValueSupport.normalize(companyUserGroupId)
+import shopify.reconciliation.lookup.ShopifyLookupScriptSupport
 
 ok = false
 statesByOrderId = [:]
 errors = []
 lineItemsShape = null
 
-if (!configIdValue) {
-    errors = ["Shopify auth config ID is required."]
+Map<String, Object> resolved = ShopifyLookupScriptSupport.resolveConnection(ec, shopifyAuthConfigId, companyUserGroupId)
+if (resolved.failed) {
+    errors = resolved.errors
     return
 }
 
-def authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configIdValue, [
-        disableAuthz                : true,
-        companyUserGroupId          : companyUserGroupIdValue,
-        requiredEndpointSystemEnumId: "SHOPIFY",
-])
-if (ec.message.hasError()) {
-    errors = (ec.message.getErrors() ?: []) as List<String>
-    return
-}
-
-Map<String, Object> result = ShopifyExchangeStateLookupSupport.lookupExchangeState([
-        shopApiUrl : authConfig.shopApiUrl,
-        apiVersion : authConfig.apiVersion,
-        accessToken: authConfig.accessToken,
-], (List) orderIds, [
-        connectTimeoutMillis: connectTimeoutMillis,
-        readTimeoutMillis   : readTimeoutMillis,
-        maxAttempts         : maxAttempts,
-])
+Map<String, Object> result = ShopifyExchangeStateLookupSupport.lookupExchangeState((Map) resolved.connection,
+        (List) orderIds, ShopifyLookupScriptSupport.transportOptions(context))
 
 ok = result.ok
 statesByOrderId = result.statesByOrderId

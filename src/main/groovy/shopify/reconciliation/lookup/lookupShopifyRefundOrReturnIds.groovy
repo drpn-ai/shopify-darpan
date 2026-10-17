@@ -1,9 +1,5 @@
-import darpan.common.ValueSupport
-import shopify.facade.settings.ShopifyAuthConfigSupport
+import shopify.reconciliation.lookup.ShopifyLookupScriptSupport
 import shopify.reconciliation.lookup.ShopifyRefundOrReturnLookupSupport
-
-String configIdValue = ValueSupport.normalize(shopifyAuthConfigId)
-String companyUserGroupIdValue = ValueSupport.normalize(companyUserGroupId)
 
 ok = false
 foundIds = []
@@ -11,30 +7,14 @@ missingIds = []
 unresolvedIds = []
 errors = []
 
-if (!configIdValue) {
-    errors = ["Shopify auth config ID is required."]
+Map<String, Object> resolved = ShopifyLookupScriptSupport.resolveConnection(ec, shopifyAuthConfigId, companyUserGroupId)
+if (resolved.failed) {
+    errors = resolved.errors
     return
 }
 
-def authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configIdValue, [
-        disableAuthz                : true,
-        companyUserGroupId          : companyUserGroupIdValue,
-        requiredEndpointSystemEnumId: "SHOPIFY",
-])
-if (ec.message.hasError()) {
-    errors = (ec.message.getErrors() ?: []) as List<String>
-    return
-}
-
-Map<String, Object> result = ShopifyRefundOrReturnLookupSupport.lookupRefundOrReturnIds([
-        shopApiUrl : authConfig.shopApiUrl,
-        apiVersion : authConfig.apiVersion,
-        accessToken: authConfig.accessToken,
-], (List<Object>) refundOrReturnIds, [
-        connectTimeoutMillis: connectTimeoutMillis,
-        readTimeoutMillis   : readTimeoutMillis,
-        maxAttempts         : maxAttempts,
-])
+Map<String, Object> result = ShopifyRefundOrReturnLookupSupport.lookupRefundOrReturnIds((Map) resolved.connection,
+        (List<Object>) refundOrReturnIds, ShopifyLookupScriptSupport.transportOptions(context))
 
 ok = result.ok
 foundIds = result.foundIds

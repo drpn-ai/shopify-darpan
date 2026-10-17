@@ -1,0 +1,62 @@
+{
+    "result": {
+        "requestMetadata": {
+            "sourceType": "SHOPIFY_GRAPHQL_ORDER_RETURN_REFS",
+            "pageCount": 1,
+            "filters": {
+                "closedUnrefundedReturnsSuppressed": 0
+            }
+        },
+        "fileName": "shopify-return-refs-1785542400000-1785628800000.json",
+        "fileTypeEnumId": "DftJson",
+        "recordCount": 2,
+        "warnings": [
+            "Order 1003 had more refunds than the connection page size."
+        ],
+        "dataAvailable": true,
+        "fileLocation": "runtime://tmp/test-data-manager/shopify-extract-characterization/reconciliation-runs/EXEC_RR_1/<RUN_TIMESTAMP>/shopify-return-refs-1785542400000-1785628800000.json",
+        "errors": [
+            
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY_RETURN_REFS"
+            }
+        }
+    ],
+    "bulkCalls": [
+        
+    ],
+    "returnRefsCalls": [
+        {
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "windowStart": "2026-08-01T00:00:00Z",
+            "windowEnd": "2026-08-02T00:00:00Z",
+            "options": {
+                "pageSize": 100,
+                "connectionPageSize": 50,
+                "lookbackHours": 3,
+                "sourceFilters": null,
+                "connectTimeoutMillis": 30000,
+                "readTimeoutMillis": 60000,
+                "maxAttempts": 2
+            },
+            "executorPassed": false
+        }
+    ],
+    "files": {
+        "shopify-return-refs-1785542400000-1785628800000.json": "{\"records\":[{\"refundOrReturnId\":\"9001\",\"refundOrReturnType\":\"REFUND\",\"orderId\":\"1001\",\"createdAt\":\"2026-08-01T05:00:00Z\"},{\"refundOrReturnId\":\"8001\",\"refundOrReturnType\":\"RETURN\",\"orderId\":\"1002\",\"createdAt\":\"2026-08-01T06:00:00Z\"}],\"metadata\":{\"sourceType\":\"SHOPIFY_GRAPHQL_ORDER_RETURN_REFS\",\"pageCount\":1,\"filters\":{\"closedUnrefundedReturnsSuppressed\":0}}}"
+    }
+}

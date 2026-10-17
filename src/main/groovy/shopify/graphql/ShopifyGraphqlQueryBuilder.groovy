@@ -14,16 +14,10 @@ class ShopifyGraphqlQueryBuilder {
     static final String DEFAULT_SOURCE_DEFINITION_ID = ShopifySourceCatalog.SHOPIFY_ORDERS
 
     static Map<String, Object> buildQuery(Map<String, Object> requirements) {
-        String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
-        String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
-        Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
-        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
-
-        List<String> selectedFieldPaths = resolveSelectedFieldPaths(source, requirements?.selectedFieldPaths as Collection)
-        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
-        if (invalidFields) {
-            throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
-        }
+        Map<String, Object> resolved = resolveSourceSelection(requirements, false)
+        Map<String, Object> source = (Map<String, Object>) resolved.source
+        Map<String, Map<String, Object>> fieldsByPath = (Map<String, Map<String, Object>>) resolved.fieldsByPath
+        List<String> selectedFieldPaths = (List<String>) resolved.selectedFieldPaths
 
         Map<String, Object> filters = normalizeFilters(source, requirements?.filters as Map)
         Integer pageSize = clampPageSize(requirements?.pageSize, source.defaultPageSize as Integer, source.maxPageSize as Integer)
@@ -63,6 +57,31 @@ class ShopifyGraphqlQueryBuilder {
         ]
     }
 
+    /**
+     * The opening every builder shares: resolve the catalog source for the requested id and API
+     * version, then the field selection (required fields first, then the requested ones or the
+     * source's defaults), rejecting any path the source does not define. Bulk documents fall back to
+     * defaultBulkSelectedFieldPaths when the source declares one.
+     *
+     * @return [source, fieldsByPath, selectedFieldPaths]
+     */
+    private static Map<String, Object> resolveSourceSelection(Map<String, Object> requirements, boolean bulkDefaults) {
+        String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
+        String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
+        Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
+        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
+
+        List defaultFieldPaths = (bulkDefaults ?
+                (source.defaultBulkSelectedFieldPaths ?: source.defaultSelectedFieldPaths) :
+                source.defaultSelectedFieldPaths) as List
+        List<String> selectedFieldPaths = resolveFieldPaths(source, requirements?.selectedFieldPaths as Collection, defaultFieldPaths)
+        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
+        if (invalidFields) {
+            throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
+        }
+        return [source: source, fieldsByPath: fieldsByPath, selectedFieldPaths: selectedFieldPaths]
+    }
+
     static List<String> resolveSelectedFieldPaths(Map<String, Object> source, Collection requestedFieldPaths) {
         return resolveFieldPaths(source, requestedFieldPaths, source.defaultSelectedFieldPaths as List)
     }
@@ -85,17 +104,10 @@ class ShopifyGraphqlQueryBuilder {
      * Shopify streams the complete result set to JSONL.
      */
     static Map<String, Object> buildBulkQuery(Map<String, Object> requirements) {
-        String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
-        String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
-        Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
-        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
-
-        List<String> selectedFieldPaths = resolveFieldPaths(source, requirements?.selectedFieldPaths as Collection,
-                (source.defaultBulkSelectedFieldPaths ?: source.defaultSelectedFieldPaths) as List)
-        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
-        if (invalidFields) {
-            throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
-        }
+        Map<String, Object> resolved = resolveSourceSelection(requirements, true)
+        Map<String, Object> source = (Map<String, Object>) resolved.source
+        Map<String, Map<String, Object>> fieldsByPath = (Map<String, Map<String, Object>>) resolved.fieldsByPath
+        List<String> selectedFieldPaths = (List<String>) resolved.selectedFieldPaths
         // Bulk JSONL returns nested-connection children as separate __parentId lines that the order
         // record parser would misread as orders, so connection-bearing fields are rejected here.
         //
@@ -254,16 +266,10 @@ class ShopifyGraphqlQueryBuilder {
      * no page and no order.</p>
      */
     static Map<String, Object> buildNodesQuery(Map<String, Object> requirements) {
-        String sourceDefinitionId = ShopifySourceCatalog.normalizeSourceDefinitionId(requirements?.sourceDefinitionId) ?: DEFAULT_SOURCE_DEFINITION_ID
-        String apiVersion = ShopifySourceCatalog.normalizeApiVersion(requirements?.apiVersion)
-        Map<String, Object> source = ShopifySourceCatalog.requireSource(sourceDefinitionId, apiVersion)
-        Map<String, Map<String, Object>> fieldsByPath = ShopifySourceCatalog.fieldsByPath(source)
-
-        List<String> selectedFieldPaths = resolveSelectedFieldPaths(source, requirements?.selectedFieldPaths as Collection)
-        List<String> invalidFields = selectedFieldPaths.findAll { String fieldPath -> !fieldsByPath.containsKey(fieldPath) }
-        if (invalidFields) {
-            throw new IllegalArgumentException("Unsupported Shopify field path(s) for ${source.sourceDefinitionId}: ${invalidFields.join(', ')}.")
-        }
+        Map<String, Object> resolved = resolveSourceSelection(requirements, false)
+        Map<String, Object> source = (Map<String, Object>) resolved.source
+        Map<String, Map<String, Object>> fieldsByPath = (Map<String, Map<String, Object>>) resolved.fieldsByPath
+        List<String> selectedFieldPaths = (List<String>) resolved.selectedFieldPaths
         String nodeType = normalize(source.nodeType)
         if (!nodeType) {
             throw new IllegalArgumentException("Source ${source.sourceDefinitionId} declares no nodeType; nodes(ids:) needs a concrete type to fragment on.")

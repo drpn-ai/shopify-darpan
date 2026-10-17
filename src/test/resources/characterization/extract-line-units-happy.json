@@ -1,0 +1,109 @@
+{
+    "result": {
+        "requestMetadata": {
+            "sourceType": "SHOPIFY_GRAPHQL_ORDER_LINE_UNITS",
+            "extractionMode": "BULK_OPERATION_DATE_FILTER",
+            "graphqlExecutionMode": "BULK_OPERATION",
+            "shopifyAuthConfigId": "CFG_CHAR",
+            "automationId": "AUTO_2",
+            "fileSide": "FILE_2",
+            "systemEnumId": "SHOPIFY_ORDER_LINE_UNITS",
+            "sourceTypeEnumId": "API",
+            "sourceTimeZone": "UTC",
+            "calendarDateNormalized": false,
+            "exactWindowPreserved": true,
+            "filterFields": [
+                "created_at"
+            ],
+            "searchQueries": [
+                "created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'"
+            ],
+            "windowStartUtc": "2026-08-01T00:00:00Z",
+            "windowEndUtc": "2026-08-02T00:00:00Z",
+            "bulkOperation": {
+                "id": "gid://shopify/BulkOperation/2",
+                "status": "COMPLETED"
+            },
+            "bulkPollCount": 1,
+            "bulkStatusHistory": [
+                {
+                    "status": "COMPLETED"
+                }
+            ],
+            "bulkJsonlLineCount": 6,
+            "rawJsonlFileName": "units.jsonl",
+            "rawJsonlLocation": "runtime://tmp/shopify-characterization/extract/line-units-happy/units.jsonl",
+            "extractedRecordCount": 4,
+            "orphanLineItemCount": 1,
+            "droppedZeroQuantity": 1,
+            "unknownStateLineCount": 1,
+            "clampedStateLineCount": 1,
+            "filters": {
+                "configuredExclusions": [
+                    {
+                        "sequenceNum": 1,
+                        "fieldExpression": "unitState",
+                        "operator": "EXCLUDE_IN",
+                        "values": [
+                            "REMOVED"
+                        ],
+                        "excludedCount": 1,
+                        "fieldAbsentCount": 0
+                    }
+                ]
+            }
+        },
+        "fileName": "units.json",
+        "fileTypeEnumId": "DftJson",
+        "recordCount": 4,
+        "warnings": [
+            "1 line item(s) had no parent order in the bulk JSONL and were not compared.",
+            "1 line item(s) had no current or unfulfilled quantity; their units carry unitState UNKNOWN."
+        ],
+        "dataAvailable": true,
+        "fileLocation": "runtime://tmp/shopify-characterization/extract/line-units-happy/units.json",
+        "errors": [
+            
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY_ORDER_LINE_UNITS"
+            }
+        }
+    ],
+    "bulkCalls": [
+        {
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "queryDocument": "query DarpanShopifyOrderLineUnitsByDateWindow {\n  orders(query: \"created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'\", sortKey: CREATED_AT) {\n    edges {\n      node {\n        createdAt\n        id\n        legacyResourceId\n        lineItems {\n          edges {\n            node {\n              currentQuantity\n              id\n              name\n              quantity\n              sku\n              unfulfilledQuantity\n            }\n          }\n        }\n        name\n        returnStatus\n        sourceName\n      }\n    }\n  }\n}",
+            "options": {
+                "connectTimeoutMillis": 30000,
+                "readTimeoutMillis": 60000,
+                "maxAttempts": 2,
+                "maxPollAttempts": 60,
+                "pollIntervalMillis": 5000,
+                "startRetryAttempts": 10,
+                "startRetryDelayMillis": 120000
+            }
+        }
+    ],
+    "returnRefsCalls": [
+        
+    ],
+    "files": {
+        "units.excluded.json": "{\"sourceFileName\":\"units.json\",\"truncated\":false,\"total\":1,\"records\":[{\"shopifyOrderId\":\"2001\",\"shopifyLineId\":\"31\",\"unitOrdinal\":3,\"shopifyOrderName\":\"#2001\",\"sku\":\"SKU-A\",\"lineItemName\":\"Alpha\",\"unitState\":\"REMOVED\",\"stateOrdinal\":1,\"orderReturnStatus\":\"NO_RETURN\",\"orderSourceName\":\"web\",\"_excludedBy\":\"1:unitState\"}]}",
+        "units.json": "{\"metadata\":{\"sourceType\":\"SHOPIFY_GRAPHQL_ORDER_LINE_UNITS\",\"extractionMode\":\"BULK_OPERATION_DATE_FILTER\",\"graphqlExecutionMode\":\"BULK_OPERATION\",\"shopifyAuthConfigId\":\"CFG_CHAR\",\"automationId\":\"AUTO_2\",\"fileSide\":\"FILE_2\",\"systemEnumId\":\"SHOPIFY_ORDER_LINE_UNITS\",\"sourceTypeEnumId\":\"API\",\"sourceTimeZone\":\"UTC\",\"calendarDateNormalized\":false,\"exactWindowPreserved\":true,\"filterFields\":[\"created_at\"],\"searchQueries\":[\"created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'\"],\"windowStartUtc\":\"2026-08-01T00:00:00Z\",\"windowEndUtc\":\"2026-08-02T00:00:00Z\",\"bulkOperation\":{\"id\":\"gid://shopify/BulkOperation/2\",\"status\":\"COMPLETED\"},\"bulkPollCount\":1,\"bulkStatusHistory\":[{\"status\":\"COMPLETED\"}],\"bulkJsonlLineCount\":6,\"rawJsonlFileName\":\"units.jsonl\",\"rawJsonlLocation\":\"runtime://tmp/shopify-characterization/extract/line-units-happy/units.jsonl\",\"extractedRecordCount\":4,\"orphanLineItemCount\":1,\"droppedZeroQuantity\":1,\"unknownStateLineCount\":1,\"clampedStateLineCount\":1,\"filters\":{\"configuredExclusions\":[{\"sequenceNum\":1,\"fieldExpression\":\"unitState\",\"operator\":\"EXCLUDE_IN\",\"values\":[\"REMOVED\"],\"excludedCount\":1,\"fieldAbsentCount\":0}]}},\"records\":[{\"shopifyOrderId\":\"2001\",\"shopifyLineId\":\"31\",\"unitOrdinal\":1,\"shopifyOrderName\":\"#2001\",\"sku\":\"SKU-A\",\"lineItemName\":\"Alpha\",\"unitState\":\"OPEN\",\"stateOrdinal\":1,\"orderReturnStatus\":\"NO_RETURN\",\"orderSourceName\":\"web\"},{\"shopifyOrderId\":\"2001\",\"shopifyLineId\":\"31\",\"unitOrdinal\":2,\"shopifyOrderName\":\"#2001\",\"sku\":\"SKU-A\",\"lineItemName\":\"Alpha\",\"unitState\":\"FULFILLED\",\"stateOrdinal\":1,\"orderReturnStatus\":\"NO_RETURN\",\"orderSourceName\":\"web\"},{\"shopifyOrderId\":\"2001\",\"shopifyLineId\":\"33\",\"unitOrdinal\":1,\"shopifyOrderName\":\"#2001\",\"sku\":\"SKU-U\",\"lineItemName\":\"Unknown\",\"unitState\":\"UNKNOWN\",\"stateOrdinal\":1,\"orderReturnStatus\":\"NO_RETURN\",\"orderSourceName\":\"web\"},{\"shopifyOrderId\":\"2001\",\"shopifyLineId\":\"35\",\"unitOrdinal\":1,\"shopifyOrderName\":\"#2001\",\"sku\":\"SKU-C\",\"lineItemName\":\"Clamped\",\"unitState\":\"OPEN\",\"stateOrdinal\":1,\"orderReturnStatus\":\"NO_RETURN\",\"orderSourceName\":\"web\"}]}",
+        "units.jsonl": "{\"id\":\"gid://shopify/Order/2001\"}\n{\"id\":\"gid://shopify/LineItem/31\"}\n"
+    }
+}

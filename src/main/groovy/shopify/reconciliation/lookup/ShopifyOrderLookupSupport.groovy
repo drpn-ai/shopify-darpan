@@ -37,15 +37,10 @@ class ShopifyOrderLookupSupport {
             if (errors) return
             Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig, NODES_QUERY, [ids: chunk], options ?: [:])
             if (!result.ok) {
-                List resultErrors = result.errors instanceof List ? (List) result.errors : []
-                errors.addAll(resultErrors ? resultErrors.collect { it?.toString() } : ["Shopify order lookup failed."])
+                errors.addAll(failureErrors(result, "Shopify order lookup failed."))
                 return
             }
-            Object nodes = result.data instanceof Map ? ((Map) result.data).nodes : null
-            (nodes instanceof List ? (List) nodes : []).each { Object node ->
-                String gid = node instanceof Map ? ValueSupport.normalize(((Map) node).id) : null
-                if (gid) foundGids.add(gid)
-            }
+            collectNodeGids(result, foundGids)
         }
         if (errors) return [ok: false, foundIds: [], missingIds: [], errors: errors]
 
@@ -55,5 +50,23 @@ class ShopifyOrderLookupSupport {
             (foundGids.contains(gid) ? foundIds : missingIds).add(rawId)
         }
         return [ok: true, foundIds: foundIds, missingIds: missingIds, errors: []]
+    }
+
+    /** A failed nodes(ids:) call's errors as text, or {@code fallback} when it carried none. Shared
+     *  with {@link ShopifyRefundOrReturnLookupSupport}. */
+    static List<String> failureErrors(Map<String, Object> result, String fallback) {
+        List resultErrors = result.errors instanceof List ? (List) result.errors : []
+        return resultErrors ? resultErrors.collect { it?.toString() } : [fallback]
+    }
+
+    /** Adds the id of every node a nodes(ids:) call returned. An id that did not resolve comes back
+     *  as a null node and is skipped, which is what makes it missing. Shared with
+     *  {@link ShopifyRefundOrReturnLookupSupport}. */
+    static void collectNodeGids(Map<String, Object> result, Set<String> foundGids) {
+        Object nodes = result.data instanceof Map ? ((Map) result.data).nodes : null
+        (nodes instanceof List ? (List) nodes : []).each { Object node ->
+            String gid = node instanceof Map ? ValueSupport.normalize(((Map) node).id) : null
+            if (gid) foundGids.add(gid)
+        }
     }
 }

@@ -1,0 +1,27 @@
+{
+    "result": {
+        "statesByOrderId": {
+            
+        },
+        "ok": false,
+        "errors": [
+            "Shopify auth config 'CFG_CHAR' was not found."
+        ]
+    },
+    "ecErrors": [
+        "Shopify auth config 'CFG_CHAR' was not found."
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY"
+            }
+        }
+    ],
+    "supportCalls": [
+        
+    ]
+}

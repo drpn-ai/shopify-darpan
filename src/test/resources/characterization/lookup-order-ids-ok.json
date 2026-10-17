@@ -1,0 +1,46 @@
+{
+    "result": {
+        "missingIds": [
+            "2"
+        ],
+        "foundIds": [
+            "1"
+        ],
+        "ok": true,
+        "errors": [
+            
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY"
+            }
+        }
+    ],
+    "supportCalls": [
+        {
+            "method": "lookupOrderIds",
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "ids": [
+                "1",
+                "gid://shopify/Order/2"
+            ],
+            "options": {
+                "connectTimeoutMillis": 30000,
+                "readTimeoutMillis": 60000,
+                "maxAttempts": 2
+            }
+        }
+    ]
+}

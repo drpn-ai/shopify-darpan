@@ -1,0 +1,34 @@
+{
+    "result": {
+        "recordCount": 0,
+        "warnings": [
+            
+        ],
+        "dataAvailable": false,
+        "errors": [
+            "Source filter 1 uses unsupported operator 'NOPE'."
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY_ORDER_LINE_UNITS"
+            }
+        }
+    ],
+    "bulkCalls": [
+        
+    ],
+    "returnRefsCalls": [
+        
+    ],
+    "files": {
+        
+    }
+}

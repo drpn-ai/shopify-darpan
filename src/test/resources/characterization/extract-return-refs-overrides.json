@@ -1,0 +1,65 @@
+{
+    "result": {
+        "requestMetadata": {
+            
+        },
+        "fileName": "escape.json",
+        "fileTypeEnumId": "DftJson",
+        "recordCount": 0,
+        "warnings": [
+            
+        ],
+        "dataAvailable": false,
+        "fileLocation": "runtime://tmp/shopify-characterization/extract/return-refs-overrides/escape.json",
+        "errors": [
+            
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY_RETURN_REFS"
+            }
+        }
+    ],
+    "bulkCalls": [
+        
+    ],
+    "returnRefsCalls": [
+        {
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "windowStart": "2026-08-01T05:00:00Z",
+            "windowEnd": "2026-08-02T05:00:00Z",
+            "options": {
+                "pageSize": 25,
+                "connectionPageSize": 10,
+                "lookbackHours": 6,
+                "sourceFilters": [
+                    {
+                        "sequenceNum": 1,
+                        "fieldExpression": "orderReturnStatus",
+                        "operator": "EXCLUDE_IN",
+                        "filterValues": "IN_PROGRESS"
+                    }
+                ],
+                "connectTimeoutMillis": 1111,
+                "readTimeoutMillis": 2222,
+                "maxAttempts": 3
+            },
+            "executorPassed": false
+        }
+    ],
+    "files": {
+        "escape.json": "{\"records\":[],\"metadata\":{}}"
+    }
+}

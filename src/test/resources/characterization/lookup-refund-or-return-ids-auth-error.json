@@ -1,0 +1,33 @@
+{
+    "result": {
+        "unresolvedIds": [
+            
+        ],
+        "missingIds": [
+            
+        ],
+        "foundIds": [
+            
+        ],
+        "ok": false,
+        "errors": [
+            "Shopify auth config CFG_CHAR is inactive."
+        ]
+    },
+    "ecErrors": [
+        "Shopify auth config CFG_CHAR is inactive."
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY"
+            }
+        }
+    ],
+    "supportCalls": [
+        
+    ]
+}

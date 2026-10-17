@@ -76,15 +76,10 @@ class ShopifyRefundOrReturnLookupSupport {
                 // ITS OWN ids and nothing else.
                 failedChunkCount++
                 strandedIds.addAll(idChunk)
-                List resultErrors = result.errors instanceof List ? (List) result.errors : []
-                errors.addAll(resultErrors ? resultErrors.collect { it?.toString() } : ["Shopify refund/return lookup failed."])
+                errors.addAll(ShopifyOrderLookupSupport.failureErrors(result, "Shopify refund/return lookup failed."))
                 return
             }
-            Object nodes = result.data instanceof Map ? ((Map) result.data).nodes : null
-            (nodes instanceof List ? (List) nodes : []).each { Object node ->
-                String gid = node instanceof Map ? ValueSupport.normalize(((Map) node).id) : null
-                if (gid) foundGids.add(gid)
-            }
+            ShopifyOrderLookupSupport.collectNodeGids(result, foundGids)
         }
         // Every chunk failing is a dead lookup, not a partial answer. Keep the original all-or-nothing
         // posture for that case so the caller reports a lookup failure rather than a set of ids it

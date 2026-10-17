@@ -1,0 +1,28 @@
+{
+    "result": {
+        "recordCount": 0,
+        "warnings": [
+            
+        ],
+        "dataAvailable": false,
+        "errors": [
+            "windowStart must be a Timestamp, Date, ISO-8601 value, SQL timestamp text, or epoch milliseconds.",
+            "windowEnd is required."
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        
+    ],
+    "bulkCalls": [
+        
+    ],
+    "returnRefsCalls": [
+        
+    ],
+    "files": {
+        
+    }
+}

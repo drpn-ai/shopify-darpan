@@ -2,9 +2,28 @@
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
-    <service verb="extract" noun="ShopifyOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyOrders.groovy">
-        <description>Extract Shopify orders for an automation window through Shopify Bulk Operations and write normalized JSON output to the automation data-manager folder.</description>
+    <service verb="extract" noun="ShopifyExtractOutputs" type="interface">
+        <description>Out-parameters every Shopify extract returns (extract#ShopifyOrders,
+            extract#ShopifyOrderLineUnits, extract#ShopifyOrderReturnRefs). A script service returns
+            only declared out-parameters, so a result key added to an extract must be declared here.</description>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="fileTypeEnumId"/>
+            <parameter name="recordCount" type="Integer"/>
+            <parameter name="requestMetadata" type="Map"/>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
+    <service verb="extract" noun="ShopifyBulkWindowExtract" type="interface">
+        <description>In-parameters of the Bulk Operations window extracts (extract#ShopifyOrders,
+            extract#ShopifyOrderLineUnits), which share submit, poll, download and file writing. Each
+            implementing service describes its own sourceFilters: the rules run against orders in one
+            and against assembled units in the other.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyExtractOutputs"/>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned ShopifyAuthConfig identifier.</description>
@@ -69,12 +88,6 @@
                     <parameter name="operator"/>
                     <parameter name="filterValues"/>
                 </parameter>
-                <description>DAR-BE-063. Optional record rules (EXCLUDE_IN / INCLUDE_IN) on a top-level ORDER
-                    field, evaluated per order after the bulk read. Dropped orders are written to the
-                    excluded-records sidecar and every rule is counted in
-                    requestMetadata.filters.configuredExclusions. Parsed before the bulk operation is
-                    submitted, so a malformed rule fails pre-flight. Absent or empty means no rules and output
-                    identical to an unfiltered extract.</description>
             </parameter>
             <parameter name="maxAttempts" type="Integer" default-value="2">
                 <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
@@ -92,16 +105,22 @@
                 <description>Delay between Bulk Operation start retries when another operation is already running.</description>
             </parameter>
         </in-parameters>
-        <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="fileTypeEnumId"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
-        </out-parameters>
+    </service>
+
+    <service verb="extract" noun="ShopifyOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyOrders.groovy">
+        <description>Extract Shopify orders for an automation window through Shopify Bulk Operations and write normalized JSON output to the automation data-manager folder.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyBulkWindowExtract"/>
+        <in-parameters>
+            <parameter name="sourceFilters">
+                <description>DAR-BE-063. Optional record rules (EXCLUDE_IN / INCLUDE_IN) on a top-level ORDER
+                    field, evaluated per order after the bulk read. Dropped orders are written to the
+                    excluded-records sidecar and every rule is counted in
+                    requestMetadata.filters.configuredExclusions. Parsed before the bulk operation is
+                    submitted, so a malformed rule fails pre-flight. Absent or empty means no rules and output
+                    identical to an unfiltered extract.</description>
+            </parameter>
+        </in-parameters>
     </service>
 
     <service verb="extract" noun="ShopifyOrderLineUnits" type="script" transaction="ignore" allow-remote="false" authenticate="true"
@@ -130,64 +149,9 @@
             orphanLineItemCount and droppedZeroQuantity are always present in requestMetadata, and
             an orphan also raises a run warning: a unit lost in assembly vanishes from the Shopify
             side, where the anti-join reports it as a genuine difference.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyBulkWindowExtract"/>
         <in-parameters>
-            <parameter name="shopifyAuthConfigId" required="true">
-                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
-            </parameter>
-            <parameter name="automationId">
-                <description>Automation id passed through for metadata.</description>
-            </parameter>
-            <parameter name="automationExecutionId">
-                <description>Automation execution id used to choose the default data-manager output folder.</description>
-            </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="fileSide">
-                <description>Logical file side being extracted.</description>
-            </parameter>
-            <parameter name="systemEnumId">
-                <description>Source system identifier passed through for metadata.</description>
-            </parameter>
-            <parameter name="sourceTypeEnumId">
-                <description>Source type identifier passed through for metadata.</description>
-            </parameter>
-            <parameter name="windowStart" required="true">
-                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
-            </parameter>
-            <parameter name="windowEnd" required="true">
-                <description>End of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
-            </parameter>
-            <parameter name="preserveWindowInstants" type="Boolean" default-value="false">
-                <description>When true, treat windowStart and windowEnd as already normalized instants instead of reinterpreting UTC-midnight values through the Shopify config timezone.</description>
-            </parameter>
-            <parameter name="windowStartDate">
-                <description>Raw parent window start passed by the automation executor.</description>
-            </parameter>
-            <parameter name="windowEndDate">
-                <description>Raw parent window end passed by the automation executor.</description>
-            </parameter>
-            <parameter name="outputLocation">
-                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
-            </parameter>
-            <parameter name="fileName">
-                <description>Optional output file name. Defaults to shopify-orders-{fromMillis}-{thruMillis}.json.</description>
-            </parameter>
-            <parameter name="reconciliationRunResultId">
-                <description>Optional observability run id for live extract progress. Accepted for
-                    dispatch-contract symmetry with the OMS extractor; Shopify progress emission
-                    (bulk-operation objectCount heartbeats) is a planned follow-up.</description>
-            </parameter>
-            <parameter name="expectedRecordCount" type="Integer">
-                <description>Optional expected total for progress percent. Accepted, not yet used.</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
+            <parameter name="sourceFilters">
                 <description>Optional record rules, same semantics as the OMS extractors (EXCLUDE_IN /
                     INCLUDE_IN). Each rule names a top-level UNIT field and a comma-separated list of
                     exact values; it is evaluated against every emitted unit, after assembly, and
@@ -202,39 +166,11 @@
                     (Shopify's Order.returnStatus - NO_RETURN, RETURN_REQUESTED, IN_PROGRESS,
                     INSPECTION_COMPLETE, RETURNED, RETURN_FAILED), stamped on every unit.</description>
             </parameter>
-            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
-                <description>HTTP connect timeout for Shopify GraphQL and Bulk Operations download requests.</description>
-            </parameter>
-            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
-                <description>HTTP read timeout for Shopify GraphQL and Bulk Operations download requests.</description>
-            </parameter>
-            <parameter name="maxAttempts" type="Integer" default-value="2">
-                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
-            </parameter>
-            <parameter name="maxBulkPollAttempts" type="Integer" default-value="60">
-                <description>Maximum Shopify Bulk Operations status polls before the extraction fails.</description>
-            </parameter>
-            <parameter name="bulkPollIntervalMillis" type="Integer" default-value="5000">
-                <description>Delay between Shopify Bulk Operations status polls.</description>
-            </parameter>
-            <parameter name="bulkStartRetryAttempts" type="Integer" default-value="10">
-                <description>Number of retries when Shopify rejects the start request because another Bulk Operation is already running.</description>
-            </parameter>
-            <parameter name="bulkStartRetryDelayMillis" type="Integer" default-value="120000">
-                <description>Delay between Bulk Operation start retries when another operation is already running.</description>
-            </parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="fileTypeEnumId"/>
             <parameter name="recordCount" type="Integer">
                 <description>Number of UNITS written, not orders.</description>
             </parameter>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 
@@ -300,6 +236,7 @@
             INSPECTION_COMPLETE, NO_RETURN, RETURN_FAILED, RETURN_REQUESTED, RETURNED), an order-wide
             display aggregate, and the collision made operators exclude on values this field can never
             hold.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyExtractOutputs"/>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
@@ -385,14 +322,33 @@
             <parameter name="readTimeoutMillis" type="Integer" default-value="60000"/>
             <parameter name="maxAttempts" type="Integer" default-value="2"/>
         </in-parameters>
+    </service>
+
+    <service verb="lookup" noun="ShopifyIdExistence" type="interface">
+        <description>Contract of the nodes(ids:) point-existence lookups (lookup#ShopifyOrderIds,
+            lookup#ShopifyRefundOrReturnIds). Each implementing service declares its own id-list
+            parameter. A failed lookup returns ok=false with both id lists empty.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true">
+                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
+                <description>HTTP connect timeout for Shopify GraphQL requests.</description>
+            </parameter>
+            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
+                <description>HTTP read timeout for Shopify GraphQL requests.</description>
+            </parameter>
+            <parameter name="maxAttempts" type="Integer" default-value="2">
+                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
+            </parameter>
+        </in-parameters>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="fileTypeEnumId"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="foundIds" type="List"/>
+            <parameter name="missingIds" type="List"/>
             <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
@@ -407,33 +363,15 @@
             caller, so each bare id is checked under BOTH the Refund and Return gid forms and counted present
             if either resolves. A failed lookup returns ok=false with both id lists empty — it never
             classifies an id as missing.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.lookup#ShopifyIdExistence"/>
         <in-parameters>
-            <parameter name="shopifyAuthConfigId" required="true">
-                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
-            </parameter>
             <parameter name="refundOrReturnIds" type="List" required="true">
                 <description>Shopify refund OR return ids to check; bare numeric ids, or gid://shopify/Refund/...
                     / gid://shopify/Return/... values. A bare id is checked under both forms.</description>
             </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted run owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
-                <description>HTTP connect timeout for Shopify GraphQL requests.</description>
-            </parameter>
-            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
-                <description>HTTP read timeout for Shopify GraphQL requests.</description>
-            </parameter>
-            <parameter name="maxAttempts" type="Integer" default-value="2">
-                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
-            </parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="ok" type="Boolean"/>
-            <parameter name="foundIds" type="List"/>
-            <parameter name="missingIds" type="List"/>
             <parameter name="unresolvedIds" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 
@@ -444,32 +382,12 @@
             small number of real orders; the saved-run verification pass calls this to confirm or refute
             "missing in SHOPIFY" differences. A failed lookup returns ok=false with both id lists empty —
             it never classifies an order as missing.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.lookup#ShopifyIdExistence"/>
         <in-parameters>
-            <parameter name="shopifyAuthConfigId" required="true">
-                <description>Tenant-owned ShopifyAuthConfig identifier.</description>
-            </parameter>
             <parameter name="orderIds" type="List" required="true">
                 <description>Shopify order ids to check; numeric ids or gid://shopify/Order/... values.</description>
             </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted run owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="connectTimeoutMillis" type="Integer" default-value="30000">
-                <description>HTTP connect timeout for Shopify GraphQL requests.</description>
-            </parameter>
-            <parameter name="readTimeoutMillis" type="Integer" default-value="60000">
-                <description>HTTP read timeout for Shopify GraphQL requests.</description>
-            </parameter>
-            <parameter name="maxAttempts" type="Integer" default-value="2">
-                <description>Maximum attempts for retryable Shopify GraphQL transport failures.</description>
-            </parameter>
         </in-parameters>
-        <out-parameters>
-            <parameter name="ok" type="Boolean"/>
-            <parameter name="foundIds" type="List"/>
-            <parameter name="missingIds" type="List"/>
-            <parameter name="errors" type="List"/>
-        </out-parameters>
     </service>
 
     <service verb="lookup" noun="ShopifyExchangeSweep" type="script" transaction="ignore" allow-remote="false" authenticate="true"

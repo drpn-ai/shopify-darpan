@@ -1,39 +1,20 @@
-import darpan.common.ValueSupport
-import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.reconciliation.lookup.ShopifyExchangeSweepSupport
-
-String configIdValue = ValueSupport.normalize(shopifyAuthConfigId)
-String companyUserGroupIdValue = ValueSupport.normalize(companyUserGroupId)
+import shopify.reconciliation.lookup.ShopifyLookupScriptSupport
 
 ok = false
 exchanges = []
 truncated = false
 errors = []
 
-if (!configIdValue) {
-    errors = ["Shopify auth config ID is required."]
+Map<String, Object> resolved = ShopifyLookupScriptSupport.resolveConnection(ec, shopifyAuthConfigId, companyUserGroupId)
+if (resolved.failed) {
+    errors = resolved.errors
     return
 }
 
-def authConfig = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configIdValue, [
-        disableAuthz                : true,
-        companyUserGroupId          : companyUserGroupIdValue,
-        requiredEndpointSystemEnumId: "SHOPIFY",
-])
-if (ec.message.hasError()) {
-    errors = (ec.message.getErrors() ?: []) as List<String>
-    return
-}
-
-Map<String, Object> result = ShopifyExchangeSweepSupport.sweepExchanges([
-        shopApiUrl : authConfig.shopApiUrl,
-        apiVersion : authConfig.apiVersion,
-        accessToken: authConfig.accessToken,
-], ((Number) windowStartMillis).longValue(), ((Number) windowEndMillis).longValue(), [
-        connectTimeoutMillis: connectTimeoutMillis,
-        readTimeoutMillis   : readTimeoutMillis,
-        maxAttempts         : maxAttempts,
-])
+Map<String, Object> result = ShopifyExchangeSweepSupport.sweepExchanges((Map) resolved.connection,
+        ((Number) windowStartMillis).longValue(), ((Number) windowEndMillis).longValue(),
+        ShopifyLookupScriptSupport.transportOptions(context))
 
 ok = result.ok
 exchanges = result.exchanges

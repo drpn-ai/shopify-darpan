@@ -1,0 +1,50 @@
+{
+    "result": {
+        "recordCount": 0,
+        "warnings": [
+            
+        ],
+        "dataAvailable": false,
+        "errors": [
+            "Bulk operation FAILED"
+        ]
+    },
+    "ecErrors": [
+        
+    ],
+    "authCalls": [
+        {
+            "configId": "CFG_CHAR",
+            "opts": {
+                "disableAuthz": true,
+                "companyUserGroupId": "KREWE",
+                "requiredEndpointSystemEnumId": "SHOPIFY_ORDER_LINE_UNITS"
+            }
+        }
+    ],
+    "bulkCalls": [
+        {
+            "authConfig": {
+                "shopApiUrl": "https://krewe-test.myshopify.com",
+                "apiVersion": "2025-01",
+                "accessToken": "shpat_characterization"
+            },
+            "queryDocument": "query DarpanShopifyOrderLineUnitsByDateWindow {\n  orders(query: \"created_at:>='2026-08-01T00:00:00Z' created_at:<'2026-08-02T00:00:00Z'\", sortKey: CREATED_AT) {\n    edges {\n      node {\n        createdAt\n        id\n        legacyResourceId\n        lineItems {\n          edges {\n            node {\n              currentQuantity\n              id\n              name\n              quantity\n              sku\n              unfulfilledQuantity\n            }\n          }\n        }\n        name\n        returnStatus\n        sourceName\n      }\n    }\n  }\n}",
+            "options": {
+                "connectTimeoutMillis": 30000,
+                "readTimeoutMillis": 60000,
+                "maxAttempts": 2,
+                "maxPollAttempts": 60,
+                "pollIntervalMillis": 5000,
+                "startRetryAttempts": 10,
+                "startRetryDelayMillis": 120000
+            }
+        }
+    ],
+    "returnRefsCalls": [
+        
+    ],
+    "files": {
+        
+    }
+}
