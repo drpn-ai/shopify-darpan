@@ -117,11 +117,36 @@ class ShopifyReturnRefsSupport {
     static final int EVENT_RETENTION_DAYS = 365
     private static final long EVENT_RETENTION_MILLIS = EVENT_RETENTION_DAYS * 86_400_000L
 
+    // id, createdAt and arguments are read only for orders Shopify will not return (UNREADABLE ORDERS
+    // below): arguments is where return_created lists its return line items.
     private static final String EVENTS_DOCUMENT = '''query DarpanShopifyReturnEventDiscovery($first: Int!, $after: String, $query: String) {
   events(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { ... on BasicEvent { action subjectId subjectType } }
+    nodes { id createdAt ... on BasicEvent { action subjectId subjectType arguments } }
   }
+}'''
+
+    /**
+     * UNREADABLE ORDERS (DAR-BE-085). Without read_all_orders, Shopify answers nodes(ids:) with null for
+     * an order created more than 60 days ago, while its return events stay discoverable. Live on gorjana
+     * 2026-10-19: order 6872256348291 (created 2026-06-14) had return_created + refund_created on
+     * 2026-10-16, OMS had no return for it, and the run reported nothing because the null node was
+     * skipped. A ReturnLineItem resolves by id even on such an order, and return_created's arguments list
+     * them, so the return is rebuilt from its event: one RETURN row per event, its order lines resolved
+     * here. No refund or return id is reachable (refund_created carries none), so the row is keyed by the
+     * event id and marked orderReadable=false; the verify stage pairs it with OMS by order + line.
+     */
+    static final String ORDER_READABLE_FIELD = "orderReadable"
+    /** Comma-joined Shopify order line ids an event touched, for order + line pairing. */
+    static final String LINE_IDS_FIELD = "lineIds"
+    static final String ACTION_RETURN_CREATED = "return_created"
+    static final String ACTION_REFUND_CREATED = "refund_created"
+    static final String UNREADABLE_ORDER_COUNT_KEY = "unreadableOrderCount"
+    static final String UNREADABLE_RETURN_ROWS_KEY = "unreadableOrderReturnRows"
+    static final String UNREADABLE_REFUND_ONLY_KEY = "unreadableOrderRefundOnlyCount"
+    private static final int MAX_LISTED_ORDER_IDS = 20
+    private static final String RETURN_LINE_ITEMS_DOCUMENT = '''query DarpanShopifyReturnLineItems($ids: [ID!]!) {
+  nodes(ids: $ids) { id ... on ReturnLineItem { fulfillmentLineItem { lineItem { id } } } }
 }'''
 
     /** Mirrors CompareDatasetSupport.applyIdNormalizer's SHOPIFY_GID_TAIL so both sides agree. */
@@ -282,6 +307,10 @@ class ShopifyReturnRefsSupport {
                     .collect { normalize(it) }.findAll { it })
         }
         List<String> discoveredOrderIds = (List<String>) (discovery.get("orderIds") ?: [])
+        Map<String, List<Map<String, Object>>> eventsByOrderId =
+                (Map<String, List<Map<String, Object>>>) (discovery.get("eventsByOrderId") ?: [:])
+        List<String> unreadableOrderIds = []
+        Map<String, Integer> unreadableCounts = [rows: 0, refundOnly: 0]
 
         if (!errors) {
             discoveredOrderIds.collate(MAX_IDS_PER_NODES_CALL).each { List<String> idChunk ->
@@ -299,10 +328,14 @@ class ShopifyReturnRefsSupport {
                     errors.add("Shopify return-refs response had no nodes list.")
                     return
                 }
-                ((List) rawNodes).each { Object rawNode ->
-                    // nodes(ids:) answers null for an id that resolved to nothing. Skipping is correct:
-                    // discovery named it, so its absence is Shopify's answer, not a fault.
-                    if (!(rawNode instanceof Map)) return
+                ((List) rawNodes).eachWithIndex { Object rawNode, int index ->
+                    // nodes(ids:) answers null for an order older than Shopify's 60-day read limit (no
+                    // read_all_orders) even though its return events were discovered. Recorded, never
+                    // skipped silently: see UNREADABLE ORDERS.
+                    if (!(rawNode instanceof Map)) {
+                        if (index < idChunk.size()) unreadableOrderIds.add(idChunk[index])
+                        return
+                    }
                     ordersProcessed++
                     toRecords((Map) rawNode, refundsFirstEffective, returnsFirstEffective,
                             netFloorMillis, windowEndMillis, warnings, lineFirsts,
@@ -327,6 +360,23 @@ class ShopifyReturnRefsSupport {
             }
         }
 
+        if (!errors && unreadableOrderIds) {
+            List<Map<String, Object>> rebuilt = rebuildUnreadableOrderReturns(authConfig, unreadableOrderIds, eventsByOrderId,
+                    netFloorMillis, windowEndMillis, exec, options, warnings, errors, unreadableCounts)
+            rebuilt.each { Map<String, Object> record ->
+                Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
+                if (verdict != null) {
+                    String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
+                    Map<String, Object> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
+                            ? fieldAbsentCounts
+                            : exclusionCounts
+                    bucket.put(key, normalizeInt(bucket.get(key), 0) + 1)
+                    return
+                }
+                records.add(record)
+            }
+        }
+
         if (errors) {
             return [records: [], recordCount: 0, dataAvailable: false, requestMetadata: [:],
                     warnings: warnings, errors: errors]
@@ -340,6 +390,10 @@ class ShopifyReturnRefsSupport {
                 // the exact ambiguity that made the withdrawn IN_PROGRESS pill undiagnosable.
                 (CLOSED_UNREFUNDED_SUPPRESSED_KEY):
                         normalizeInt(suppressionCounters.get(CLOSED_UNREFUNDED_SUPPRESSED_KEY), 0),
+                // ALWAYS present, zero included, for the same reason: see UNREADABLE ORDERS.
+                (UNREADABLE_ORDER_COUNT_KEY): unreadableOrderIds.size(),
+                (UNREADABLE_RETURN_ROWS_KEY): unreadableCounts.rows,
+                (UNREADABLE_REFUND_ONLY_KEY): unreadableCounts.refundOnly,
         ] as Map<String, Object>
         if (parsedFilters) {
             // EVERY configured rule appears, including one that matched nothing (excludedCount 0) —
@@ -563,6 +617,7 @@ class ShopifyReturnRefsSupport {
         String searchQuery = ("subject_type:Order AND (" + DISCOVERY_ACTIONS + ") " +
                 "AND created_at:>='" + floorIso + "' AND created_at:<'" + windowEndIso + "'").toString()
         Set<String> orderIds = new LinkedHashSet<String>()
+        Map<String, List<Map<String, Object>>> eventsByOrderId = [:]
         String cursor = null
         int pageCount = 0
         while (true) {
@@ -585,8 +640,16 @@ class ShopifyReturnRefsSupport {
             List nodes = (eventsConnection.get("nodes") instanceof List) ? (List) eventsConnection.get("nodes") : []
             nodes.each { Object rawNode ->
                 if (!(rawNode instanceof Map)) return
-                String subjectId = bareId(((Map) rawNode).get("subjectId"))
-                if (subjectId) orderIds.add(subjectId)
+                Map event = (Map) rawNode
+                String subjectId = bareId(event.get("subjectId"))
+                if (!subjectId) return
+                orderIds.add(subjectId)
+                eventsByOrderId.computeIfAbsent(subjectId) { [] }.add([
+                        id               : bareId(event.get("id")),
+                        action           : normalize(event.get("action")),
+                        createdAt        : normalize(event.get("createdAt")),
+                        returnLineItemIds: returnLineItemIds(event.get("arguments")),
+                ] as Map<String, Object>)
             }
             Map pageInfo = (Map) eventsConnection.get("pageInfo")
             if (pageInfo?.get("hasNextPage") != true) break
@@ -596,7 +659,104 @@ class ShopifyReturnRefsSupport {
                 break
             }
         }
-        return [ok: true, orderIds: new ArrayList<String>(orderIds), errors: []]
+        return [ok: true, orderIds: new ArrayList<String>(orderIds), eventsByOrderId: eventsByOrderId, errors: []]
+    }
+
+    /** return_created's arguments: [{return_line_items: [{id, quantity}], ...}]. Anything else yields none. */
+    private static List<String> returnLineItemIds(Object rawArguments) {
+        List arguments = rawArguments instanceof List ? (List) rawArguments : []
+        List<String> ids = []
+        arguments.each { Object argument ->
+            if (!(argument instanceof Map)) return
+            Object lines = ((Map) argument).get("return_line_items")
+            if (!(lines instanceof List)) return
+            ((List) lines).each { Object line ->
+                String id = line instanceof Map ? normalize(((Map) line).get("id")) : null
+                if (id) ids.add(id)
+            }
+        }
+        return ids
+    }
+
+    /**
+     * UNREADABLE ORDERS: one RETURN row per in-window return_created event, keyed by the event id, with
+     * the order lines its return line items resolve to. See the constant block for why. A return line
+     * item that resolves to no line leaves the row's lineIds short, which can only stop a pairing, never
+     * cause one. Orders whose only in-window activity is refund_created cannot be rebuilt at all and are
+     * counted and named instead.
+     */
+    private static List<Map<String, Object>> rebuildUnreadableOrderReturns(Map authConfig, List<String> unreadableOrderIds,
+                                                                           Map<String, List<Map<String, Object>>> eventsByOrderId,
+                                                                           long floorMillis, long windowEndMillis, Closure exec,
+                                                                           Map options, List<String> warnings, List<String> errors,
+                                                                           Map<String, Integer> counts) {
+        List<Map<String, Object>> rows = []
+        List<String> refundOnlyOrderIds = []
+        Map<String, Map<String, Object>> eventByKey = [:]
+        unreadableOrderIds.each { String orderId ->
+            List<Map<String, Object>> inWindowEvents = ((List<Map<String, Object>>) (eventsByOrderId.get(orderId) ?: [])).findAll { Map e ->
+                Long createdMillis = parseIsoMillis(e.createdAt)
+                createdMillis != null && createdMillis >= floorMillis && createdMillis < windowEndMillis
+            }
+            List<Map<String, Object>> returnEvents = inWindowEvents.findAll { it.action == ACTION_RETURN_CREATED && it.id }
+            if (returnEvents.isEmpty()) {
+                if (inWindowEvents.any { it.action == ACTION_REFUND_CREATED }) refundOnlyOrderIds.add(orderId)
+                return
+            }
+            returnEvents.each { Map<String, Object> e -> eventByKey.put("${orderId}|${e.id}".toString(), e + [orderId: orderId]) }
+        }
+
+        List<String> returnLineItemIds = eventByKey.values().collectMany { (List<String>) it.returnLineItemIds }.unique()
+        Map<String, String> lineIdByReturnLineItem = [:]
+        returnLineItemIds.collate(MAX_IDS_PER_NODES_CALL).each { List<String> chunk ->
+            if (errors) return
+            Map response = (Map) exec(authConfig, RETURN_LINE_ITEMS_DOCUMENT,
+                    [ids: chunk.collect { ("gid://shopify/ReturnLineItem/" + it).toString() }], options ?: [:])
+            if (response?.ok != true) {
+                errors.addAll(((List) (response?.errors ?: ["Shopify return line item fetch failed."]))
+                        .collect { normalize(it) }.findAll { it })
+                return
+            }
+            Object rawNodes = walk(response, ["data", "nodes"])
+            if (!(rawNodes instanceof List)) {
+                errors.add("Shopify return line item response had no nodes list.")
+                return
+            }
+            ((List) rawNodes).each { Object rawNode ->
+                if (!(rawNode instanceof Map)) return
+                String lineId = bareId(walk(rawNode, ["fulfillmentLineItem", "lineItem", "id"]))
+                String returnLineItemId = bareId(((Map) rawNode).get("id"))
+                if (lineId && returnLineItemId) lineIdByReturnLineItem.put(returnLineItemId, lineId)
+            }
+        }
+        if (errors) return []
+
+        eventByKey.values().each { Map<String, Object> e ->
+            List<String> lineIds = ((List<String>) e.returnLineItemIds).collect { lineIdByReturnLineItem.get(it) }
+                    .findAll { it }.unique().sort()
+            rows.add([
+                    refundOrReturnId    : e.id,
+                    refundOrReturnType  : ID_TYPE_RETURN,
+                    orderId             : e.orderId,
+                    createdAt           : e.createdAt,
+                    (LINE_IDS_FIELD)    : lineIds ? lineIds.join(",") : null,
+                    (ORDER_READABLE_FIELD): false,
+            ] as Map<String, Object>)
+        }
+        counts.rows = rows.size()
+        counts.refundOnly = refundOnlyOrderIds.size()
+
+        warnings.add(("${unreadableOrderIds.size()} order(s) with return or refund activity in this window are older " +
+                "than Shopify's 60-day order read limit. ${rows.size()} return(s) on them were rebuilt from their " +
+                "return events and are checked by order and line.").toString())
+        if (refundOnlyOrderIds) {
+            warnings.add(("${refundOnlyOrderIds.size()} of those order(s) had only a refund in this window, which " +
+                    "Shopify does not expose on orders past the read limit, so they were not checked: " +
+                    refundOnlyOrderIds.take(MAX_LISTED_ORDER_IDS).join(", ") +
+                    (refundOnlyOrderIds.size() > MAX_LISTED_ORDER_IDS ? " and ${refundOnlyOrderIds.size() - MAX_LISTED_ORDER_IDS} more" : "") +
+                    ".").toString())
+        }
+        return rows
     }
 
     private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,
@@ -663,6 +823,9 @@ class ShopifyReturnRefsSupport {
                     orderReturnStatus      : orderReturnStatus,
                     refundLineEverFulfilled: refundLineEverFulfilled(refund.raw, fulfilledLineIds,
                             fulfilmentUnknown, lineFirsts, orderId, warnings),
+                    // DAR-BE-086: the refunded lines, so a refund OMS keyed by no shared id (an AfterShip
+                    // warranty return) can still be paired by order + line in the verify stage.
+                    (LINE_IDS_FIELD)       : refundLineIds(refund.raw),
             ] as Map<String, Object>)
         }
         inWindowReturns.each { Map<String, Object> ret ->
@@ -838,6 +1001,15 @@ class ShopifyReturnRefsSupport {
         if (ids.isEmpty()) return null
         if (fulfilmentUnknown) return null
         return ids.any { fulfilledLineIds.contains(it) }
+    }
+
+    /** Comma-joined, sorted line ids this refund touched; null when it lists none. */
+    protected static String refundLineIds(Object rawRefund) {
+        if (!(rawRefund instanceof Map)) return null
+        List<String> ids = nodesOf((Map) ((Map) rawRefund).get("refundLineItems")).collect { Object rawLine ->
+            rawLine instanceof Map ? bareId(((Map) ((Map) rawLine).get("lineItem"))?.get("id")) : null
+        }.findAll { it }.unique().sort() as List<String>
+        return ids ? ids.join(",") : null
     }
 
     /** nodes[] or edges[].node, the two connection shapes this file already tolerates elsewhere. */

@@ -1263,4 +1263,121 @@ class ShopifyReturnRefsSupportTests {
         assertNotNull(ret)
         assertFalse(ret.containsKey("refundLineEverFulfilled"))
     }
+
+    // --- DAR-BE-086: refund line ids for order + line pairing ------------------------------------
+
+    @Test
+    void aRefundRowCarriesItsRefundedLineIds() {
+        Map result = extractOne(orderWithFulfilment("703", "16502340714627", ["16502340714627"]))
+
+        Map record = (Map) ((List) result.records).find { ((Map) it).refundOrReturnId == "703" }
+        assertEquals("16502340714627", record.lineIds,
+                "the warranty pairing in the verify stage joins OMS OrderItem.externalId on these")
+    }
+
+    // --- DAR-BE-085: orders past Shopify's 60-day read limit -------------------------------------
+
+    /**
+     * The live shape on gorjana 2026-10-19: discovery names order 6872256348291 through return_created +
+     * refund_created events, nodes(ids:) answers null for it (created 2026-06-14, no read_all_orders), and
+     * its return line item still resolves by id to line 15542749593731.
+     */
+    private static Closure unreadableOrderExecutor(List<Map> events, Map<String, String> lineByReturnLineItem,
+                                                   List<String> documents = []) {
+        return { Map cfg, String doc, Map vars, Map opts ->
+            if (doc.contains("events(")) {
+                documents.add("events")
+                return [ok: true, data: [events: [nodes: events, pageInfo: [hasNextPage: false, endCursor: null]]]]
+            }
+            if (doc.contains("ReturnLineItem")) {
+                documents.add("returnLineItems")
+                return [ok: true, data: [nodes: ((List<String>) vars.ids).collect { String gid ->
+                    String id = gid.substring(gid.lastIndexOf('/') + 1)
+                    lineByReturnLineItem.containsKey(id) ?
+                            [id: gid, fulfillmentLineItem: [lineItem: [id: "gid://shopify/LineItem/${lineByReturnLineItem[id]}".toString()]]] : null
+                }]]
+            }
+            documents.add("nodes")
+            return [ok: true, data: [nodes: ((List) vars.ids).collect { null }]]
+        }
+    }
+
+    private static Map event(String id, String action, String orderId, String createdAt, List<String> returnLineItemIds = []) {
+        Map e = [id: "gid://shopify/BasicEvent/${id}".toString(), createdAt: createdAt, action: action,
+                 subjectType: "ORDER", subjectId: "gid://shopify/Order/${orderId}".toString()]
+        e.arguments = action == "return_created" ?
+                [[return_line_items: returnLineItemIds.collect { [id: it as Long, quantity: 1] }, exchange_line_items: []]] :
+                [[refund_shipping_lines: []]]
+        return e
+    }
+
+    @Test
+    void aReturnOnAnOrderShopifyWillNotReturnIsRebuiltFromItsEventInsteadOfDropped() {
+        List<String> documents = []
+        Closure executor = unreadableOrderExecutor([
+                event("301523693011075", "return_created", "6872256348291", "2026-10-16T23:34:50Z", ["49143316611"]),
+                event("301523699335299", "refund_created", "6872256348291", "2026-10-16T23:34:57Z"),
+        ], ["49143316611": "15542749593731"], documents)
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z", [:], executor)
+
+        assertEquals(["events", "nodes", "returnLineItems"], documents)
+        assertEquals(1, result.recordCount, "one RETURN row per return_created event: ${result.records}")
+        Map row = (Map) ((List) result.records)[0]
+        assertEquals("301523693011075", row.refundOrReturnId, "keyed by the event: no refund or return id is reachable")
+        assertEquals("RETURN", row.refundOrReturnType)
+        assertEquals("6872256348291", row.orderId)
+        assertEquals("2026-10-16T23:34:50Z", row.createdAt)
+        assertEquals("15542749593731", row.lineIds)
+        assertEquals(false, row.orderReadable)
+        assertFalse(row.containsKey("orderCancelledAt"),
+                "unknown, not 'not cancelled': absent keeps the cancellation fallback lookup in play")
+        Map filters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(1, filters.unreadableOrderCount)
+        assertEquals(1, filters.unreadableOrderReturnRows)
+        assertEquals(0, filters.unreadableOrderRefundOnlyCount)
+        assertTrue(((List) result.warnings).any { it.toString().contains("60-day order read limit") }, "${result.warnings}")
+    }
+
+    @Test
+    void anUnreadableOrderWithOnlyARefundIsCountedAndNamedRatherThanSilentlySkipped() {
+        Closure executor = unreadableOrderExecutor([
+                event("401", "refund_created", "6000000000001", "2026-10-16T10:00:00Z"),
+        ], [:])
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z", [:], executor)
+
+        assertEquals(0, result.recordCount)
+        Map filters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(1, filters.unreadableOrderCount)
+        assertEquals(1, filters.unreadableOrderRefundOnlyCount)
+        assertTrue(((List) result.warnings).any { it.toString().contains("6000000000001") },
+                "the order must be named so someone can look: ${result.warnings}")
+    }
+
+    @Test
+    void anOutOfWindowReturnEventOnAnUnreadableOrderIsNotRebuilt() {
+        // Discovery is windowed already; this guards the rebuild's own window, which must match inWindow's.
+        Closure executor = unreadableOrderExecutor([
+                event("501", "return_created", "6000000000002", "2026-10-17T00:00:00Z", ["1"]),
+        ], ["1": "2"])
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z", [:], executor)
+
+        assertEquals(0, result.recordCount, "windowEnd is exclusive")
+    }
+
+    @Test
+    void theUnreadableCountsAreAlwaysPresentEvenWhenEveryOrderWasReadable() {
+        Map result = extractOne(orderNode("333", ["gid://shopify/Refund/1"], []))
+
+        Map filters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(0, filters.unreadableOrderCount)
+        assertEquals(0, filters.unreadableOrderReturnRows)
+        assertEquals(0, filters.unreadableOrderRefundOnlyCount)
+        assertEquals([], result.warnings)
+    }
 }
