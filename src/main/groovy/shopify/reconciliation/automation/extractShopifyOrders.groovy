@@ -1,5 +1,6 @@
 import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
 import shopify.graphql.ShopifySourceCatalog
 // Moqui extract scripts carry no package declaration, so an unimported class reference compiles
@@ -89,6 +90,7 @@ Map filteredOrders = SourceFilterSupport.applyToRecords(records, parsedSourceFil
 int extractedRecordCount = records.size()
 records = (List<Map<String, Object>>) filteredOrders.records
 if (outputErrors) {
+    ExcludedRecordsSidecar.discard((Map) filteredOrders.excludedCollector)
     errors = outputErrors
     warnings = outputWarnings
     dataAvailable = false

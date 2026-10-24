@@ -8,6 +8,7 @@ import shopify.graphql.ShopifySourceCatalog
 // class reference compiles fine (Groovy treats it as a dynamic property) and fails only at RUNTIME.
 // A green build proves nothing about it. extractShopifyReturnRefs imports its support class for
 // the same reason.
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import shopify.reconciliation.automation.ShopifyExtractSupport
 import shopify.reconciliation.automation.ShopifyOrderLineUnitSupport
 
@@ -81,6 +82,7 @@ if (bulkOperationResult.ok == false) {
     records = (List<Map<String, Object>>) filteredUnits.units
 }
 if (outputErrors) {
+    ExcludedRecordsSidecar.discard((Map) filteredUnits?.excludedCollector)
     errors = outputErrors
     warnings = outputWarnings
     dataAvailable = false

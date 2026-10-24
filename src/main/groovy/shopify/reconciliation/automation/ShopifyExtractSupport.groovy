@@ -229,13 +229,10 @@ class ShopifyExtractSupport {
      */
     static void writeExcludedSidecar(def ec, Map excludedCollector, String outputBaseLocation,
                                      String outputFileName, List<String> warnings) {
-        if (excludedCollector && ((excludedCollector.total ?: 0) as int) > 0) {
-            try {
-                DataManagerSupport.writeText(ec, DataManagerSupport.childLocation(outputBaseLocation,
-                        ExcludedRecordsSidecar.fileNameFor(outputFileName)), ExcludedRecordsSidecar.toJson(excludedCollector, outputFileName))
-            } catch (Exception sidecarError) {
-                warnings.add("Excluded-records sidecar not written: ${sidecarError.message}".toString())
-            }
+        try {
+            ExcludedRecordsSidecar.writeBeside(ec, excludedCollector, outputBaseLocation, outputFileName, null)
+        } catch (Exception sidecarError) {
+            warnings.add("Excluded-records sidecar not written: ${sidecarError.message}".toString())
         }
     }
 
