@@ -37,6 +37,9 @@ class ShopifyOrderPaymentSignalTests {
         new GroovyShell().parse(script, "extractShopifyOrders.groovy")
         org.junit.jupiter.api.Assertions.assertTrue(
                 script.contains("normalizedRecord.hasPaymentTransaction = ShopifyOrderPaymentSignal.hasPaymentTransaction("))
+        // DAR-BE-125 (R20): Y only when Shopify fulfilled the whole order; partial is N.
+        org.junit.jupiter.api.Assertions.assertTrue(
+                script.contains('normalizedRecord.isFulfilled = normalize(normalizedRecord.displayFulfillmentStatus) == "FULFILLED" ? "Y" : "N"'))
     }
 
     @Test
