@@ -2,10 +2,13 @@ package shopify.graphql
 
 import darpan.common.ValueSupport
 import groovy.json.JsonSlurper
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 import java.net.HttpURLConnection
 
 class ShopifyBulkOperationClient {
+    private static final Logger logger = LoggerFactory.getLogger(ShopifyBulkOperationClient.class)
     static final int DEFAULT_MAX_POLL_ATTEMPTS = 60
     static final int DEFAULT_POLL_INTERVAL_MILLIS = 5000
     static final int DEFAULT_START_RETRY_ATTEMPTS = 10
@@ -372,13 +375,20 @@ class ShopifyBulkOperationClient {
         connection.connectTimeout = (request.connectTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_CONNECT_TIMEOUT_MILLIS) as int
         connection.readTimeout = (request.readTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_READ_TIMEOUT_MILLIS) as int
 
-        int statusCode = connection.responseCode
-        InputStream input = statusCode >= 400 ? connection.errorStream : connection.inputStream
-        String responseBody = input != null ? input.getText("UTF-8") : ""
-        return [
-                statusCode: statusCode,
-                body      : responseBody,
-        ]
+        long started = System.currentTimeMillis()
+        Integer statusCode = null
+        try {
+            statusCode = connection.responseCode
+            InputStream input = statusCode >= 400 ? connection.errorStream : connection.inputStream
+            String responseBody = input != null ? input.getText("UTF-8") : ""
+            return [
+                    statusCode: statusCode,
+                    body      : responseBody,
+            ]
+        } finally {
+            // DAR-BE-129. The bulk result download is a Shopify call too; counted beside the GraphQL ones.
+            logger.info("shopify bulk download status={} ms={}", statusCode, System.currentTimeMillis() - started)
+        }
     }
 
     private static Map<String, Object> safeOperationMetadata(Map operation) {

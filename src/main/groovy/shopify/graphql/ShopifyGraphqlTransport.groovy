@@ -205,16 +205,26 @@ class ShopifyGraphqlTransport {
         connection.readTimeout = (request.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) as int
         ((Map<String, String>) request.headers).each { String key, String value -> connection.setRequestProperty(key, value) }
 
-        byte[] bodyBytes = JsonOutput.toJson(request.body ?: [:]).getBytes(StandardCharsets.UTF_8)
-        connection.outputStream.withCloseable { OutputStream output -> output.write(bodyBytes) }
+        long started = System.currentTimeMillis()
+        Integer statusCode = null
+        try {
+            byte[] bodyBytes = JsonOutput.toJson(request.body ?: [:]).getBytes(StandardCharsets.UTF_8)
+            connection.outputStream.withCloseable { OutputStream output -> output.write(bodyBytes) }
 
-        int statusCode = connection.responseCode
-        InputStream input = statusCode >= 400 ? connection.errorStream : connection.inputStream
-        String responseBody = input != null ? input.getText("UTF-8") : ""
-        return [
-            statusCode: statusCode,
-            body      : responseBody,
-        ]
+            statusCode = connection.responseCode
+            InputStream input = statusCode >= 400 ? connection.errorStream : connection.inputStream
+            String responseBody = input != null ? input.getText("UTF-8") : ""
+            return [
+                statusCode: statusCode,
+                body      : responseBody,
+            ]
+        } finally {
+            // DAR-BE-129. One line per Shopify request, so a run's calls can be counted by system and operation:
+            // op is the document's operation name, or its first selected field when the document is anonymous.
+            def op = ((request.body as Map)?.query?.toString() ?: "") =~ /^\s*(?:(?:query|mutation)\s*(\w*)[^{]*)?\{\s*(\w+)/
+            logger.info("shopify gql call op={} status={} ms={}", op.find() ? (op.group(1) ?: op.group(2)) : null,
+                    statusCode, System.currentTimeMillis() - started)
+        }
     }
 
     private static Map<String, Object> safeFailure(String message, boolean retryable) {
