@@ -85,7 +85,6 @@ class ShopifyAuthConfigFacadeSmokeTests {
 
         ec.message.clearErrors()
         Map<String, Object> createResult = saveFacade([
-            shopifyAuthConfigId: "KREWE_VIEW_ONLY_CREATE",
             description        : "Blocked view-only create",
             shopApiUrl         : "https://blocked.myshopify.com/admin/api",
             apiVersion         : "2025-10",
@@ -94,7 +93,7 @@ class ShopifyAuthConfigFacadeSmokeTests {
         ])
         assertFalse((Boolean) createResult.ok)
         assertTrue((createResult.errors ?: []).join(" ").contains("view access"))
-        assertNull(findOne([shopifyAuthConfigId: "KREWE_VIEW_ONLY_CREATE"]))
+        assertNull(findOne([description: "Blocked view-only create"]))
 
         ec.message.clearErrors()
         Map<String, Object> updateResult = saveFacade([
@@ -128,6 +127,25 @@ class ShopifyAuthConfigFacadeSmokeTests {
         // let any authenticated caller probe arbitrary ids for existence — the exact oracle class
         // Task 4 closed for grants and Task 6 closed for the reference validators.
         assertTrue((result.errors ?: []).join(" ").contains("was not found"))
+        assertEquals("Krewe Shopify", findOne([shopifyAuthConfigId: "KREWE_SHOPIFY"]).description)
+    }
+
+    /** DAR-BE-135: a named id only updates. Another tenant's id and a missing one answer alike; neither creates. */
+    @Test
+    void aForeignIdAndAMissingIdAnswerAlikeAndNeitherCreatesARow() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> params = [description: "Probe", shopApiUrl: "https://probe.myshopify.com/admin/api",
+                                      apiVersion: "2025-10", accessToken: "probe-token", canReadOrders: true]
+
+        Map<String, Object> foreign = saveFacade(params + [shopifyAuthConfigId: "KREWE_SHOPIFY"])
+        ec.message.clearErrors()
+        Map<String, Object> missing = saveFacade(params + [shopifyAuthConfigId: "NO_SUCH_SHOPIFY"])
+
+        assertFalse((Boolean) foreign.ok)
+        assertFalse((Boolean) missing.ok)
+        assertEquals(["Shopify auth config 'KREWE_SHOPIFY' was not found."], foreign.errors)
+        assertEquals(["Shopify auth config 'NO_SUCH_SHOPIFY' was not found."], missing.errors)
+        assertNull(findOne([shopifyAuthConfigId: "NO_SUCH_SHOPIFY"]), "a caller-named id must never create a row")
         assertEquals("Krewe Shopify", findOne([shopifyAuthConfigId: "KREWE_SHOPIFY"]).description)
     }
 
@@ -187,7 +205,6 @@ class ShopifyAuthConfigFacadeSmokeTests {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
 
         Map<String, Object> createResult = saveFacade([
-            shopifyAuthConfigId: "GORJANA_CREATED_SHOPIFY",
             description        : "Created Shopify",
             shopApiUrl         : "https://created.myshopify.com/admin/api",
             apiVersion         : "2025-10",
@@ -198,9 +215,11 @@ class ShopifyAuthConfigFacadeSmokeTests {
         ])
 
         assertTrue((Boolean) createResult.ok, createResult.errors?.toString())
-        assertTenantOwnership([shopifyAuthConfigId: "GORJANA_CREATED_SHOPIFY"])
-        assertEquals("Y", findOne([shopifyAuthConfigId: "GORJANA_CREATED_SHOPIFY"]).canReadOrders)
-        assertEquals("America/New_York", findOne([shopifyAuthConfigId: "GORJANA_CREATED_SHOPIFY"]).timeZone)
+        String createdId = ((Map<String, Object>) createResult.savedShopifyAuthConfig).shopifyAuthConfigId
+        assertTrue(createdId ==~ /\d+/, "DAR-BE-135: a new config takes a minted id, got ${createdId}")
+        assertTenantOwnership([shopifyAuthConfigId: createdId])
+        assertEquals("Y", findOne([shopifyAuthConfigId: createdId]).canReadOrders)
+        assertEquals("America/New_York", findOne([shopifyAuthConfigId: createdId]).timeZone)
         assertTrue(((Map<String, Object>) createResult.savedShopifyAuthConfig).canReadOrders as boolean)
     }
 
@@ -228,7 +247,6 @@ class ShopifyAuthConfigFacadeSmokeTests {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
 
         Map<String, Object> createResult = saveFacade([
-            shopifyAuthConfigId: "GORJANA_DELETE_SHOPIFY",
             description        : "Delete Shopify",
             shopApiUrl         : "https://delete.myshopify.com/admin/api",
             apiVersion         : "2025-10",
@@ -237,14 +255,15 @@ class ShopifyAuthConfigFacadeSmokeTests {
             canReadOrders      : true,
         ])
         assertTrue((Boolean) createResult.ok, createResult.errors?.toString())
-        assertTenantOwnership([shopifyAuthConfigId: "GORJANA_DELETE_SHOPIFY"])
+        String createdId = ((Map<String, Object>) createResult.savedShopifyAuthConfig).shopifyAuthConfigId
+        assertTenantOwnership([shopifyAuthConfigId: createdId])
 
         ec.message.clearErrors()
-        Map<String, Object> deleteResult = deleteFacade("GORJANA_DELETE_SHOPIFY")
+        Map<String, Object> deleteResult = deleteFacade(createdId)
         assertTrue((Boolean) deleteResult.ok, deleteResult.errors?.toString())
         assertEquals(true, deleteResult.deleted)
-        assertEquals("GORJANA_DELETE_SHOPIFY", deleteResult.deletedShopifyAuthConfigId)
-        assertNull(findOne([shopifyAuthConfigId: "GORJANA_DELETE_SHOPIFY"]))
+        assertEquals(createdId, deleteResult.deletedShopifyAuthConfigId)
+        assertNull(findOne([shopifyAuthConfigId: createdId]))
 
         ec.message.clearErrors()
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, KREWE)

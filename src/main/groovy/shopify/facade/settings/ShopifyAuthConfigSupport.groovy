@@ -255,7 +255,6 @@ class ShopifyAuthConfigSupport {
         String isActiveValue = normalizeIndicator(serviceContext?.isActive, true)
         String canReadOrdersValue = normalizeIndicator(serviceContext?.canReadOrders, false)
 
-        if (!configId) ec.message.addError("Shopify auth config ID is required.")
         if (!shopApiUrlValue) ec.message.addError("Shop/API URL is required.")
         if (shopApiUrlValue) {
             String shopApiUrlError = describeShopApiUrlError(shopApiUrlValue)
@@ -266,10 +265,12 @@ class ShopifyAuthConfigSupport {
             ec.message.addError("API version must use YYYY-MM format or unstable.")
         }
 
+        // DAR-BE-135: a named id only updates a config this tenant owns or was granted; anything else
+        // answers "not found", the same as a missing id. A new config gets a minted id.
         def existingConfig = null
-        if (!ec.message.hasError()) {
+        if (!ec.message.hasError() && configId) {
             existingConfig = findAuthConfig(ec, configId)
-            if (existingConfig) requireTenantAuthConfigAccess(ec, existingConfig, configId)
+            requireTenantAuthConfigAccess(ec, existingConfig, configId)
         }
 
         if (!ec.message.hasError()) {
@@ -289,6 +290,7 @@ class ShopifyAuthConfigSupport {
 
         Map<String, Object> output = [:]
         if (!ec.message.hasError()) {
+            if (!configId) configId = darpan.facade.common.TenantScopedFinder.mintId(ec, ENTITY_NAME, "shopifyAuthConfigId")
             Map<String, Object> storeMap = [
                     shopifyAuthConfigId: configId,
                     description        : descriptionValue,

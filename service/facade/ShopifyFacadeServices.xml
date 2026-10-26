@@ -71,7 +71,8 @@
     <service verb="save" noun="ShopifyAuthConfig" allow-remote="true" authenticate="true">
         <description>Create or update a tenant-owned Shopify auth config, preserving the stored token when no replacement is provided.</description>
         <in-parameters>
-            <parameter name="shopifyAuthConfigId" required="true"/>
+            <parameter name="shopifyAuthConfigId"><description>DAR-BE-135: names a config this tenant owns or was granted,
+                to update it. Leave it out to create one; the server mints the id.</description></parameter>
             <parameter name="description"/>
             <parameter name="shopApiUrl" required="true"/>
             <parameter name="apiVersion" required="true"/>
