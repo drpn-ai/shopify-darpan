@@ -276,7 +276,9 @@
                     window) instead of refund/return events: "refunded" keeps orders whose completed return has a refund,
                     "exchanged" orders whose completed return has exchange items. For a tenant whose returns live only in
                     Shopify and are checked against NetSuite (Dolls Kill). Rows carry orderId, orderName (no leading #),
-                    returnIds, returnCount and closedAt; lookbackHours and sourceFilters do not apply.</description>
+                    returnIds, returnCount, closedAt and originalUnfulfilledQuantity (the order's own lines Shopify has not
+                    fulfilled, leaving out the lines an exchange added: an exchange reaches NetSuite only once its original
+                    order is fulfilled); lookbackHours and sourceFilters do not apply.</description>
             </parameter>
             <parameter name="lookbackHours" type="Integer" default-value="3">
                 <description>Hours the fetch/emit floor is widened BEFORE windowStart, so a Shopify

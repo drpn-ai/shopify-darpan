@@ -109,4 +109,43 @@ class ShopifyCompletedReturnsSupportTests {
         assertEquals(1, warnings.size())
         assertTrue(warnings[0].contains("Order 7"), warnings[0])
     }
+
+    @Test
+    void theOriginalUnfulfilledQuantityLeavesOutTheLinesAnExchangeAdded() {
+        // The exchange added line L3; it is unfulfilled until the exchange ships, which is not the original order.
+        Map order = [legacyResourceId: "8", name: "DK8",
+                     lineItems: [nodes: [[id: "L1", unfulfilledQuantity: 0], [id: "L2", unfulfilledQuantity: 2],
+                                         [id: "L3", unfulfilledQuantity: 1]]],
+                     returns  : [nodes: [[id: "gid://shopify/Return/81", status: "CLOSED", closedAt: "2026-10-20T05:00:00Z",
+                                          refunds: [nodes: []],
+                                          exchangeLineItems: [nodes: [[id: "E1", lineItems: [[id: "L3"]]]]]]]]]
+        Map record = ShopifyCompletedReturnsSupport.toRecord(order, "exchanged", WINDOW_START, WINDOW_END, [])
+        assertEquals(2, record.originalUnfulfilledQuantity, "L2 still waits to ship; L3 is the exchange's own line")
+
+        order.lineItems = [nodes: [[id: "L1", unfulfilledQuantity: 0], [id: "L3", unfulfilledQuantity: 1]]]
+        assertEquals(0, ShopifyCompletedReturnsSupport.toRecord(order, "exchanged", WINDOW_START, WINDOW_END, []).originalUnfulfilledQuantity)
+    }
+
+    @Test
+    void aPageOverShopifysCostLimitIsAskedAgainWithFewerOrders() {
+        List sizes = []
+        Map result = ShopifyCompletedReturnsSupport.extract(CONFIG, "refunded", WINDOW_START, WINDOW_END, [:],
+                { Map cfg, String query, Map vars, Map opts ->
+                    sizes.add(vars.first)
+                    vars.first > 12 ? [ok: false, errors: ["Shopify GraphQL error: Query cost is 4302, which exceeds the single query max cost limit (1000)."]]
+                            : page([ORDERS[0]], false)
+                })
+        assertEquals([], result.errors)
+        assertEquals([50, 25, 12], sizes)
+        assertEquals(["1"], ((List) result.records)*.orderId)
+        assertEquals(12, result.requestMetadata.ordersPageSize)
+    }
+
+    @Test
+    void aCostRefusalAtOneOrderPerPageIsAFailure() {
+        Map result = ShopifyCompletedReturnsSupport.extract(CONFIG, "refunded", WINDOW_START, WINDOW_END, [:],
+                { Map cfg, String query, Map vars, Map opts -> [ok: false, errors: ["exceeds the single query max cost limit (1000)"]] })
+        assertEquals([], result.records)
+        assertEquals(["exceeds the single query max cost limit (1000)"], result.errors)
+    }
 }
