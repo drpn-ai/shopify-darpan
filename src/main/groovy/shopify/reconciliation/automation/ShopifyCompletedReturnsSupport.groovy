@@ -15,6 +15,10 @@ import static darpan.common.ValueSupport.normalize
  * completed return that has a refund, "exchanged" orders with a completed return that has exchange items. An exchange
  * with no refund is therefore only ever held to the exchange check.</p>
  *
+ * <p>"orderRefunded" (DAR-CLIENT-005) keeps orders with a completed return that was refunded, whether the refund is
+ * linked to the return or only made on the order on or after the return was created: RAILS's returns app (Loop) closes
+ * the Shopify Return and refunds the order without linking the two, so "refunded" would never see its returns.</p>
+ *
  * <p>Each row also says how much of the ORDER'S OWN lines Shopify has not fulfilled (originalUnfulfilledQuantity), leaving
  * out the lines an exchange added: an exchange reaches NetSuite only once its original order is fulfilled, so that is
  * the first thing to look at when an exchange is missing there. Order-level fulfillment status cannot answer it, since
@@ -28,6 +32,8 @@ class ShopifyCompletedReturnsSupport {
 
     static final String REFUNDED = "refunded"
     static final String EXCHANGED = "exchanged"
+    static final String ORDER_REFUNDED = "orderRefunded"
+    static final int ORDER_REFUNDS_PER_ORDER = 20
     static final int PAGE_SIZE = 50
     static final int RETURNS_PER_ORDER = 20
     static final int LINES_PER_ORDER = 100
@@ -55,11 +61,17 @@ class ShopifyCompletedReturnsSupport {
   }
 }'''
 
+    /** orderRefunded's document: the same read plus each return's creation time and the order's own refunds. */
+    private static final String ORDER_REFUNDED_QUERY = QUERY
+            .replace('$exchangeItemsFirst: Int!) {', '$exchangeItemsFirst: Int!, $orderRefundsFirst: Int!) {')
+            .replace("      name\n", "      name\n      refunds(first: \$orderRefundsFirst) { createdAt }\n")
+            .replace("          status\n", "          status\n          createdAt\n")
+
     static Map<String, Object> extract(Map authConfig, String completedReturns, long windowStartMillis, long windowEndMillis,
                                        Map options = [:], Closure executor = null) {
-        String kind = normalize(completedReturns)?.toLowerCase()
-        if (!(kind in [REFUNDED, EXCHANGED])) {
-            return [records: [], errors: ["completedReturns is '${REFUNDED}' or '${EXCHANGED}', got: ${completedReturns}".toString()],
+        String kind = [REFUNDED, EXCHANGED, ORDER_REFUNDED].find { it.equalsIgnoreCase(normalize(completedReturns) ?: "") }
+        if (!kind) {
+            return [records: [], errors: ["completedReturns is '${REFUNDED}', '${EXCHANGED}' or '${ORDER_REFUNDED}', got: ${completedReturns}".toString()],
                     warnings: [], requestMetadata: [:]]
         }
         Closure exec = executor ?: { Map cfg, String document, Map variables, Map opts ->
@@ -79,9 +91,10 @@ class ShopifyCompletedReturnsSupport {
                 warnings.add("Stopped after ${MAX_PAGES} pages of orders; completed returns past that are not read.".toString())
                 break
             }
-            Map result = (Map) exec(authConfig, QUERY,
-                    [first: pageSize, after: after, query: search, returnsFirst: RETURNS_PER_ORDER,
-                     linesFirst: LINES_PER_ORDER, exchangeItemsFirst: EXCHANGE_ITEMS_PER_RETURN], transportOptions)
+            Map variables = [first: pageSize, after: after, query: search, returnsFirst: RETURNS_PER_ORDER,
+                             linesFirst: LINES_PER_ORDER, exchangeItemsFirst: EXCHANGE_ITEMS_PER_RETURN]
+            if (kind == ORDER_REFUNDED) variables.orderRefundsFirst = ORDER_REFUNDS_PER_ORDER
+            Map result = (Map) exec(authConfig, kind == ORDER_REFUNDED ? ORDER_REFUNDED_QUERY : QUERY, variables, transportOptions)
             // Each order asks for its lines, returns and exchange items, so a page can cost more than Shopify allows
             // in one query. That refusal is not a failure: the same page is asked again with half as many orders.
             if (result?.ok != true && pageSize > 1 && overCostLimit(result)) {
@@ -125,7 +138,9 @@ class ShopifyCompletedReturnsSupport {
             Long closedAt = millis(ret.get("closedAt"))
             boolean completed = normalize(ret.get("status")) == CLOSED && closedAt != null &&
                     closedAt >= windowStartMillis && closedAt < windowEndMillis
-            completed && hasNode(ret.get(kind == REFUNDED ? "refunds" : "exchangeLineItems"))
+            if (!completed) return false
+            if (kind == ORDER_REFUNDED) return hasNode(ret.get("refunds")) || orderRefundedSince(order, millis(ret.get("createdAt")))
+            return hasNode(ret.get(kind == REFUNDED ? "refunds" : "exchangeLineItems"))
         } as List<Map>
         if (!matched) return null
         return [orderId                    : orderId,
@@ -152,6 +167,14 @@ class ShopifyCompletedReturnsSupport {
         }
         return (int) lines.findAll { !exchangeLineIds.contains(normalize(((Map) it).get("id"))) }
                 .sum(0) { Object line -> (((Map) line).get("unfulfilledQuantity") ?: 0) as int }
+    }
+
+    /** True when the order carries a refund made on or after the return was created (any refund when that is unknown). */
+    static boolean orderRefundedSince(Map order, Long returnCreatedMillis) {
+        return ((List) (order?.get("refunds") ?: [])).any { Object refund ->
+            Long at = millis(((Map) refund).get("createdAt"))
+            at != null && (returnCreatedMillis == null || at >= returnCreatedMillis)
+        }
     }
 
     private static boolean hasNode(Object connection) {

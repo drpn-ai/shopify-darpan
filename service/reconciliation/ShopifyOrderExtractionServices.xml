@@ -274,8 +274,10 @@
             <parameter name="completedReturns">
                 <description>DAR-BE-137. Set to read one row per ORDER with a return completed (CLOSED, closedAt in the
                     window) instead of refund/return events: "refunded" keeps orders whose completed return has a refund,
-                    "exchanged" orders whose completed return has exchange items. For a tenant whose returns live only in
-                    Shopify and are checked against NetSuite (Dolls Kill). Rows carry orderId, orderName (no leading #),
+                    "exchanged" orders whose completed return has exchange items, "orderRefunded" (DAR-CLIENT-005) orders whose
+                    completed return was refunded on the return or on the order on or after the return was made (RAILS's
+                    Loop refunds the order and never links the refund to the Return). For a tenant whose returns are
+                    checked against NetSuite (Dolls Kill, RAILS). Rows carry orderId, orderName (no leading #),
                     returnIds, returnCount, closedAt and originalUnfulfilledQuantity (the order's own lines Shopify has not
                     fulfilled, leaving out the lines an exchange added: an exchange reaches NetSuite only once its original
                     order is fulfilled); lookbackHours and sourceFilters do not apply.</description>

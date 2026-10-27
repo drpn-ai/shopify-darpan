@@ -94,7 +94,65 @@ class ShopifyCompletedReturnsSupportTests {
     void anUnknownKindIsRefusedInWords() {
         Map result = ShopifyCompletedReturnsSupport.extract(CONFIG, "both", WINDOW_START, WINDOW_END, [:],
                 { Map cfg, String query, Map vars, Map opts -> fail("must not read Shopify") })
-        assertEquals(["completedReturns is 'refunded' or 'exchanged', got: both"], result.errors)
+        assertEquals(["completedReturns is 'refunded', 'exchanged' or 'orderRefunded', got: both"], result.errors)
+    }
+
+    // DAR-CLIENT-005. RAILS's returns app (Loop) closes the Shopify Return and refunds the ORDER, never linking the
+    // refund to the Return (133 of 133 Loop returns, USA, Oct 20-26). orderRefunded counts such a return as refunded.
+    private static Map loopOrder(String legacyId, String name, String returnCreatedAt, String closedAt, List refundTimes,
+                                 boolean linked = false) {
+        [legacyResourceId: legacyId, name: name,
+         refunds         : refundTimes.collect { [createdAt: it] },
+         returns         : [nodes: [[id      : "gid://shopify/Return/${legacyId}1".toString(), status: "CLOSED",
+                                     createdAt: returnCreatedAt, closedAt: closedAt,
+                                     refunds : [nodes: linked ? [[id: "gid://shopify/Refund/9"]] : []],
+                                     exchangeLineItems: [nodes: []]]]]]
+    }
+
+    private static final List LOOP_ORDERS = [
+            loopOrder("21", "#1001", "2026-10-15T08:00:00Z", "2026-10-20T09:00:00Z", ["2026-10-20T09:00:00Z"]),  // Loop: refund on the order
+            loopOrder("22", "#1002", "2026-10-19T08:00:00Z", "2026-10-20T09:00:00Z", [], true),                   // POS: linked refund
+            loopOrder("23", "#1003", "2026-10-18T08:00:00Z", "2026-10-20T09:00:00Z", ["2026-10-05T22:00:00Z"]),  // refund before the return
+            loopOrder("24", "#1004", "2026-10-18T08:00:00Z", "2026-10-20T09:00:00Z", []),                         // no refund at all
+            loopOrder("25", "#1005", "2026-10-18T08:00:00Z", "2026-10-21T09:00:00Z", ["2026-10-21T09:00:00Z"]),  // closed after the window
+    ]
+
+    private static Map runOrderRefunded(List orders) {
+        List calls = []
+        Map result = ShopifyCompletedReturnsSupport.extract(CONFIG, "orderRefunded", WINDOW_START, WINDOW_END, [:],
+                { Map cfg, String query, Map vars, Map opts -> calls.add([query: query, vars: vars]); page(orders, false) })
+        return result + [calls: calls]
+    }
+
+    @Test
+    void orderRefundedCountsAReturnWhoseOrderWasRefundedOnOrAfterTheReturnWasMade() {
+        Map result = runOrderRefunded(LOOP_ORDERS)
+        assertEquals([], result.errors)
+        assertEquals(["21", "22"], ((List) result.records)*.orderId,
+                "a refund on the order (Loop) or a refund linked to the return (POS); not one older than the return, not none")
+        assertEquals(["1001", "1002"], ((List) result.records)*.orderName)
+        assertEquals("orderRefunded", result.requestMetadata.completedReturns)
+    }
+
+    @Test
+    void orderRefundedAsksForTheOrdersRefundsAndTheReturnsCreationTime() {
+        Map call = (Map) ((List) runOrderRefunded(LOOP_ORDERS).calls)[0]
+        assertTrue(((String) call.query).contains("refunds(first: \$orderRefundsFirst) { createdAt }"), call.query as String)
+        assertTrue(((String) call.query).contains("createdAt"), call.query as String)
+        assertEquals(ShopifyCompletedReturnsSupport.ORDER_REFUNDS_PER_ORDER, ((Map) call.vars).orderRefundsFirst)
+    }
+
+    @Test
+    void refundedAndExchangedStillSendTheirOwnDocumentUnchanged() {
+        List queries = []
+        ["refunded", "exchanged"].each { String kind ->
+            ShopifyCompletedReturnsSupport.extract(CONFIG, kind, WINDOW_START, WINDOW_END, [:],
+                    { Map cfg, String query, Map vars, Map opts -> queries.add(query); assertFalse(vars.containsKey("orderRefundsFirst")); page([], false) })
+        }
+        queries.each { String q -> assertFalse(q.contains("orderRefundsFirst"), q) }
+        assertEquals([], ShopifyCompletedReturnsSupport.extract(CONFIG, "refunded", WINDOW_START, WINDOW_END, [:],
+                { Map cfg, String query, Map vars, Map opts -> page([LOOP_ORDERS[0]], false) }).records,
+                "refunded keeps its meaning: a Loop return with no linked refund is not refunded there")
     }
 
     @Test

@@ -42,7 +42,7 @@ Timestamp sourceWindowEnd = (Timestamp) window.end
 // reaches it. ValueSupport.normalizeInt(pageSize, 100) is defensive parity with that same default,
 // not a fabricated constant reference.
 // DAR-BE-137: completedReturns asks a different question of the same source — one row per order with a return
-// completed in the window (refunded or exchanged), for a tenant whose returns live only in Shopify.
+// completed in the window (refunded, exchanged or orderRefunded), for a tenant whose returns are checked in NetSuite.
 Map extraction = completedReturns ? ShopifyCompletedReturnsSupport.extract(ShopifyAuthConfigSupport.transportConfig(authConfig),
         completedReturns as String, sourceWindowStart.time, sourceWindowEnd.time,
         [connectTimeoutMillis: connectTimeoutMillis, readTimeoutMillis: readTimeoutMillis, maxAttempts: maxAttempts])
