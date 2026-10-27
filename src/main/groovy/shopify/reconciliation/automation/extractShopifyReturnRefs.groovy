@@ -2,6 +2,7 @@ import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
+import shopify.reconciliation.automation.ShopifyCompletedReturnsSupport
 import shopify.reconciliation.automation.ShopifyExtractSupport
 import shopify.reconciliation.automation.ShopifyReturnRefsSupport
 
@@ -40,7 +41,12 @@ Timestamp sourceWindowEnd = (Timestamp) window.end
 // ShopifySourceCatalog's SHOPIFY_ORDER_RETURN_REFS.defaultPageSize (also 100) if a null ever
 // reaches it. ValueSupport.normalizeInt(pageSize, 100) is defensive parity with that same default,
 // not a fabricated constant reference.
-Map extraction = ShopifyReturnRefsSupport.extractReturnRefs(ShopifyAuthConfigSupport.transportConfig(authConfig),
+// DAR-BE-137: completedReturns asks a different question of the same source — one row per order with a return
+// completed in the window (refunded or exchanged), for a tenant whose returns live only in Shopify.
+Map extraction = completedReturns ? ShopifyCompletedReturnsSupport.extract(ShopifyAuthConfigSupport.transportConfig(authConfig),
+        completedReturns as String, sourceWindowStart.time, sourceWindowEnd.time,
+        [connectTimeoutMillis: connectTimeoutMillis, readTimeoutMillis: readTimeoutMillis, maxAttempts: maxAttempts])
+        : ShopifyReturnRefsSupport.extractReturnRefs(ShopifyAuthConfigSupport.transportConfig(authConfig),
         window.startText, window.endText, [
         pageSize            : ValueSupport.normalizeInt(pageSize, 100),
         connectionPageSize  : ValueSupport.normalizeInt(connectionPageSize, ShopifyReturnRefsSupport.DEFAULT_CONNECTION_PAGE_SIZE),

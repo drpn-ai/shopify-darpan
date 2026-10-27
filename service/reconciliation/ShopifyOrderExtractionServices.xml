@@ -271,6 +271,13 @@
                     order-level refunds list, since only emptiness of that nested connection is ever
                     read, never its count.</description>
             </parameter>
+            <parameter name="completedReturns">
+                <description>DAR-BE-137. Set to read one row per ORDER with a return completed (CLOSED, closedAt in the
+                    window) instead of refund/return events: "refunded" keeps orders whose completed return has a refund,
+                    "exchanged" orders whose completed return has exchange items. For a tenant whose returns live only in
+                    Shopify and are checked against NetSuite (Dolls Kill). Rows carry orderId, orderName (no leading #),
+                    returnIds, returnCount and closedAt; lookbackHours and sourceFilters do not apply.</description>
+            </parameter>
             <parameter name="lookbackHours" type="Integer" default-value="3">
                 <description>Hours the fetch/emit floor is widened BEFORE windowStart, so a Shopify
                     event created just before windowStart is still available for the OMS-side forward
