@@ -70,6 +70,15 @@ class ShopifyOrderPaymentSignalTests {
     }
 
     @Test
+    void aVoidedAuthorizationIsNotAPayment() {
+        // Steve Madden 2026-10-28: 19 cancelled orders, each an AUTHORIZATION voided by a VOID naming it; HotWax's OPP
+        // names the VOID, so claiming the authorization flagged every one.
+        assertEquals("", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("1", "AUTHORIZATION"), tx("2", "VOID", "SUCCESS", "1")]))
+        // A void that failed leaves its authorization the payment.
+        assertEquals("1", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("1", "AUTHORIZATION"), tx("2", "VOID", "FAILURE", "1")]))
+    }
+
+    @Test
     void noTransactionsHasNoPaymentTransactionIds() {
         assertEquals("", ShopifyOrderPaymentSignal.paymentTransactionIds([]))
         assertEquals("", ShopifyOrderPaymentSignal.paymentTransactionIds(null))

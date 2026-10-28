@@ -20,19 +20,19 @@ class ShopifyOrderPaymentSignal {
 
     /**
      * DAR-BE-153: the ids HotWax keeps as OPP manualRefNum, comma-joined and sorted — every SUCCESS SALE and CAPTURE, and a
-     * SUCCESS AUTHORIZATION no successful CAPTURE names as its parent. Gorjana prod 2026-10-28: a card's OPP names the
-     * CAPTURE (136/136), every other tender the SALE.
+     * SUCCESS AUTHORIZATION no successful CAPTURE or VOID names as its parent. Gorjana prod 2026-10-28: a card's OPP names
+     * the CAPTURE (136/136), every other tender the SALE; Steve Madden: a cancelled order's OPP names the VOID (19/19).
      */
     static String paymentTransactionIds(Object transactions) {
         if (!(transactions instanceof Collection)) return ""
         List<Map> settled = ((Collection) transactions).findAll { Object t ->
             t instanceof Map && "SUCCESS".equalsIgnoreCase(((Map) t).get("status") as String)
         } as List<Map>
-        Set<String> captured = settled.findAll { kindOf(it) == "CAPTURE" }
+        Set<String> settledAuths = settled.findAll { kindOf(it) in ["CAPTURE", "VOID"] }
                 .collect { legacyId(((Map) (it.get("parentTransaction") ?: [:])).get("id")) }.findAll { it } as Set
         return settled.findAll { Map t ->
             String kind = kindOf(t)
-            kind == "SALE" || kind == "CAPTURE" || (kind == "AUTHORIZATION" && !captured.contains(legacyId(t.get("id"))))
+            kind == "SALE" || kind == "CAPTURE" || (kind == "AUTHORIZATION" && !settledAuths.contains(legacyId(t.get("id"))))
         }.collect { legacyId(it.get("id")) }.findAll { it }.unique().sort().join(",")
     }
 
