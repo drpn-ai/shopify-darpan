@@ -28,6 +28,8 @@ Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object>
     }
     // DAR-BE-064: derived before the source filters run, so a filter and the presence OPP rule can both read it.
     normalizedRecord.hasPaymentTransaction = ShopifyOrderPaymentSignal.hasPaymentTransaction(normalizedRecord.transactions)
+    // DAR-BE-153: the transaction ids HotWax keeps as OPP manualRefNum; compared against HotWax paymentRefNums.
+    normalizedRecord.paymentTransactionIds = ShopifyOrderPaymentSignal.paymentTransactionIds(normalizedRecord.transactions)
     // DAR-BE-125 (R20): Y only when Shopify fulfilled the whole order; compared against HotWax isCompleted.
     normalizedRecord.isFulfilled = normalize(normalizedRecord.displayFulfillmentStatus) == "FULFILLED" ? "Y" : "N"
     return normalizedRecord

@@ -138,7 +138,9 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         ] as Set
         // DAR-BE-063 added sourceName and requiresShipping; DAR-BE-064 added transactions.kind/status
         // (a plain LIST, not a connection, so bulk returns it inline). All additive: the legacy set is intact.
-        assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping", "transactions.kind", "transactions.status", "transactions.gateway"] as Set),
+        // DAR-BE-153 added transactions.id and transactions.parentTransaction.id: the ids HotWax keeps as OPP manualRefNum.
+        assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping", "transactions.kind", "transactions.status", "transactions.gateway",
+                "transactions.id", "transactions.parentTransaction.id"] as Set),
                 ((List<String>) result.selectedFieldPaths) as Set)
 
         String queryDocument = result.queryDocument as String
@@ -149,6 +151,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         assertTrue(queryDocument.contains("currentTotalTaxSet {"))
         assertTrue(queryDocument.contains("transactions {"), "transactions must render as a plain list selection")
         assertTrue(!queryDocument.contains("transactions(first"), "bulk ignores first; a first arg here is noise")
+        assertTrue(queryDocument.contains("parentTransaction {"), "a capture names its authorization")
         assertTrue(queryDocument.contains("subtotalPriceSet {"))
         assertTrue(queryDocument.contains("shopMoney {"))
         // bulkOperationRunQuery rejects variables; bulk documents carry no pagination artifacts

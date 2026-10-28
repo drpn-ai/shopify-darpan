@@ -40,6 +40,39 @@ class ShopifyOrderPaymentSignalTests {
         // DAR-BE-125 (R20): Y only when Shopify fulfilled the whole order; partial is N.
         org.junit.jupiter.api.Assertions.assertTrue(
                 script.contains('normalizedRecord.isFulfilled = normalize(normalizedRecord.displayFulfillmentStatus) == "FULFILLED" ? "Y" : "N"'))
+        org.junit.jupiter.api.Assertions.assertTrue(
+                script.contains("normalizedRecord.paymentTransactionIds = ShopifyOrderPaymentSignal.paymentTransactionIds(normalizedRecord.transactions)"))
+    }
+
+    // DAR-BE-153. The ids HotWax keeps as OPP manualRefNum (gorjana probe 2026-10-28): a card's CAPTURE, a one-step SALE.
+    private static Map tx(String id, String kind, String status = "SUCCESS", String parentId = null) {
+        return [id: "gid://shopify/OrderTransaction/${id}".toString(), kind: kind, status: status, gateway: "shopify_payments",
+                parentTransaction: parentId ? [id: "gid://shopify/OrderTransaction/${parentId}".toString()] : null]
+    }
+
+    @Test
+    void paymentTransactionIdsAreTheSettledSalesAndCaptures() {
+        // #GOR197298413: card authorised and captured, then an exchange top-up taken as a sale a month later.
+        assertEquals("20766330257539,20853219360899", ShopifyOrderPaymentSignal.paymentTransactionIds([
+                tx("20766295916675", "AUTHORIZATION"), tx("20766330257539", "CAPTURE", "SUCCESS", "20766295916675"),
+                tx("20853219360899", "SALE")]))
+    }
+
+    @Test
+    void anAuthorizationNothingCapturedCountsAndFailuresRefundsAndVoidsDoNot() {
+        assertEquals("1", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("1", "AUTHORIZATION")]))
+        // #GOR197242121: a failed sale before the card went through.
+        assertEquals("8352615268483", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("8352576143491", "SALE", "FAILURE"),
+                tx("8352578338947", "AUTHORIZATION"), tx("8352615268483", "CAPTURE", "SUCCESS", "8352578338947")]))
+        assertEquals("5", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("5", "SALE"), tx("6", "REFUND", "SUCCESS", "5"), tx("7", "VOID")]))
+        // A capture that failed leaves its authorization the payment.
+        assertEquals("1", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("1", "AUTHORIZATION"), tx("2", "CAPTURE", "FAILURE", "1")]))
+    }
+
+    @Test
+    void noTransactionsHasNoPaymentTransactionIds() {
+        assertEquals("", ShopifyOrderPaymentSignal.paymentTransactionIds([]))
+        assertEquals("", ShopifyOrderPaymentSignal.paymentTransactionIds(null))
     }
 
     @Test

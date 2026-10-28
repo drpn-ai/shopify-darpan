@@ -66,6 +66,9 @@ class ShopifySourceCatalog {
             "transactions.kind",
             "transactions.status",
             "transactions.gateway",
+            // DAR-BE-153: the ids HotWax keeps as OPP manualRefNum; a capture names its authorization.
+            "transactions.id",
+            "transactions.parentTransaction.id",
         ],
         supportedFilters         : [
             updatedAtFrom : [queryName: "updated_at", comparator: ">=", type: "datetime", sortKey: "UPDATED_AT"],
@@ -102,6 +105,8 @@ class ShopifySourceCatalog {
             [fieldPath: "transactions.kind", label: "Transaction Kind", type: "String", selectionPath: "transactions.kind"],
             [fieldPath: "transactions.status", label: "Transaction Status", type: "String", selectionPath: "transactions.status"],
             [fieldPath: "transactions.gateway", label: "Transaction Gateway", type: "String", selectionPath: "transactions.gateway"],
+            [fieldPath: "transactions.id", label: "Transaction ID", type: "ID", selectionPath: "transactions.id"],
+            [fieldPath: "transactions.parentTransaction.id", label: "Parent Transaction ID", type: "ID", selectionPath: "transactions.parentTransaction.id"],
             [fieldPath: "customer.id", label: "Customer ID", type: "ID", selectionPath: "customer.id"],
             [fieldPath: "customer.email", label: "Customer Email", type: "String", selectionPath: "customer.email"],
             [fieldPath: "shippingAddress.city", label: "Shipping City", type: "String", selectionPath: "shippingAddress.city"],

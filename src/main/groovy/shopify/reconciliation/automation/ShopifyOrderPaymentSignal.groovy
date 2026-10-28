@@ -18,6 +18,32 @@ class ShopifyOrderPaymentSignal {
         return paid ? "Y" : "N"
     }
 
+    /**
+     * DAR-BE-153: the ids HotWax keeps as OPP manualRefNum, comma-joined and sorted — every SUCCESS SALE and CAPTURE, and a
+     * SUCCESS AUTHORIZATION no successful CAPTURE names as its parent. Gorjana prod 2026-10-28: a card's OPP names the
+     * CAPTURE (136/136), every other tender the SALE.
+     */
+    static String paymentTransactionIds(Object transactions) {
+        if (!(transactions instanceof Collection)) return ""
+        List<Map> settled = ((Collection) transactions).findAll { Object t ->
+            t instanceof Map && "SUCCESS".equalsIgnoreCase(((Map) t).get("status") as String)
+        } as List<Map>
+        Set<String> captured = settled.findAll { kindOf(it) == "CAPTURE" }
+                .collect { legacyId(((Map) (it.get("parentTransaction") ?: [:])).get("id")) }.findAll { it } as Set
+        return settled.findAll { Map t ->
+            String kind = kindOf(t)
+            kind == "SALE" || kind == "CAPTURE" || (kind == "AUTHORIZATION" && !captured.contains(legacyId(t.get("id"))))
+        }.collect { legacyId(it.get("id")) }.findAll { it }.unique().sort().join(",")
+    }
+
+    private static String kindOf(Map t) { return ((t.get("kind") ?: "") as String).toUpperCase() }
+
+    /** gid://shopify/OrderTransaction/123 -> 123; a bare id stays as it is. */
+    private static String legacyId(Object id) {
+        String text = id?.toString()?.trim()
+        return text ? text.substring(text.lastIndexOf("/") + 1) : null
+    }
+
     /** Y/N counts over an extract's records, for requestMetadata. */
     static Map<String, Integer> summarize(List records) {
         int y = 0, n = 0
