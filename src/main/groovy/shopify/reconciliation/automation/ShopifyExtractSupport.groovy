@@ -155,6 +155,17 @@ class ShopifyExtractSupport {
      * passed: extraction must keep working for configs saved with versions outside the catalog's
      * setup list. Throws when the query cannot be built.
      */
+    /** DAR-BE-156: legacy order ids one by-key bulk read searches ("(id:1 OR id:2 ...)"). */
+    static final int LOOKUP_IDS_PER_BULK = 250
+
+    static Map<String, Object> buildIdsBulkQuery(String sourceDefinitionId, String operationName, List<String> ids) {
+        return ShopifyGraphqlQueryBuilder.buildBulkQuery([
+                sourceDefinitionId: sourceDefinitionId,
+                operationName     : operationName,
+                filters           : [ids: ids.join(",")],
+        ])
+    }
+
     static Map<String, Object> buildCreatedAtBulkQuery(String sourceDefinitionId, String operationName,
                                                        String windowStartText, String windowEndText) {
         return ShopifyGraphqlQueryBuilder.buildBulkQuery([

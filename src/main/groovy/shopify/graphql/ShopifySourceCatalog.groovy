@@ -78,6 +78,8 @@ class ShopifySourceCatalog {
             processedAtFrom: [queryName: "processed_at", comparator: ">=", type: "datetime", sortKey: "PROCESSED_AT"],
             processedAtTo : [queryName: "processed_at", comparator: "<", type: "datetime", sortKey: "PROCESSED_AT"],
             status        : [queryName: "status", comparator: "", type: "keyword"],
+            // DAR-BE-156: an audit's re-check reads its older open findings' orders by legacy id.
+            ids           : [queryName: "id", comparator: "", type: "idList", sortKey: "ID"],
         ],
         fields                   : [
             [fieldPath: "id", label: "Order ID", type: "ID", selectionPath: "id", required: true],

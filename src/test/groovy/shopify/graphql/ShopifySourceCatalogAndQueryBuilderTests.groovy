@@ -99,6 +99,21 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
+    void anOrdersReadByIdSearchesEachLegacyIdAndRefusesAnythingButDigits() {
+        // DAR-BE-156: an audit re-checks its older open findings by key; Shopify's side reads those orders by id.
+        Map<String, Object> result = ShopifyGraphqlQueryBuilder.buildBulkQuery([
+            sourceDefinitionId: "SHOPIFY_ORDERS",
+            filters           : [ids: "18959057551491, 18959060828291"],
+        ])
+
+        assertEquals("(id:18959057551491 OR id:18959060828291)", result.searchQuery)
+        assertTrue((result.queryDocument as String).contains('orders(query: "(id:18959057551491 OR id:18959060828291)", sortKey: ID)'))
+        assertThrows(IllegalArgumentException) {
+            ShopifyGraphqlQueryBuilder.buildBulkQuery([sourceDefinitionId: "SHOPIFY_ORDERS", filters: [ids: "1001,1002 OR status:any"]])
+        }
+    }
+
+    @Test
     void queryBuilderRejectsFieldsOutsideTheConfiguredSourceDefinition() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException) {
             ShopifyGraphqlQueryBuilder.buildQuery([

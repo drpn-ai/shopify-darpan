@@ -67,10 +67,23 @@ Map<String, Object> window = ShopifyExtractSupport.resolveSourceWindow(ec, authC
         (Timestamp) resolved.windowStartValue, (Timestamp) resolved.windowEndValue, preserveWindowInstants)
 Timestamp sourceWindowStart = (Timestamp) window.start
 Timestamp sourceWindowEnd = (Timestamp) window.end
-Map<String, Object> builtBulkQuery
+// DAR-BE-156: a read by key (an audit re-checking its older open findings) searches those order ids, not the window.
+List<String> idKeys = (lookupKeys instanceof List) ? ((List) lookupKeys).collect { normalize(it) }.findAll { it }.unique() as List<String> : []
+if (idKeys && !(normalize(lookupKeyField) in [null, "id", "legacyResourceId"])) {
+    errors = ["Shopify orders can be read by order id only, not by ${lookupKeyField}.".toString()]
+    warnings = outputWarnings
+    dataAvailable = false
+    recordCount = 0
+    return
+}
+List<Map<String, Object>> builtBulkQueries = []
 try {
-    builtBulkQuery = ShopifyExtractSupport.buildCreatedAtBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
-            "DarpanShopifyOrdersByDateWindow", (String) window.startText, (String) window.endText)
+    builtBulkQueries = idKeys ?
+            idKeys.collate(ShopifyExtractSupport.LOOKUP_IDS_PER_BULK).collect { List<String> chunk ->
+                ShopifyExtractSupport.buildIdsBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS, "DarpanShopifyOrdersByIds", chunk)
+            } :
+            [ShopifyExtractSupport.buildCreatedAtBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+                    "DarpanShopifyOrdersByDateWindow", (String) window.startText, (String) window.endText)]
 } catch (Exception e) {
     errors = [normalize(e.message) ?: "Shopify bulk query could not be built."]
     warnings = outputWarnings
@@ -78,17 +91,18 @@ try {
     recordCount = 0
     return
 }
-String searchQuery = (String) builtBulkQuery.searchQuery
-Map<String, Object> bulkOperationResult = ShopifyExtractSupport.runBulkQuery(authConfig,
-        (String) builtBulkQuery.queryDocument, context)
-
+String searchQuery = idKeys ? "id IN (${idKeys.size()} ids)".toString() : (String) builtBulkQueries[0].searchQuery
+Map<String, Object> bulkOperationResult = null
 List<Map<String, Object>> records = []
-if (bulkOperationResult.ok == false) {
-    outputErrors.addAll(ShopifyExtractSupport.bulkErrors(bulkOperationResult))
-} else {
-    records = ((List) (bulkOperationResult.records ?: []))
+for (Map<String, Object> builtBulkQuery : builtBulkQueries) {
+    bulkOperationResult = ShopifyExtractSupport.runBulkQuery(authConfig, (String) builtBulkQuery.queryDocument, context)
+    if (bulkOperationResult.ok == false) {
+        outputErrors.addAll(ShopifyExtractSupport.bulkErrors(bulkOperationResult))
+        break
+    }
+    records.addAll(((List) (bulkOperationResult.records ?: []))
             .findAll { Object record -> record instanceof Map }
-            .collect { Object record -> normalizeShopifyOrderRecord.call((Map<String, Object>) record) } as List<Map<String, Object>>
+            .collect { Object record -> normalizeShopifyOrderRecord.call((Map<String, Object>) record) } as List<Map<String, Object>>)
 }
 Map filteredOrders = SourceFilterSupport.applyToRecords(records, parsedSourceFilters)
 int extractedRecordCount = records.size()

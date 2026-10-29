@@ -164,6 +164,14 @@ class ShopifyGraphqlQueryBuilder {
 
     static String normalizeFilterValue(String filterKey, String filterValue, Map<String, Object> filterDefinition) {
         if (filterDefinition?.type == "datetime") return normalizeDateTimeFilterValue(filterKey, filterValue)
+        if (filterDefinition?.type == "idList") {
+            List<String> ids = filterValue.split(",").collect { it.trim() }.findAll { it }
+            // Digits only: the ids are joined into Shopify's search syntax, so anything else could change the search.
+            if (!ids || ids.any { !(it ==~ /\d+/) }) {
+                throw new IllegalArgumentException("Shopify filter '${filterKey}' takes legacy order ids (digits) only.")
+            }
+            return ids.join(",")
+        }
         return filterValue
     }
 
@@ -172,6 +180,10 @@ class ShopifyGraphqlQueryBuilder {
         List<String> terms = []
         filters.each { String filterKey, Object value ->
             Map<String, Object> filterDefinition = supportedFilters[filterKey]
+            if (filterDefinition?.type == "idList") {
+                terms.add("(" + value.toString().split(",").collect { "${filterDefinition.queryName}:${it}" }.join(" OR ") + ")")
+                return
+            }
             terms.add("${filterDefinition.queryName}:${filterDefinition.comparator}${renderSearchValue(filterDefinition, value)}")
         }
         return terms.join(" ")
