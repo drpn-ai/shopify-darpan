@@ -30,6 +30,8 @@ Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object>
     normalizedRecord.hasPaymentTransaction = ShopifyOrderPaymentSignal.hasPaymentTransaction(normalizedRecord.transactions)
     // DAR-BE-153: the transaction ids HotWax keeps as OPP manualRefNum; compared against HotWax paymentRefNums.
     normalizedRecord.paymentTransactionIds = ShopifyOrderPaymentSignal.paymentTransactionIds(normalizedRecord.transactions)
+    // DAR-BE-153: every successful transaction id, so each HotWax OPP manualRefNum can be found among them.
+    normalizedRecord.transactionIds = ShopifyOrderPaymentSignal.transactionIds(normalizedRecord.transactions)
     // DAR-BE-125 (R20): Y only when Shopify fulfilled the whole order; compared against HotWax isCompleted.
     normalizedRecord.isFulfilled = normalize(normalizedRecord.displayFulfillmentStatus) == "FULFILLED" ? "Y" : "N"
     return normalizedRecord

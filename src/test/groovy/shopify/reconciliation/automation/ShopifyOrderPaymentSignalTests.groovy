@@ -42,6 +42,8 @@ class ShopifyOrderPaymentSignalTests {
                 script.contains('normalizedRecord.isFulfilled = normalize(normalizedRecord.displayFulfillmentStatus) == "FULFILLED" ? "Y" : "N"'))
         org.junit.jupiter.api.Assertions.assertTrue(
                 script.contains("normalizedRecord.paymentTransactionIds = ShopifyOrderPaymentSignal.paymentTransactionIds(normalizedRecord.transactions)"))
+        org.junit.jupiter.api.Assertions.assertTrue(
+                script.contains("normalizedRecord.transactionIds = ShopifyOrderPaymentSignal.transactionIds(normalizedRecord.transactions)"))
     }
 
     // DAR-BE-153. The ids HotWax keeps as OPP manualRefNum (gorjana probe 2026-10-28): a card's CAPTURE, a one-step SALE.
@@ -76,6 +78,17 @@ class ShopifyOrderPaymentSignalTests {
         assertEquals("", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("1", "AUTHORIZATION"), tx("2", "VOID", "SUCCESS", "1")]))
         // A void that failed leaves its authorization the payment.
         assertEquals("1", ShopifyOrderPaymentSignal.paymentTransactionIds([tx("1", "AUTHORIZATION"), tx("2", "VOID", "FAILURE", "1")]))
+    }
+
+    @Test
+    void transactionIdsAreEverySuccessfulTransactionOfAnyKind() {
+        // Steve Madden 2026-10-28: capture-at-ship, so HotWax's OPP keeps the AUTHORIZATION id after Shopify captures,
+        // and a cancelled order's OPP names the VOID. Every id HotWax may hold is here; failures are not.
+        assertEquals("1,2,3,4", ShopifyOrderPaymentSignal.transactionIds([tx("1", "AUTHORIZATION"),
+                tx("2", "CAPTURE", "SUCCESS", "1"), tx("3", "REFUND", "SUCCESS", "2"), tx("4", "VOID", "SUCCESS", "1"),
+                tx("5", "SALE", "FAILURE"), tx("6", "SALE", "PENDING")]))
+        assertEquals("", ShopifyOrderPaymentSignal.transactionIds([]))
+        assertEquals("", ShopifyOrderPaymentSignal.transactionIds(null))
     }
 
     @Test

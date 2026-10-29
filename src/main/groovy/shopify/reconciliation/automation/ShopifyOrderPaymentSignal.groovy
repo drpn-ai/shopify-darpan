@@ -36,6 +36,18 @@ class ShopifyOrderPaymentSignal {
         }.collect { legacyId(it.get("id")) }.findAll { it }.unique().sort().join(",")
     }
 
+    /**
+     * DAR-BE-153: every SUCCESS transaction id on the order, any kind, comma-joined and sorted. The side a HotWax OPP
+     * manualRefNum must be found in (paymentRefNums all in transactionIds): Steve Madden captures at ship and its OPP keeps
+     * the AUTHORIZATION id, a cancelled order's OPP names the VOID, so no one id per payment fits every store.
+     */
+    static String transactionIds(Object transactions) {
+        if (!(transactions instanceof Collection)) return ""
+        return ((Collection) transactions).findAll { Object t ->
+            t instanceof Map && "SUCCESS".equalsIgnoreCase(((Map) t).get("status") as String)
+        }.collect { legacyId(((Map) it).get("id")) }.findAll { it }.unique().sort().join(",")
+    }
+
     private static String kindOf(Map t) { return ((t.get("kind") ?: "") as String).toUpperCase() }
 
     /** gid://shopify/OrderTransaction/123 -> 123; a bare id stays as it is. */
