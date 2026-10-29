@@ -120,6 +120,15 @@
                     submitted, so a malformed rule fails pre-flight. Absent or empty means no rules and output
                     identical to an unfiltered extract.</description>
             </parameter>
+            <parameter name="lookupKeys" type="List">
+                <description>DAR-BE-156. Read these orders by legacy order id instead of the window (an audit
+                    re-checking its older open findings), LOOKUP_IDS_PER_BULK ids a bulk operation. The window
+                    parameters are still required but not used for the search.</description>
+            </parameter>
+            <parameter name="lookupKeyField">
+                <description>The record field lookupKeys name. Only the order id (id or legacyResourceId) is
+                    supported; any other field is refused.</description>
+            </parameter>
         </in-parameters>
     </service>
 

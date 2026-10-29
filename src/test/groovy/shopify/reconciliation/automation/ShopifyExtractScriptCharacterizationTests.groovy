@@ -1,6 +1,7 @@
 package shopify.reconciliation.automation
 
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
+import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -108,6 +109,28 @@ class ShopifyExtractScriptCharacterizationTests {
         assertTrue(result.dataAvailable as boolean)
         assertEquals("shopify-orders-1785542400000-1785628800000.json", result.fileName)
         assertSnapshot("extract-orders-happy", result, "orders-happy")
+    }
+
+    @Test
+    void ordersReadByKeyReadThoseOrdersByIdInChunksInsteadOfTheWindow() {
+        // DAR-BE-156: an audit re-checks its older open findings by key, so Shopify must read exactly those orders.
+        List<String> keys = (1..251).collect { (18959000000000L + it).toString() }
+        bulkResponder = { -> [ok: true, records: [[id: "gid://shopify/Order/${18959000000000L + bulkCalls.size()}".toString(),
+                                                   displayFulfillmentStatus: "FULFILLED"]], jsonlText: ""] }
+        Map result = call("extract#ShopifyOrders", "orders-by-key", [
+                windowStart           : "2026-10-27T00:00:00Z",
+                windowEnd             : "2026-10-29T00:00:00Z",
+                preserveWindowInstants: true,
+                lookupKeys            : keys,
+                lookupKeyField        : "id",
+        ])
+        assertEquals([], result.errors)
+        assertEquals(2, bulkCalls.size(), "251 ids read as one chunk of ${ShopifyExtractSupport.LOOKUP_IDS_PER_BULK} and one of 1")
+        bulkCalls.each { Map c -> assertFalse((c.queryDocument as String).contains("created_at"), "a read by key ignores the window") }
+        assertTrue((bulkCalls[0].queryDocument as String).contains("(id:18959000000001 OR id:18959000000002 OR "))
+        assertTrue((bulkCalls[1].queryDocument as String).contains('query: "(id:18959000000251)"'))
+        assertEquals(2, result.recordCount, "both chunks' orders are written")
+        assertEquals(["18959000000001", "18959000000002"], records(result)*.id)
     }
 
     @Test
@@ -331,6 +354,11 @@ class ShopifyExtractScriptCharacterizationTests {
 
     private File runtimeFile(String relative) {
         return new File(ec.factory.runtimePath, relative)
+    }
+
+    private List<Map> records(Map result) {
+        File f = runtimeFile((result.fileLocation as String).replace("runtime://", ""))
+        return (List<Map>) ((Map) new JsonSlurper().parse(f)).records
     }
 
     private static Map window() {
