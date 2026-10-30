@@ -121,7 +121,8 @@ class ShopifyOrderPaymentSignalTests {
     void theOrderExtractReportsTheCountsAndTheCanary() {
         String script = new File(System.getProperty("user.dir"),
                 "src/main/groovy/shopify/reconciliation/automation/extractShopifyOrders.groovy").getText("UTF-8")
-        org.junit.jupiter.api.Assertions.assertTrue(script.contains("ShopifyOrderPaymentSignal.summarize("))
+        // DAR-BE-162: counted one kept order at a time as the extract streams.
+        org.junit.jupiter.api.Assertions.assertTrue(script.contains("ShopifyOrderPaymentSignal.tally("))
         org.junit.jupiter.api.Assertions.assertTrue(script.contains("ShopifyOrderPaymentSignal.canaryWarning("))
     }
 }

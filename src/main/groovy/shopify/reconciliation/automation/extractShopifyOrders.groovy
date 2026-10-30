@@ -2,6 +2,7 @@ import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
+import shopify.graphql.ShopifyBulkOperationClient
 import shopify.graphql.ShopifySourceCatalog
 // Moqui extract scripts carry no package declaration, so an unimported class reference compiles
 // fine (Groovy treats it as a dynamic property) and fails only at RUNTIME. Import every support class.
@@ -92,61 +93,80 @@ try {
     return
 }
 String searchQuery = idKeys ? "id IN (${idKeys.size()} ids)".toString() : (String) builtBulkQueries[0].searchQuery
-Map<String, Object> bulkOperationResult = null
-List<Map<String, Object>> records = []
-for (Map<String, Object> builtBulkQuery : builtBulkQueries) {
-    bulkOperationResult = ShopifyExtractSupport.runBulkQuery(authConfig, (String) builtBulkQuery.queryDocument, context)
-    if (bulkOperationResult.ok == false) {
-        outputErrors.addAll(ShopifyExtractSupport.bulkErrors(bulkOperationResult))
-        break
-    }
-    records.addAll(((List) (bulkOperationResult.records ?: []))
-            .findAll { Object record -> record instanceof Map }
-            .collect { Object record -> normalizeShopifyOrderRecord.call((Map<String, Object>) record) } as List<Map<String, Object>>)
-}
-Map filteredOrders = SourceFilterSupport.applyToRecords(records, parsedSourceFilters)
-int extractedRecordCount = records.size()
-records = (List<Map<String, Object>>) filteredOrders.records
-if (outputErrors) {
-    ExcludedRecordsSidecar.discard((Map) filteredOrders.excludedCollector)
-    errors = outputErrors
-    warnings = outputWarnings
-    dataAvailable = false
-    recordCount = records.size()
-    return
-}
-
 String outputBaseLocation = ShopifyExtractSupport.resolveOutputBaseLocation(ec, outputLocation,
         automationExecutionId, automationId, configIdValue)
-String outputFileName = ShopifyExtractSupport.safeFileName(
-        fileName ?: "shopify-orders-${sourceWindowStart.time}-${sourceWindowEnd.time}.json",
-        "shopify-orders.json"
-)
-Map<String, String> rawJsonl = ShopifyExtractSupport.writeRawJsonl(ec, bulkOperationResult, outputBaseLocation,
-        outputFileName, "shopify-orders.jsonl")
-fileName = outputFileName
-fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
-fileTypeEnumId = "DftJson"
-ShopifyExtractSupport.writeExcludedSidecar(ec, (Map) filteredOrders.excludedCollector, outputBaseLocation,
-        outputFileName, outputWarnings)
-// DAR-BE-064 canary: the presence OPP rule (<=) cannot see a missing signal, so report it here.
-Map paymentSummary = ShopifyOrderPaymentSignal.summarize(records)
-String paymentCanary = ShopifyOrderPaymentSignal.canaryWarning(paymentSummary)
-if (paymentCanary) outputWarnings.add(paymentCanary)
-recordCount = records.size()
-dataAvailable = records.size() > 0
-Map<String, Object> metadata = ShopifyExtractSupport.bulkRequestMetadata("SHOPIFY_GRAPHQL_ORDERS", configIdValue,
-        context, window, searchQuery, bulkOperationResult, rawJsonl)
-metadata.putAll([
-        extractedRecordCount    : extractedRecordCount,
-        keptRecordCount         : records.size(),
-        paymentTransactionYCount: paymentSummary.paymentTransactionYCount,
-        paymentTransactionNCount: paymentSummary.paymentTransactionNCount,
-        // Absent (not an empty block) when no rules are configured, matching the line-units extract.
-        filters                 : filteredOrders.configuredExclusions != null ?
-                [configuredExclusions: filteredOrders.configuredExclusions] : null,
-])
-requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>
-ShopifyExtractSupport.writeExtractFile(ec, fileLocation as String, requestMetadata, records)
-warnings = outputWarnings
-errors = []
+File outputDirectory = ShopifyExtractSupport.outputDirectory(ec, outputBaseLocation)
+
+// DAR-BE-162: each bulk result downloads to a file and is read one order at a time: normalized, filtered a batch at a
+// time, and written straight to the extract. Holding the result as text and then as maps OOMed a 2 GB JVM on a month.
+Map<String, Integer> paymentSummary = [paymentTransactionYCount: 0, paymentTransactionNCount: 0]
+ShopifyExtractSupport.ExtractFileWriter extractWriter = new ShopifyExtractSupport.ExtractFileWriter(outputDirectory)
+ShopifyExtractSupport.BatchedSourceFilter sourceFilter = new ShopifyExtractSupport.BatchedSourceFilter(parsedSourceFilters,
+        { Map kept ->
+            ShopifyOrderPaymentSignal.tally(paymentSummary, kept)
+            extractWriter.add(kept)
+        })
+Map<String, Object> bulkOperationResult = null
+Map filteredOrders = null
+int extractedRecordCount = 0
+try {
+    for (Map<String, Object> builtBulkQuery : builtBulkQueries) {
+        // A read by key runs one bulk query per chunk; only the last chunk's raw JSONL is kept beside the extract.
+        ShopifyExtractSupport.discardBulkResult(bulkOperationResult)
+        bulkOperationResult = ShopifyExtractSupport.runBulkQuery(authConfig, (String) builtBulkQuery.queryDocument,
+                context, outputDirectory)
+        if (bulkOperationResult.ok == false) {
+            outputErrors.addAll(ShopifyExtractSupport.bulkErrors(bulkOperationResult))
+            break
+        }
+        ShopifyBulkOperationClient.eachJsonlRecord((File) bulkOperationResult.jsonlFile) { Map<String, Object> record ->
+            extractedRecordCount++
+            sourceFilter.add(normalizeShopifyOrderRecord.call(record))
+        }
+    }
+    filteredOrders = sourceFilter.finish()
+    if (outputErrors) {
+        errors = outputErrors
+        warnings = outputWarnings
+        dataAvailable = false
+        recordCount = extractWriter.recordCount
+        return
+    }
+
+    String outputFileName = ShopifyExtractSupport.safeFileName(
+            fileName ?: "shopify-orders-${sourceWindowStart.time}-${sourceWindowEnd.time}.json",
+            "shopify-orders.json"
+    )
+    Map<String, String> rawJsonl = ShopifyExtractSupport.moveRawJsonl(ec, bulkOperationResult, outputBaseLocation,
+            outputFileName, "shopify-orders.jsonl")
+    fileName = outputFileName
+    fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
+    fileTypeEnumId = "DftJson"
+    ShopifyExtractSupport.writeExcludedSidecar(ec, (Map) filteredOrders.excludedCollector, outputBaseLocation,
+            outputFileName, outputWarnings)
+    // DAR-BE-064 canary: the presence OPP rule (<=) cannot see a missing signal, so report it here.
+    String paymentCanary = ShopifyOrderPaymentSignal.canaryWarning(paymentSummary)
+    if (paymentCanary) outputWarnings.add(paymentCanary)
+    recordCount = extractWriter.recordCount
+    dataAvailable = extractWriter.recordCount > 0
+    Map<String, Object> metadata = ShopifyExtractSupport.bulkRequestMetadata("SHOPIFY_GRAPHQL_ORDERS", configIdValue,
+            context, window, searchQuery, bulkOperationResult, rawJsonl)
+    metadata.putAll([
+            extractedRecordCount    : extractedRecordCount,
+            keptRecordCount         : extractWriter.recordCount,
+            paymentTransactionYCount: paymentSummary.paymentTransactionYCount,
+            paymentTransactionNCount: paymentSummary.paymentTransactionNCount,
+            // Absent (not an empty block) when no rules are configured, matching the line-units extract.
+            filters                 : filteredOrders.configuredExclusions != null ?
+                    [configuredExclusions: filteredOrders.configuredExclusions] : null,
+    ])
+    requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>
+    extractWriter.finish(ec, fileLocation as String, requestMetadata)
+    warnings = outputWarnings
+    errors = []
+} finally {
+    extractWriter.abort()
+    ShopifyExtractSupport.discardBulkResult(bulkOperationResult)
+    // The excluded-records spill holds customer records: gone whether the sidecar was written, not wanted, or failed.
+    ExcludedRecordsSidecar.discard(sourceFilter.excludedCollector)
+}

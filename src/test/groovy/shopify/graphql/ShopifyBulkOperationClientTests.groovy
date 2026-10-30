@@ -3,8 +3,11 @@ package shopify.graphql
 import groovy.json.JsonOutput
 import org.junit.jupiter.api.Test
 
+import java.nio.file.Files
+
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 class ShopifyBulkOperationClientTests {
@@ -62,8 +65,9 @@ class ShopifyBulkOperationClientTests {
         assertTrue((Boolean) result.ok, result.errors?.toString())
         assertEquals("gid://shopify/BulkOperation/1", result.bulkOperation.id)
         assertEquals("COMPLETED", result.bulkOperation.status)
-        assertEquals(2, ((List) result.records).size())
-        assertEquals("1001", ((List<Map>) result.records).first().legacyResourceId)
+        List<Map> records = readRecords(result)
+        assertEquals(2, records.size())
+        assertEquals("1001", records.first().legacyResourceId)
         assertEquals(2, graphqlRequests.size())
         assertEquals(1, downloadRequests.size())
         assertFalse(result.toString().contains("shpat_secret_token"))
@@ -231,7 +235,7 @@ class ShopifyBulkOperationClientTests {
         ])
 
         assertTrue((Boolean) result.ok, result.errors?.toString())
-        assertEquals(0, ((List) result.records).size())
+        assertNull(result.jsonlFile, "nothing to download, nothing to read")
     }
 
     @Test
@@ -275,7 +279,7 @@ class ShopifyBulkOperationClientTests {
 
         assertTrue((Boolean) result.ok, result.errors?.toString())
         assertEquals(2, downloadCalls)
-        assertEquals(1, ((List) result.records).size())
+        assertEquals(1, readRecords(result).size(), "the retry overwrote the failed attempt, it did not append to it")
     }
 
     @Test
@@ -300,6 +304,71 @@ class ShopifyBulkOperationClientTests {
         assertEquals(404, result.statusCode)
         assertEquals(1, result.downloadAttemptCount)
         assertFalse(result.toString().contains("orders.jsonl"))
+    }
+
+    @Test
+    void bulkOperationDownloadsIntoTheGivenDirectoryAndRemovesTheFileWhenTheResultIsRejected() {
+        // DAR-BE-162: the result is a file in the extract's output folder (moved into place by rename), never a String.
+        File directory = Files.createTempDirectory("bulk-download-").toFile()
+        try {
+            Map<String, Object> kept = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                    pollIntervalMillis: 0,
+                    maxPollAttempts   : 1,
+                    downloadDirectory : directory,
+                    httpExecutor      : completedOperationExecutor([id: "gid://shopify/BulkOperation/1", status: "COMPLETED",
+                                                                    objectCount: "2", url: "https://bulk.example.test/orders.jsonl"]),
+                    downloadExecutor  : { Map<String, Object> request -> [statusCode: 200, body: '{"id":"1001"}\n\n{"id":"1002"}\n'] },
+            ])
+            assertTrue((Boolean) kept.ok, kept.errors?.toString())
+            assertEquals(directory, ((File) kept.jsonlFile).parentFile)
+            assertEquals(3, kept.jsonlLineCount, "blank lines are counted as lines, not as records")
+            assertFalse(kept.containsKey("records"))
+            assertFalse(kept.containsKey("jsonlText"))
+            assertEquals(["1001", "1002"], readRecords(kept)*.id)
+
+            Map<String, Object> rejected = ShopifyBulkOperationClient.runQuery(authConfig(), "{ orders { edges { node { id } } } }", [
+                    pollIntervalMillis: 0,
+                    maxPollAttempts   : 1,
+                    downloadDirectory : directory,
+                    httpExecutor      : completedOperationExecutor([id: "gid://shopify/BulkOperation/2", status: "COMPLETED",
+                                                                    objectCount: "2", url: "https://bulk.example.test/orders.jsonl"]),
+                    downloadExecutor  : { Map<String, Object> request -> [statusCode: 200, body: '{"id":"1001"}\nnot json\n'] },
+            ])
+            assertFalse((Boolean) rejected.ok)
+            assertTrue(((List<String>) rejected.errors).any { String error -> error.contains("line 2 was not valid JSON") })
+            assertEquals([], directory.list() as List, "a rejected result leaves no customer data behind")
+        } finally {
+            directory.deleteDir()
+        }
+    }
+
+    @Test
+    void eachJsonlRecordHandsOverObjectsOneAtATimeAndReportsBadLines() {
+        File file = Files.createTempFile("bulk-lines-", ".jsonl").toFile()
+        try {
+            file.setText('{"id":"1"}\n[1,2]\n\n{"id":"2"}\n{oops\n', "UTF-8")
+            List<String> seen = []
+            Map<String, Object> read = ShopifyBulkOperationClient.eachJsonlRecord(file) { Map record -> seen.add(record.id as String) }
+            assertEquals(["1", "2"], seen)
+            assertEquals(5, read.lineCount)
+            assertEquals(2, read.recordCount)
+            assertEquals(["Shopify bulk operation JSONL line 2 was not a JSON object.",
+                          "Shopify bulk operation JSONL line 5 was not valid JSON."], read.errors)
+        } finally {
+            file.delete()
+        }
+    }
+
+    /** The downloaded result's records, read the way an extract reads them; the file is then deleted. */
+    private static List<Map> readRecords(Map<String, Object> result) {
+        File file = (File) result.jsonlFile
+        try {
+            List<Map> records = []
+            ShopifyBulkOperationClient.eachJsonlRecord(file) { Map record -> records.add(record) }
+            return records
+        } finally {
+            file?.delete()
+        }
     }
 
     /** Start succeeds, then every status poll reports the supplied completed operation. */

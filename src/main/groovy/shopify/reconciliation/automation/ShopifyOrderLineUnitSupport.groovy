@@ -11,7 +11,7 @@ import darpan.reconciliation.source.SourceFilterSupport
  * the child lines ARE the records (ShopifyGraphqlQueryBuilder's allowsBulkConnections opt-in).
  *
  * Pure: no transport, no ExecutionContext. Takes the already-parsed lines from
- * ShopifyBulkOperationClient.parseJsonlRecords, which needs no change - it is grain-agnostic.
+ * ShopifyBulkOperationClient.eachJsonlRecord, which needs no change - it is grain-agnostic.
  */
 class ShopifyOrderLineUnitSupport {
 

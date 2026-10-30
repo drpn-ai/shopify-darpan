@@ -6,6 +6,7 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 import java.net.HttpURLConnection
+import java.nio.file.Files
 
 class ShopifyBulkOperationClient {
     private static final Logger logger = LoggerFactory.getLogger(ShopifyBulkOperationClient.class)
@@ -144,33 +145,41 @@ class ShopifyBulkOperationClient {
                 [bulkOperation: safeOperationMetadata(operation), pollCount: Math.max(0, statusHistory.size() - 1), statusHistory: statusHistory] + retryMetadata(startRetryHistory))
     }
 
-    static Map<String, Object> parseJsonlRecords(String jsonlText) {
-        List<Map<String, Object>> records = []
+    /**
+     * DAR-BE-162: reads a downloaded bulk result one line at a time and hands each JSON object to visit, so a month of
+     * orders is never in heap at once (holding the whole result as text and then as maps OOMed a 2 GB JVM on ~125k
+     * orders). Answers [lineCount, recordCount, errors]. With no visit it only checks the file, which completeOperation
+     * does before answering, so a caller never reads a file with a bad line in it.
+     */
+    static Map<String, Object> eachJsonlRecord(File jsonlFile, Closure visit = null) {
         List<String> errors = []
         int lineCount = 0
+        int recordCount = 0
         JsonSlurper slurper = new JsonSlurper()
-
-        (jsonlText ?: "").eachLine { String line ->
-            lineCount++
-            String trimmed = line?.trim()
-            if (!trimmed) return
-            try {
-                Object parsed = slurper.parseText(trimmed)
-                if (parsed instanceof Map) {
-                    records.add((Map<String, Object>) parsed)
-                } else {
-                    errors.add("Shopify bulk operation JSONL line ${lineCount} was not a JSON object.")
+        if (jsonlFile?.exists()) {
+            jsonlFile.withReader("UTF-8") { Reader reader ->
+                String line
+                while ((line = reader.readLine()) != null) {
+                    lineCount++
+                    String trimmed = line.trim()
+                    if (!trimmed) continue
+                    Object parsed
+                    try {
+                        parsed = slurper.parseText(trimmed)
+                    } catch (Exception ignored) {
+                        errors.add("Shopify bulk operation JSONL line ${lineCount} was not valid JSON.".toString())
+                        continue
+                    }
+                    if (!(parsed instanceof Map)) {
+                        errors.add("Shopify bulk operation JSONL line ${lineCount} was not a JSON object.".toString())
+                        continue
+                    }
+                    recordCount++
+                    if (visit != null) visit.call((Map<String, Object>) parsed)
                 }
-            } catch (Exception ignored) {
-                errors.add("Shopify bulk operation JSONL line ${lineCount} was not valid JSON.")
             }
         }
-
-        return [
-                records  : records,
-                lineCount: lineCount,
-                errors   : errors,
-        ]
+        return [lineCount: lineCount, recordCount: recordCount, errors: errors]
     }
 
     static String escapeGraphqlString(String value) {
@@ -246,13 +255,14 @@ class ShopifyBulkOperationClient {
                 statusHistory: statusHistory,
         ] as Map<String, Object>
         Long expectedCount = parseObjectCount(operation.objectCount)
+        // jsonlFile is the downloaded result (null when there was nothing to download). The caller owns it: read it with
+        // eachJsonlRecord, then move it into place or delete it.
         Map<String, Object> baseResult = [
-                ok           : true,
-                bulkOperation: operationMetadata,
-                pollCount    : Math.max(0, statusHistory.size() - 1),
-                statusHistory: statusHistory,
-                records      : [],
-                jsonlText    : "",
+                ok            : true,
+                bulkOperation : operationMetadata,
+                pollCount     : Math.max(0, statusHistory.size() - 1),
+                statusHistory : statusHistory,
+                jsonlFile     : null,
                 jsonlLineCount: 0,
         ] as Map<String, Object>
         if (!downloadUrl) {
@@ -264,36 +274,53 @@ class ShopifyBulkOperationClient {
             return baseResult
         }
 
-        Map<String, Object> downloadResult = downloadTextWithRetry(downloadUrl, options ?: [:])
-        if (downloadResult.ok == false) {
-            Map<String, Object> downloadFailureContext = new LinkedHashMap<String, Object>(failureContext)
-            if (downloadResult.statusCode != null) downloadFailureContext.statusCode = downloadResult.statusCode
-            if (downloadResult.retryable != null) downloadFailureContext.retryable = downloadResult.retryable
-            if (downloadResult.downloadAttemptCount != null) downloadFailureContext.downloadAttemptCount = downloadResult.downloadAttemptCount
-            return safeFailure(((List) downloadResult.errors)?.join("; ") ?: "Shopify bulk operation result could not be downloaded.", downloadFailureContext)
-        }
+        File jsonlFile = newResultFile(options)
+        boolean handedOver = false
+        try {
+            Map<String, Object> downloadResult = downloadWithRetry(downloadUrl, jsonlFile, options ?: [:])
+            if (downloadResult.ok == false) {
+                Map<String, Object> downloadFailureContext = new LinkedHashMap<String, Object>(failureContext)
+                if (downloadResult.statusCode != null) downloadFailureContext.statusCode = downloadResult.statusCode
+                if (downloadResult.retryable != null) downloadFailureContext.retryable = downloadResult.retryable
+                if (downloadResult.downloadAttemptCount != null) downloadFailureContext.downloadAttemptCount = downloadResult.downloadAttemptCount
+                return safeFailure(((List) downloadResult.errors)?.join("; ") ?: "Shopify bulk operation result could not be downloaded.", downloadFailureContext)
+            }
 
-        String jsonlText = downloadResult.body?.toString() ?: ""
-        Map<String, Object> parsed = parseJsonlRecords(jsonlText)
-        List<String> parseErrors = (List<String>) (parsed.errors ?: [])
-        if (parseErrors) {
-            return safeFailure("Shopify bulk operation result could not be parsed: ${parseErrors.join('; ')}.", failureContext)
-        }
+            Map<String, Object> checked = eachJsonlRecord(jsonlFile)
+            List<String> parseErrors = (List<String>) (checked.errors ?: [])
+            if (parseErrors) {
+                return safeFailure("Shopify bulk operation result could not be parsed: ${parseErrors.join('; ')}.", failureContext)
+            }
 
-        int parsedCount = ((List) (parsed.records ?: [])).size()
-        // The client always starts the bulk query with groupObjects: false, so objectCount is exactly
-        // one JSONL object per line; a download truncated at a newline boundary parses cleanly and
-        // would otherwise feed reconciliation a silently incomplete record set.
-        if (expectedCount != null && expectedCount != (parsedCount as long)) {
-            return safeFailure("Shopify bulk operation result was incomplete: expected ${expectedCount} record(s) but parsed ${parsedCount}.",
-                    (failureContext + [retryable: true]) as Map<String, Object>)
-        }
+            int parsedCount = (checked.recordCount ?: 0) as int
+            // The client always starts the bulk query with groupObjects: false, so objectCount is exactly
+            // one JSONL object per line; a download truncated at a newline boundary parses cleanly and
+            // would otherwise feed reconciliation a silently incomplete record set.
+            if (expectedCount != null && expectedCount != (parsedCount as long)) {
+                return safeFailure("Shopify bulk operation result was incomplete: expected ${expectedCount} record(s) but parsed ${parsedCount}.",
+                        (failureContext + [retryable: true]) as Map<String, Object>)
+            }
 
-        return baseResult + [
-                records       : parsed.records ?: [],
-                jsonlText     : jsonlText,
-                jsonlLineCount: parsed.lineCount ?: 0,
-        ]
+            handedOver = true
+            return baseResult + [
+                    jsonlFile     : jsonlFile,
+                    jsonlLineCount: checked.lineCount ?: 0,
+            ]
+        } finally {
+            if (!handedOver) jsonlFile.delete()
+        }
+    }
+
+    /**
+     * DAR-BE-162: the file a result downloads into — in options.downloadDirectory when given (the extract's output
+     * directory, so the raw JSONL moves into place by rename), else the system temp directory. Owner-only on POSIX:
+     * it holds customer orders.
+     */
+    private static File newResultFile(Map options) {
+        File directory = options?.downloadDirectory instanceof File ? (File) options.downloadDirectory : null
+        return directory != null
+                ? Files.createTempFile(directory.toPath(), "shopify-bulk-", ".jsonl.partial").toFile()
+                : Files.createTempFile("shopify-bulk-", ".jsonl.partial").toFile()
     }
 
     private static Long parseObjectCount(Object rawValue) {
@@ -302,14 +329,14 @@ class ShopifyBulkOperationClient {
         return text.toLong()
     }
 
-    private static Map<String, Object> downloadTextWithRetry(String url, Map options) {
+    private static Map<String, Object> downloadWithRetry(String url, File target, Map options) {
         int maxAttempts = Math.max(1, normalizeInt(options.downloadMaxAttempts, DEFAULT_DOWNLOAD_MAX_ATTEMPTS))
         long retryDelayMillis = Math.max(0L, normalizeInt(options.downloadRetryDelayMillis, DEFAULT_DOWNLOAD_RETRY_DELAY_MILLIS) as long)
         Map<String, Object> result = null
         // The result download is an idempotent GET (unlike the H6.5-capped start mutation), so
         // transient 429/5xx failures retry instead of hard-failing a completed long-running operation.
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            result = downloadText(url, options)
+            result = download(url, target, options)
             if (result.ok != false || result.retryable != true || attempt >= maxAttempts) {
                 if (result.ok == false) result.downloadAttemptCount = attempt
                 return result
@@ -326,7 +353,8 @@ class ShopifyBulkOperationClient {
         return result ?: safeFailure("Shopify bulk operation result download did not return a response.")
     }
 
-    private static Map<String, Object> downloadText(String url, Map options) {
+    /** One GET of the result into target, overwriting what an earlier attempt left there. */
+    private static Map<String, Object> download(String url, File target, Map options) {
         Closure downloadExecutor = (Closure) (options.downloadExecutor ?: { Map<String, Object> request -> executeDownloadRequest(request) })
         Map<String, Object> request = [
                 method              : "GET",
@@ -334,6 +362,7 @@ class ShopifyBulkOperationClient {
                 headers             : [:],
                 connectTimeoutMillis: normalizeInt(options.connectTimeoutMillis, ShopifyGraphqlTransport.DEFAULT_CONNECT_TIMEOUT_MILLIS),
                 readTimeoutMillis   : normalizeInt(options.readTimeoutMillis, ShopifyGraphqlTransport.DEFAULT_READ_TIMEOUT_MILLIS),
+                targetFile          : target,
         ]
         Map<String, Object> response
         try {
@@ -354,9 +383,10 @@ class ShopifyBulkOperationClient {
             ]
         }
 
+        // The real executor has streamed the body into targetFile; an injected one (tests) answers with it instead.
+        if (response?.body != null) target.setText(response.body.toString(), "UTF-8")
         return [
                 ok        : true,
-                body      : response?.body?.toString() ?: "",
                 statusCode: statusCode,
                 retryable : false,
         ]
@@ -377,17 +407,21 @@ class ShopifyBulkOperationClient {
 
         long started = System.currentTimeMillis()
         Integer statusCode = null
+        File target = (File) request.targetFile
         try {
             statusCode = connection.responseCode
-            InputStream input = statusCode >= 400 ? connection.errorStream : connection.inputStream
-            String responseBody = input != null ? input.getText("UTF-8") : ""
-            return [
-                    statusCode: statusCode,
-                    body      : responseBody,
-            ]
+            if (statusCode >= 200 && statusCode < 300) {
+                // DAR-BE-162: straight to disk, never into a String. A FileOutputStream truncates the file in place,
+                // so it keeps the owner-only permissions newResultFile gave it.
+                connection.inputStream.withCloseable { InputStream input ->
+                    new FileOutputStream(target).withCloseable { OutputStream output -> input.transferTo(output) }
+                }
+            }
+            return [statusCode: statusCode]
         } finally {
             // DAR-BE-129. The bulk result download is a Shopify call too; counted beside the GraphQL ones.
-            logger.info("shopify bulk download status={} ms={}", statusCode, System.currentTimeMillis() - started)
+            logger.info("shopify bulk download status={} ms={} bytes={}", statusCode, System.currentTimeMillis() - started,
+                    target?.length())
         }
     }
 
