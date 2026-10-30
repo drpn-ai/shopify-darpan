@@ -1,5 +1,6 @@
 package shopify.reconciliation.automation
 
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -328,7 +329,9 @@ class ShopifyOrderLineUnitSupportTests {
                                                                  operator: "INCLUDE_IN", filterValues: "OPEN"]]))
         Map c = (Map) r.excludedCollector
         assertEquals(1, c.total)
-        assertEquals("REMOVED", ((Map) ((List) c.records)[0]).unitState)
+        // A collector spills to disk; there is no in-heap records list to read.
+        assertEquals("REMOVED", ExcludedRecordsSidecar.records(c)[0].unitState)
+        ExcludedRecordsSidecar.discard(c)
     }
 
     @Test

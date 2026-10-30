@@ -58,11 +58,16 @@ class ShopifyOrderPaymentSignal {
 
     /** Y/N counts over an extract's records, for requestMetadata. */
     static Map<String, Integer> summarize(List records) {
-        int y = 0, n = 0
-        (records ?: []).each { Object r ->
-            if (r instanceof Map && ((Map) r).get("hasPaymentTransaction") == "Y") y++ else n++
-        }
-        return [paymentTransactionYCount: y, paymentTransactionNCount: n]
+        Map<String, Integer> summary = [paymentTransactionYCount: 0, paymentTransactionNCount: 0]
+        (records ?: []).each { Object r -> tally(summary, r) }
+        return summary
+    }
+
+    /** DAR-BE-162: one record into a summarize() result, for an extract that streams its records. */
+    static void tally(Map<String, Integer> summary, Object record) {
+        String key = record instanceof Map && ((Map) record).get("hasPaymentTransaction") == "Y" ?
+                "paymentTransactionYCount" : "paymentTransactionNCount"
+        summary.put(key, summary.get(key) + 1)
     }
 
     /**

@@ -5,11 +5,14 @@ import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
+import darpan.reconciliation.source.SourceFilterSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
 import shopify.graphql.ShopifyGraphqlQueryBuilder
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.sql.Timestamp
 import java.time.Instant
 import java.time.LocalDate
@@ -181,7 +184,7 @@ class ShopifyExtractSupport {
      * maxBulkPollAttempts, bulkPollIntervalMillis, bulkStartRetryAttempts, bulkStartRetryDelayMillis);
      * the bulk ones are clamped to their floors here.
      */
-    static Map<String, Object> runBulkQuery(def authConfig, String bulkQueryDocument, Map params) {
+    static Map<String, Object> runBulkQuery(def authConfig, String bulkQueryDocument, Map params, File downloadDirectory = null) {
         Integer bulkMaxPollAttempts = Math.max(1, ValueSupport.normalizeInt(params.maxBulkPollAttempts, ShopifyBulkOperationClient.DEFAULT_MAX_POLL_ATTEMPTS))
         Integer bulkPollDelayMillis = Math.max(0, ValueSupport.normalizeInt(params.bulkPollIntervalMillis, ShopifyBulkOperationClient.DEFAULT_POLL_INTERVAL_MILLIS))
         Integer bulkStartRetryAttemptCount = Math.max(0, ValueSupport.normalizeInt(params.bulkStartRetryAttempts, ShopifyBulkOperationClient.DEFAULT_START_RETRY_ATTEMPTS))
@@ -195,7 +198,21 @@ class ShopifyExtractSupport {
                 pollIntervalMillis   : bulkPollDelayMillis,
                 startRetryAttempts   : bulkStartRetryAttemptCount,
                 startRetryDelayMillis: bulkStartRetryDelayMillisValue,
+                downloadDirectory    : downloadDirectory,
         ])
+    }
+
+    /**
+     * DAR-BE-162: the output folder as a File, so the bulk result downloads into it and the extract is written beside
+     * it, each moved into place by rename. Null when the location is not file-backed (temp files are used then).
+     */
+    static File outputDirectory(def ec, String outputBaseLocation) {
+        return DataManagerSupport.resolveDirectoryFile(ec, outputBaseLocation, true)
+    }
+
+    /** Deletes a bulk result's downloaded JSONL; every path that does not move it into place calls this. */
+    static void discardBulkResult(Map bulkOperationResult) {
+        ((File) bulkOperationResult?.jsonlFile)?.delete()
     }
 
     /** A failed bulk result's errors, blanks dropped; a generic message when it carried none. */
@@ -217,19 +234,21 @@ class ShopifyExtractSupport {
     }
 
     /**
-     * Writes the bulk operation's raw JSONL beside the extract, named after it.
+     * Moves the bulk operation's downloaded JSONL beside the extract, named after it.
      *
-     * @return [rawJsonlFileName, rawJsonlLocation], both null when the result carried no JSONL text
+     * @return [rawJsonlFileName, rawJsonlLocation], both null when the result carried no JSONL
      */
-    static Map<String, String> writeRawJsonl(def ec, Map bulkOperationResult, String outputBaseLocation,
-                                             String outputFileName, String fallbackJsonlFileName) {
-        String rawJsonlText = bulkOperationResult?.jsonlText?.toString() ?: ""
+    static Map<String, String> moveRawJsonl(def ec, Map bulkOperationResult, String outputBaseLocation,
+                                            String outputFileName, String fallbackJsonlFileName) {
+        File jsonlFile = (File) bulkOperationResult?.jsonlFile
         String rawJsonlLocation = null
         String rawJsonlFileName = null
-        if (rawJsonlText) {
+        if (jsonlFile?.exists() && jsonlFile.length() > 0L) {
             rawJsonlFileName = safeJsonlFileName(outputFileName, fallbackJsonlFileName)
             rawJsonlLocation = DataManagerSupport.childLocation(outputBaseLocation, rawJsonlFileName)
-            DataManagerSupport.writeText(ec, rawJsonlLocation, rawJsonlText)
+            DataManagerSupport.moveIntoLocation(ec, jsonlFile, rawJsonlLocation)
+        } else {
+            discardBulkResult(bulkOperationResult)
         }
         return [rawJsonlFileName: rawJsonlFileName, rawJsonlLocation: rawJsonlLocation]
     }
@@ -253,7 +272,7 @@ class ShopifyExtractSupport {
      *
      * @param passThrough the raw automationId, fileSide, systemEnumId and sourceTypeEnumId parameters
      * @param window a {@link #resolveSourceWindow} result
-     * @param rawJsonl a {@link #writeRawJsonl} result
+     * @param rawJsonl a {@link #moveRawJsonl} result
      */
     static Map<String, Object> bulkRequestMetadata(String sourceType, String configIdValue, Map passThrough,
                                                    Map window, String searchQuery, Map bulkOperationResult, Map rawJsonl) {
@@ -285,11 +304,120 @@ class ShopifyExtractSupport {
         ] as Map<String, Object>
     }
 
-    /** The {metadata, records} envelope the compare stage reads. */
-    static void writeExtractFile(def ec, String fileLocation, Map requestMetadata, List records) {
-        DataManagerSupport.writeText(ec, fileLocation, JsonOutput.toJson([
-                metadata: requestMetadata,
-                records : records,
-        ]))
+    private static File workFile(File directory, String prefix) {
+        // Owner-only (0600 on POSIX): these hold customer records.
+        return directory != null
+                ? Files.createTempFile(directory.toPath(), prefix, ".partial").toFile()
+                : Files.createTempFile(prefix, ".partial").toFile()
+    }
+
+    /**
+     * DAR-BE-162: writes the {metadata, records} envelope the compare stage reads without the records ever being in
+     * heap together, byte for byte what JsonOutput.toJson([metadata:, records:]) wrote from a whole list. Records go to
+     * a work file as they come; finish() writes the metadata (only known at the end) first, copies the records after
+     * it, and moves the document into place. Callers abort() in a finally, which drops whatever is left.
+     */
+    static class ExtractFileWriter {
+        private final File directory
+        private File recordsFile
+        private Writer recordsWriter
+        int recordCount = 0
+
+        ExtractFileWriter(File directory) {
+            this.directory = directory
+        }
+
+        void add(Map record) {
+            if (recordsWriter == null) {
+                recordsFile = workFile(directory, "shopify-extract-records-")
+                recordsWriter = Files.newBufferedWriter(recordsFile.toPath(), StandardCharsets.UTF_8)
+            }
+            if (recordCount > 0) recordsWriter.write(",")
+            recordsWriter.write(JsonOutput.toJson(record))
+            recordCount++
+        }
+
+        void finish(def ec, String fileLocation, Map requestMetadata) {
+            recordsWriter?.close()
+            recordsWriter = null
+            File document = workFile(directory, "shopify-extract-")
+            try {
+                document.withOutputStream { OutputStream out ->
+                    out.write(('{"metadata":' + JsonOutput.toJson(requestMetadata) + ',"records":[').getBytes(StandardCharsets.UTF_8))
+                    if (recordsFile != null) recordsFile.withInputStream { InputStream input -> input.transferTo(out) }
+                    out.write(']}'.getBytes(StandardCharsets.UTF_8))
+                }
+                DataManagerSupport.moveIntoLocation(ec, document, fileLocation)
+            } finally {
+                if (document.exists()) document.delete()
+                abort()
+            }
+        }
+
+        void abort() {
+            try {
+                recordsWriter?.close()
+            } catch (IOException ignored) {
+            }
+            recordsWriter = null
+            recordsFile?.delete()
+            recordsFile = null
+        }
+    }
+
+    /**
+     * DAR-BE-162: the source filters over a stream of records, a batch at a time through
+     * SourceFilterSupport.applyToRecords, the way the OMS extract filters a page at a time. One batch is in heap, the
+     * dropped records spill to disk through ExcludedRecordsSidecar.merge, and each rule's counts add up across batches.
+     * finish() answers what applyToRecords answers for the whole list, less the kept records (they went to keptSink).
+     */
+    static class BatchedSourceFilter {
+        static final int BATCH_SIZE = 500
+
+        private final List<Map<String, Object>> rules
+        private final Closure keptSink
+        private final List<Map> batch = []
+        private List<Map<String, Object>> configuredExclusions
+        final Map excludedCollector
+
+        BatchedSourceFilter(List<Map<String, Object>> rules, Closure keptSink) {
+            this.rules = rules
+            this.keptSink = keptSink
+            this.excludedCollector = rules ? ExcludedRecordsSidecar.newCollector() : null
+        }
+
+        void add(Map record) {
+            if (!rules) {
+                keptSink.call(record)
+                return
+            }
+            batch.add(record)
+            if (batch.size() >= BATCH_SIZE) filterBatch()
+        }
+
+        Map finish() {
+            if (!rules) return [configuredExclusions: null, excludedCollector: null]
+            // Also lists every rule, at zero, when no record came at all.
+            filterBatch()
+            ExcludedRecordsSidecar.flush(excludedCollector)
+            return [configuredExclusions: configuredExclusions, excludedCollector: excludedCollector]
+        }
+
+        private void filterBatch() {
+            Map filtered = SourceFilterSupport.applyToRecords(new ArrayList<Map>(batch), rules)
+            batch.clear()
+            ((List<Map>) filtered.records).each { Map kept -> keptSink.call(kept) }
+            ExcludedRecordsSidecar.merge(excludedCollector, (Map) filtered.excludedCollector)
+            List<Map<String, Object>> counts = (List<Map<String, Object>>) filtered.configuredExclusions
+            if (configuredExclusions == null) {
+                configuredExclusions = counts
+                return
+            }
+            counts.eachWithIndex { Map<String, Object> count, int i ->
+                Map<String, Object> total = configuredExclusions[i]
+                total.excludedCount = (total.excludedCount as int) + (count.excludedCount as int)
+                total.fieldAbsentCount = (total.fieldAbsentCount as int) + (count.fieldAbsentCount as int)
+            }
+        }
     }
 }

@@ -1,6 +1,7 @@
 package shopify.reconciliation.automation
 
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
+import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -10,6 +11,8 @@ import org.junit.jupiter.api.TestInstance
 import org.moqui.context.ExecutionContext
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
+
+import java.nio.file.Files
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
@@ -39,6 +42,7 @@ class ShopifyExtractScriptCharacterizationTests {
     List<Map> authCalls = []
     List<Map> bulkCalls = []
     List<Map> returnRefsCalls = []
+    List<File> downloadDirectories = []
     Map authConfigFixture
     String authError
     Closure<Map> bulkResponder
@@ -55,8 +59,11 @@ class ShopifyExtractScriptCharacterizationTests {
             return self.authConfigFixture
         }
         ShopifyBulkOperationClient.metaClass.static.runQuery = { Map cfg, String queryDocument, Map options ->
-            self.bulkCalls.add([authConfig: cfg, queryDocument: queryDocument, options: options])
-            return self.bulkResponder.call()
+            // The download directory is the run's output folder, an absolute path: asserted where it matters, not snapshotted.
+            self.bulkCalls.add([authConfig: cfg, queryDocument: queryDocument,
+                                options   : options.findAll { it.key != "downloadDirectory" }])
+            self.downloadDirectories.add((File) options.downloadDirectory)
+            return asDownloaded(self.bulkResponder.call(), (File) options.downloadDirectory)
         }
         ShopifyReturnRefsSupport.metaClass.static.extractReturnRefs = { Map cfg, Object windowStart, Object windowEnd, Map options, Closure executor ->
             self.returnRefsCalls.add([authConfig: cfg, windowStart: windowStart, windowEnd: windowEnd, options: options,
@@ -79,6 +86,7 @@ class ShopifyExtractScriptCharacterizationTests {
         authCalls.clear()
         bulkCalls.clear()
         returnRefsCalls.clear()
+        downloadDirectories.clear()
         authError = null
         authConfigFixture = [shopApiUrl : "https://krewe-test.myshopify.com", apiVersion: "2025-01",
                              accessToken: "shpat_characterization", timeZone: "UTC"]
@@ -108,7 +116,39 @@ class ShopifyExtractScriptCharacterizationTests {
         assertEquals(2, result.recordCount)
         assertTrue(result.dataAvailable as boolean)
         assertEquals("shopify-orders-1785542400000-1785628800000.json", result.fileName)
+        assertEquals(runtimeFile("${OUTPUT_ROOT}/orders-happy").canonicalFile, downloadDirectories[0].canonicalFile,
+                "DAR-BE-162: the result downloads into the output folder, so the raw JSONL moves into place by rename")
         assertSnapshot("extract-orders-happy", result, "orders-happy")
+    }
+
+    @Test
+    void ordersStreamAcrossFilterBatchesKeepingOrderCountsAndEveryDroppedOrder() {
+        // DAR-BE-162: more orders than one filter batch, so the per-rule counts, the excluded sidecar and the order of
+        // the kept records must come out as if the whole list had been filtered at once.
+        int total = ShopifyExtractSupport.BatchedSourceFilter.BATCH_SIZE * 2 + 37
+        List<Map> orders = (1..total).collect { int n ->
+            [id: "gid://shopify/Order/${n}".toString(), name: "#${n}".toString(),
+             displayFinancialStatus: n % 3 == 0 ? "VOIDED" : "PAID",
+             transactions: n % 2 == 0 ? [[kind: "SALE", status: "SUCCESS", gateway: "shopify_payments"]] : []] as Map
+        }
+        bulkResponder = { -> [ok: true, records: orders, bulkOperation: [id: "gid://shopify/BulkOperation/7", status: "COMPLETED"]] }
+        Map result = call("extract#ShopifyOrders", "orders-stream", window() + [
+                sourceFilters: [[sequenceNum: 1, fieldExpression: "displayFinancialStatus", operator: "EXCLUDE_IN",
+                                 filterValues: "VOIDED"]]])
+        assertEquals([], result.errors)
+        List<String> keptIds = orders.findAll { it.displayFinancialStatus != "VOIDED" }.collect { (it.id as String).tokenize("/").last() }
+        assertEquals(keptIds, records(result)*.id)
+        assertEquals(keptIds.size(), result.recordCount)
+        Map metadata = (Map) result.requestMetadata
+        assertEquals(total, metadata.extractedRecordCount)
+        assertEquals(keptIds.size(), metadata.keptRecordCount)
+        assertEquals([total.intdiv(3), 0], [metadata.filters.configuredExclusions[0].excludedCount,
+                                           metadata.filters.configuredExclusions[0].fieldAbsentCount])
+        assertEquals(keptIds.count { (it as int) % 2 == 0 }, metadata.paymentTransactionYCount)
+        File folder = runtimeFile("${OUTPUT_ROOT}/orders-stream")
+        File sidecar = folder.listFiles().find { it.name.endsWith(".excluded.json") }
+        assertEquals(total.intdiv(3), ((List) ((Map) new JsonSlurper().parse(sidecar)).records).size())
+        assertEquals([], folder.list().findAll { it.endsWith(".partial") } as List, "no work file is left behind")
     }
 
     @Test
@@ -359,6 +399,21 @@ class ShopifyExtractScriptCharacterizationTests {
     private List<Map> records(Map result) {
         File f = runtimeFile((result.fileLocation as String).replace("runtime://", ""))
         return (List<Map>) ((Map) new JsonSlurper().parse(f)).records
+    }
+
+    /** What the real client answers: the records as a downloaded JSONL file in the output folder, not in heap. */
+    private static Map asDownloaded(Map result, File directory) {
+        if (!(result?.records instanceof List)) return result
+        Map downloaded = new LinkedHashMap(result)
+        List records = (List) downloaded.remove("records")
+        downloaded.remove("jsonlText")
+        if (records) {
+            File file = directory != null ? Files.createTempFile(directory.toPath(), "shopify-bulk-", ".jsonl.partial").toFile()
+                    : Files.createTempFile("shopify-bulk-", ".jsonl.partial").toFile()
+            file.withWriter("UTF-8") { Writer w -> records.each { w.write(JsonOutput.toJson(it)); w.write("\n") } }
+            downloaded.jsonlFile = file
+        }
+        return downloaded
     }
 
     private static Map window() {
