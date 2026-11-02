@@ -122,7 +122,7 @@ class ShopifyReturnRefsSupport {
     private static final String EVENTS_DOCUMENT = '''query DarpanShopifyReturnEventDiscovery($first: Int!, $after: String, $query: String) {
   events(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {
     pageInfo { hasNextPage endCursor }
-    nodes { id createdAt ... on BasicEvent { action subjectId subjectType arguments } }
+    nodes { id createdAt message ... on BasicEvent { action subjectId subjectType arguments } }
   }
 }'''
 
@@ -144,6 +144,35 @@ class ShopifyReturnRefsSupport {
     static final String UNREADABLE_ORDER_COUNT_KEY = "unreadableOrderCount"
     static final String UNREADABLE_RETURN_ROWS_KEY = "unreadableOrderReturnRows"
     static final String UNREADABLE_REFUND_ONLY_KEY = "unreadableOrderRefundOnlyCount"
+
+    /**
+     * A REBUILT RETURN'S STATUS (DAR-BE-179). Order and Return are both unreadable past the 60-day limit,
+     * but the return's lifecycle events are not (retention ~90 days). Live on gorjana 2026-11-02: the last
+     * return event named for a return matched its Return.status on 138 of 138 readable returns
+     * (return_closed -> CLOSED, return_canceled -> CANCELED), and all 9 rebuilt rows left open in the
+     * last 12 daily runs were returns canceled ~10 minutes after creation: permanent missing-in-OMS noise.
+     * So when rows were rebuilt, one more scan reads these actions from the earliest rebuilt return to
+     * NOW (a cancel after windowEnd still counts), and a return is matched by its name in the event
+     * message, else by a shared return line item (return_closed lists none; return_canceled does).
+     *   - last event return_canceled -> the row is dropped and counted (CANCELED returns never reach OMS);
+     *   - otherwise the row carries returnStatusFromEvents: CLOSED, or OPEN (created or reopened).
+     * CLOSED is NOT suppressed here, unlike CLOSED-unrefunded on a readable order: the refund is
+     * unreadable, so this row is the return's only representation (6872256348291 was closed, refunded
+     * and really missing in HotWax). A failed scan leaves every row in place without the field.
+     */
+    static final String LIFECYCLE_ACTIONS = "action:return_closed OR action:return_canceled OR action:return_reopened"
+    static final String ACTION_RETURN_CLOSED = "return_closed"
+    static final String ACTION_RETURN_CANCELED = "return_canceled"
+    static final String ACTION_RETURN_REOPENED = "return_reopened"
+    static final String RETURN_STATUS_FROM_EVENTS_FIELD = "returnStatusFromEvents"
+    static final String UNREADABLE_CANCELED_KEY = "unreadableOrderCanceledReturnsSuppressed"
+    /**
+     * The return's name in an event message: "return" then a token ending -R<n>, with or without "#".
+     * Live shapes 2026-11-02: "created return #GOR196861210-R1." (gorjana), "created return
+     * DK577640022111326495-R1." / "Return DK5129406-R1 was closed." (Dolls Kill). The name may sit
+     * inside a link, so tags are stripped first.
+     */
+    private static final Pattern RETURN_NAME_IN_MESSAGE = Pattern.compile(/(?i)\breturn\s+(#?[A-Za-z0-9][\w-]*-R\d+)\b/)
     private static final int MAX_LISTED_ORDER_IDS = 20
     private static final String RETURN_LINE_ITEMS_DOCUMENT = '''query DarpanShopifyReturnLineItems($ids: [ID!]!) {
   nodes(ids: $ids) { id ... on ReturnLineItem { fulfillmentLineItem { lineItem { id } } } }
@@ -310,7 +339,7 @@ class ShopifyReturnRefsSupport {
         Map<String, List<Map<String, Object>>> eventsByOrderId =
                 (Map<String, List<Map<String, Object>>>) (discovery.get("eventsByOrderId") ?: [:])
         List<String> unreadableOrderIds = []
-        Map<String, Integer> unreadableCounts = [rows: 0, refundOnly: 0]
+        Map<String, Integer> unreadableCounts = [rows: 0, refundOnly: 0, canceled: 0]
 
         if (!errors) {
             discoveredOrderIds.collate(MAX_IDS_PER_NODES_CALL).each { List<String> idChunk ->
@@ -394,6 +423,7 @@ class ShopifyReturnRefsSupport {
                 (UNREADABLE_ORDER_COUNT_KEY): unreadableOrderIds.size(),
                 (UNREADABLE_RETURN_ROWS_KEY): unreadableCounts.rows,
                 (UNREADABLE_REFUND_ONLY_KEY): unreadableCounts.refundOnly,
+                (UNREADABLE_CANCELED_KEY)   : unreadableCounts.canceled,
         ] as Map<String, Object>
         if (parsedFilters) {
             // EVERY configured rule appears, including one that matched nothing (excludedCount 0) —
@@ -614,8 +644,13 @@ class ShopifyReturnRefsSupport {
      */
     private static Map<String, Object> discoverOrderIds(Map authConfig, String floorIso, String windowEndIso,
                                                         Closure exec, Map options, List<String> warnings) {
-        String searchQuery = ("subject_type:Order AND (" + DISCOVERY_ACTIONS + ") " +
-                "AND created_at:>='" + floorIso + "' AND created_at:<'" + windowEndIso + "'").toString()
+        return scanEvents(authConfig, ("subject_type:Order AND (" + DISCOVERY_ACTIONS + ") " +
+                "AND created_at:>='" + floorIso + "' AND created_at:<'" + windowEndIso + "'").toString(), exec, options, warnings)
+    }
+
+    /** Pages events(query:) to the end; one entry per event, grouped by order, ids in first-seen order. */
+    private static Map<String, Object> scanEvents(Map authConfig, String searchQuery,
+                                                  Closure exec, Map options, List<String> warnings) {
         Set<String> orderIds = new LinkedHashSet<String>()
         Map<String, List<Map<String, Object>>> eventsByOrderId = [:]
         String cursor = null
@@ -649,6 +684,7 @@ class ShopifyReturnRefsSupport {
                         action           : normalize(event.get("action")),
                         createdAt        : normalize(event.get("createdAt")),
                         returnLineItemIds: returnLineItemIds(event.get("arguments")),
+                        returnName       : returnName(event.get("message")),
                 ] as Map<String, Object>)
             }
             Map pageInfo = (Map) eventsConnection.get("pageInfo")
@@ -660,6 +696,14 @@ class ShopifyReturnRefsSupport {
             }
         }
         return [ok: true, orderIds: new ArrayList<String>(orderIds), eventsByOrderId: eventsByOrderId, errors: []]
+    }
+
+    /** The return's name ("#GOR196861210-R1") out of an event message, or null. */
+    static String returnName(Object rawMessage) {
+        String text = normalize(rawMessage)?.replaceAll(/<[^>]*>/, "")
+        if (!text) return null
+        Matcher m = RETURN_NAME_IN_MESSAGE.matcher(text)
+        return m.find() ? m.group(1) : null
     }
 
     /** return_created's arguments: [{return_line_items: [{id, quantity}], ...}]. Anything else yields none. */
@@ -731,24 +775,51 @@ class ShopifyReturnRefsSupport {
         }
         if (errors) return []
 
-        eventByKey.values().each { Map<String, Object> e ->
+        Map<String, List<Map<String, Object>>> lifecycleByOrderId = lifecycleEvents(authConfig, eventByKey.values(), exec, options, warnings)
+        Map<String, String> statusByKey = [:]
+        if (lifecycleByOrderId != null) {
+            eventByKey.each { String key, Map<String, Object> e ->
+                statusByKey.put(key, statusFromEvents(e, lifecycleByOrderId.get((String) e.orderId) ?: []))
+            }
+        }
+        Map<String, String> orderStatusByOrderId = [:]
+        eventByKey.groupBy { String key, Map<String, Object> e -> (String) e.orderId }.each { String orderId, Map<String, Map<String, Object>> byKey ->
+            String orderStatus = orderReturnStatusFromEvents(byKey.keySet().collect { statusByKey.get(it) })
+            if (orderStatus) orderStatusByOrderId.put(orderId, orderStatus)
+        }
+        int canceled = 0
+        eventByKey.each { String key, Map<String, Object> e ->
+            String status = statusByKey.get(key)
+            if (status == RETURN_STATUS_CANCELED) {
+                canceled++
+                return
+            }
             List<String> lineIds = ((List<String>) e.returnLineItemIds).collect { lineIdByReturnLineItem.get(it) }
                     .findAll { it }.unique().sort()
-            rows.add([
+            Map<String, Object> row = [
                     refundOrReturnId    : e.id,
                     refundOrReturnType  : ID_TYPE_RETURN,
                     orderId             : e.orderId,
                     createdAt           : e.createdAt,
                     (LINE_IDS_FIELD)    : lineIds ? lineIds.join(",") : null,
                     (ORDER_READABLE_FIELD): false,
-            ] as Map<String, Object>)
+            ] as Map<String, Object>
+            if (status) row.put(RETURN_STATUS_FROM_EVENTS_FIELD, status)
+            String orderStatus = orderStatusByOrderId.get((String) e.orderId)
+            if (orderStatus) {
+                row.put("orderReturnStatus", orderStatus)
+                row.put(ORDER_RETURN_STATUS_SOURCE_FIELD, ORDER_RETURN_STATUS_SOURCE_EVENTS)
+            }
+            rows.add(row)
         }
         counts.rows = rows.size()
         counts.refundOnly = refundOnlyOrderIds.size()
+        counts.canceled = canceled
 
         warnings.add(("${unreadableOrderIds.size()} order(s) with return or refund activity in this window are older " +
                 "than Shopify's 60-day order read limit. ${rows.size()} return(s) on them were rebuilt from their " +
-                "return events and are checked by order and line.").toString())
+                "return events and are checked by order and line" +
+                (canceled ? "; ${canceled} canceled return(s) on them were left out" : "") + ".").toString())
         if (refundOnlyOrderIds) {
             warnings.add(("${refundOnlyOrderIds.size()} of those order(s) had only a refund in this window, which " +
                     "Shopify does not expose on orders past the read limit, so they were not checked: " +
@@ -757,6 +828,67 @@ class ShopifyReturnRefsSupport {
                     ".").toString())
         }
         return rows
+    }
+
+    static final String RETURN_STATUS_CANCELED = "CANCELED"
+    static final String RETURN_STATUS_OPEN = "OPEN"
+
+    /**
+     * The rebuilt returns' lifecycle events, by order, read from the earliest rebuilt return to now. Null
+     * when the scan fails: status unknown, every row stays (see A REBUILT RETURN'S STATUS).
+     */
+    private static Map<String, List<Map<String, Object>>> lifecycleEvents(Map authConfig, Collection<Map<String, Object>> rebuilt,
+                                                                          Closure exec, Map options, List<String> warnings) {
+        if (rebuilt.isEmpty()) return [:]
+        Long floor = rebuilt.collect { parseIsoMillis(it.createdAt) }.findAll { it != null }.min()
+        if (floor == null) return [:]
+        Map<String, Object> scan = scanEvents(authConfig, ("subject_type:Order AND (" + LIFECYCLE_ACTIONS + ") " +
+                "AND created_at:>='" + Instant.ofEpochMilli(floor).toString() + "'").toString(), exec, options, warnings)
+        if (scan.get("ok") != true) {
+            warnings.add(("Could not read the return status of returns rebuilt for orders past the 60-day limit (" +
+                    ((List) (scan.get("errors") ?: [])).take(2).join("; ") + "); they are all checked.").toString())
+            return null
+        }
+        return (Map<String, List<Map<String, Object>>>) (scan.get("eventsByOrderId") ?: [:])
+    }
+
+    static final String ORDER_RETURN_STATUS_SOURCE_FIELD = "orderReturnStatusSource"
+    static final String ORDER_RETURN_STATUS_SOURCE_EVENTS = "events"
+
+    /**
+     * Shopify's Order.returnStatus rule over the order's rebuilt returns, so a tenant's orderReturnStatus
+     * exclusion (Dolls Kill: EXCLUDE_IN IN_PROGRESS) reaches rebuilt rows too. Matched Order.returnStatus on
+     * 137/137 readable gorjana orders, and Dolls Kill's readable orders show the same pattern:
+     * any OPEN -> IN_PROGRESS, else any CLOSED -> RETURNED, all CANCELED -> NO_RETURN.
+     * IN_PROGRESS is certain; RETURNED / NO_RETURN cover only the returns this run rebuilt, so an older
+     * still-open return outside the scan would make Shopify say IN_PROGRESS where this says otherwise —
+     * that keeps a row, it never hides one. Any unknown status -> null (no field, as before).
+     */
+    private static String orderReturnStatusFromEvents(List<String> statuses) {
+        if (statuses.isEmpty() || statuses.any { it == null }) return null
+        if (statuses.contains(RETURN_STATUS_OPEN)) return "IN_PROGRESS"
+        if (statuses.contains(RETURN_STATUS_CLOSED)) return "RETURNED"
+        return "NO_RETURN"
+    }
+
+    /** CLOSED, CANCELED or OPEN: the last of this return's own lifecycle events since it was created. */
+    private static String statusFromEvents(Map<String, Object> created, List<Map<String, Object>> orderEvents) {
+        Long createdMillis = parseIsoMillis(created.createdAt)
+        String name = (String) created.returnName
+        Set<String> lines = new HashSet<String>((List<String>) (created.returnLineItemIds ?: []))
+        Map<String, Object> last = orderEvents.findAll { Map<String, Object> e ->
+            Long at = parseIsoMillis(e.createdAt)
+            if (at == null || createdMillis == null || at < createdMillis) return false
+            String eName = (String) e.returnName
+            // Name first: two returns on one order never share it. Lines only when either side lacks a name.
+            if (name && eName) return name == eName
+            return ((List<String>) (e.returnLineItemIds ?: [])).any { lines.contains(it) }
+        }.max { parseIsoMillis(it.createdAt) }
+        switch (last?.action) {
+            case ACTION_RETURN_CANCELED: return RETURN_STATUS_CANCELED
+            case ACTION_RETURN_CLOSED: return RETURN_STATUS_CLOSED
+            default: return RETURN_STATUS_OPEN
+        }
     }
 
     private static List<Map<String, Object>> toRecords(Map node, int refundsFirst, int returnsFirst,

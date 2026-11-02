@@ -1283,11 +1283,16 @@ class ShopifyReturnRefsSupportTests {
      * its return line item still resolves by id to line 15542749593731.
      */
     private static Closure unreadableOrderExecutor(List<Map> events, Map<String, String> lineByReturnLineItem,
-                                                   List<String> documents = []) {
+                                                   List<String> documents = [], List<Map> lifecycleEvents = [],
+                                                   List<String> queries = [], boolean lifecycleFails = false) {
         return { Map cfg, String doc, Map vars, Map opts ->
             if (doc.contains("events(")) {
-                documents.add("events")
-                return [ok: true, data: [events: [nodes: events, pageInfo: [hasNextPage: false, endCursor: null]]]]
+                queries.add((String) vars.query)
+                boolean lifecycle = ((String) vars.query).contains("return_canceled")
+                documents.add(lifecycle ? "lifecycleEvents" : "events")
+                if (lifecycle && lifecycleFails) return [ok: false, errors: ["Throttled"]]
+                return [ok: true, data: [events: [nodes: lifecycle ? lifecycleEvents : events,
+                                                  pageInfo: [hasNextPage: false, endCursor: null]]]]
             }
             if (doc.contains("ReturnLineItem")) {
                 documents.add("returnLineItems")
@@ -1302,13 +1307,227 @@ class ShopifyReturnRefsSupportTests {
         }
     }
 
-    private static Map event(String id, String action, String orderId, String createdAt, List<String> returnLineItemIds = []) {
+    private static Map event(String id, String action, String orderId, String createdAt, List<String> returnLineItemIds = [],
+                             String returnName = null) {
         Map e = [id: "gid://shopify/BasicEvent/${id}".toString(), createdAt: createdAt, action: action,
                  subjectType: "ORDER", subjectId: "gid://shopify/Order/${orderId}".toString()]
-        e.arguments = action == "return_created" ?
-                [[return_line_items: returnLineItemIds.collect { [id: it as Long, quantity: 1] }, exchange_line_items: []]] :
-                [[refund_shipping_lines: []]]
+        // Live shapes, gorjana 2026-11-02: return_created and return_canceled list the return line items,
+        // return_closed lists none; every return event names the return in its message.
+        e.arguments = action == "refund_created" ? [[refund_shipping_lines: []]] :
+                returnLineItemIds ? [[return_line_items: returnLineItemIds.collect { [id: it as Long, quantity: 1] }, exchange_line_items: []]] :
+                        []
+        String verb = action.replace("return_", "")
+        e.message = returnName ? "AfterShip Returns ${verb} return ${returnName}.".toString() : "Refund created."
         return e
+    }
+
+    // --- DAR-BE-179: a rebuilt return's status, from its own lifecycle events ----------------------
+
+    private static Map rebuild(List<Map> events, List<Map> lifecycle, List<String> documents = [], List<String> queries = [],
+                               boolean lifecycleFails = false, Map options = [:]) {
+        Closure executor = unreadableOrderExecutor(events, ["49829642371": "14872976228483", "49143316611": "15542749593731"],
+                documents, lifecycle, queries, lifecycleFails)
+        return ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-10-29T00:00:00Z", "2026-10-30T00:00:00Z", options, executor)
+    }
+
+    private static final List<Map<String, Object>> EXCLUDE_IN_PROGRESS = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
+                                                                          operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"]]
+
+    @Test
+    void anOpenRebuiltReturnIsInProgressSoTheInProgressExclusionTakesIt() {
+        // Dolls Kill RS_RETURNS_2 2026-10-31: 7327623053569's return was still open, the tenant excludes
+        // IN_PROGRESS, and the row was reported only because it carried no orderReturnStatus at all.
+        Map result = rebuild(
+                [event("170389095383297", "return_created", "7327623053569", "2026-10-29T07:36:05Z", ["49829642371"])],
+                [], [], [], false, [sourceFilters: EXCLUDE_IN_PROGRESS])
+
+        assertEquals(0, result.recordCount, "${result.records}")
+        Map filters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(1, ((Map) ((List) filters.configuredExclusions)[0]).excludedCount)
+    }
+
+    @Test
+    void aRebuiltRowCarriesTheOrderStatusShopifyWouldShowAndSaysWhereItCameFrom() {
+        Map result = rebuild(
+                [event("1", "return_created", "6872256348291", "2026-10-29T23:34:50Z", ["49143316611"], "#GOR196861210-R1")],
+                [event("2", "return_closed", "6872256348291", "2026-10-29T23:36:07Z", [], "#GOR196861210-R1")],
+                [], [], false, [sourceFilters: EXCLUDE_IN_PROGRESS])
+
+        assertEquals(1, result.recordCount, "RETURNED is not excluded by the IN_PROGRESS rule")
+        Map row = (Map) ((List) result.records)[0]
+        assertEquals("RETURNED", row.orderReturnStatus)
+        assertEquals("events", row.orderReturnStatusSource, "derived, not Shopify's own Order.returnStatus")
+    }
+
+    @Test
+    void theOrderStatusIsTheOrdersAcrossAllItsRebuiltReturns() {
+        // Shopify's rule, matched on 137/137 readable gorjana orders: any OPEN -> IN_PROGRESS, else any
+        // CLOSED -> RETURNED, all CANCELED -> NO_RETURN.
+        Map result = rebuild(
+                [event("1", "return_created", "6659786047619", "2026-10-29T10:00:00Z", ["49143316611"], "#GOR196459679-R2"),
+                 event("2", "return_created", "6659786047619", "2026-10-29T11:00:00Z", ["49829642371"], "#GOR196459679-R3")],
+                [event("3", "return_closed", "6659786047619", "2026-10-29T12:00:00Z", [], "#GOR196459679-R2")])
+
+        List<Map> rows = (List<Map>) result.records
+        assertEquals(2, rows.size())
+        assertTrue(rows.every { it.orderReturnStatus == "IN_PROGRESS" }, "R3 is still open: ${rows}")
+        assertEquals(["CLOSED", "OPEN"], rows.collect { it.returnStatusFromEvents }.sort())
+    }
+
+    @Test
+    void aCanceledSiblingStillCountsTowardTheOrderStatus() {
+        Map result = rebuild(
+                [event("1", "return_created", "6659786047619", "2026-10-29T10:00:00Z", ["49143316611"], "#GOR196459679-R2"),
+                 event("2", "return_created", "6659786047619", "2026-10-29T11:00:00Z", ["49829642371"], "#GOR196459679-R3")],
+                [event("3", "return_canceled", "6659786047619", "2026-10-29T10:10:00Z", ["49143316611"], "#GOR196459679-R2"),
+                 event("4", "return_closed", "6659786047619", "2026-10-29T11:01:00Z", [], "#GOR196459679-R3")])
+
+        List<Map> rows = (List<Map>) result.records
+        assertEquals(1, rows.size(), "the canceled R2 is dropped: ${rows}")
+        assertEquals("RETURNED", rows[0].orderReturnStatus)
+    }
+
+    @Test
+    void aRebuiltReturnLaterCanceledIsDroppedAndCounted() {
+        // gorjana 6457693798531: created 18:09:22, canceled 18:19:34 — reported missing-in-OMS until now.
+        Map result = rebuild(
+                [event("303177640607875", "return_created", "6457693798531", "2026-10-29T18:09:22Z", ["49829642371"], "#GOR195817958-R1")],
+                [event("303177900000000", "return_canceled", "6457693798531", "2026-10-29T18:19:34Z", ["49829642371"], "#GOR195817958-R1")])
+
+        assertEquals(0, result.recordCount, "a canceled return never reaches OMS: ${result.records}")
+        Map filters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(1, filters.unreadableOrderCanceledReturnsSuppressed)
+        assertEquals(0, filters.unreadableOrderReturnRows)
+    }
+
+    @Test
+    void aCancelAfterTheWindowStillCountsBecauseTheLifecycleScanRunsToNow() {
+        List<String> queries = []
+        Map result = rebuild(
+                [event("1", "return_created", "6457693798531", "2026-10-29T23:58:00Z", ["49829642371"], "#GOR195817958-R1")],
+                [event("2", "return_canceled", "6457693798531", "2026-10-30T00:08:00Z", ["49829642371"], "#GOR195817958-R1")],
+                [], queries)
+
+        assertEquals(0, result.recordCount)
+        String lifecycleQuery = queries.find { it.contains("return_canceled") }
+        assertTrue(lifecycleQuery.contains("created_at:>='2026-10-29T23:58:00Z'"), lifecycleQuery)
+        assertFalse(lifecycleQuery.contains("created_at:<"), "no upper bound: status as of now: ${lifecycleQuery}")
+    }
+
+    @Test
+    void aRebuiltReturnClosedIsKeptWithItsStatusMatchedByNameAlone() {
+        // 6872256348291 (DAR-BE-085): closed and refunded, really missing in HotWax. return_closed lists no
+        // line items, so only the name links it. CLOSED is NOT suppressed here: the refund is unreadable,
+        // so this row is the return's only representation.
+        Map result = rebuild(
+                [event("301523693011075", "return_created", "6872256348291", "2026-10-29T23:34:50Z", ["49143316611"], "#GOR196861210-R1")],
+                [event("301523700000000", "return_closed", "6872256348291", "2026-10-29T23:36:07Z", [], "#GOR196861210-R1")])
+
+        assertEquals(1, result.recordCount)
+        Map row = (Map) ((List) result.records)[0]
+        assertEquals("CLOSED", row.returnStatusFromEvents)
+        assertEquals("15542749593731", row.lineIds)
+    }
+
+    @Test
+    void aRebuiltReturnWithNoLaterEventIsOpen() {
+        Map result = rebuild(
+                [event("1", "return_created", "6457693798531", "2026-10-29T18:09:22Z", ["49829642371"], "#GOR195817958-R1")], [])
+
+        assertEquals("OPEN", ((Map) ((List) result.records)[0]).returnStatusFromEvents)
+        assertEquals(0, ((Map) ((Map) result.requestMetadata).filters).unreadableOrderCanceledReturnsSuppressed)
+    }
+
+    @Test
+    void anotherReturnsCancelOnTheSameOrderDoesNotDropThisOne() {
+        // 6659786047619: R2 canceled, R3 closed. Neither name nor line overlaps between them.
+        Map result = rebuild(
+                [event("1", "return_created", "6659786047619", "2026-10-29T21:20:59Z", ["49143316611"], "#GOR196459679-R3")],
+                [event("2", "return_canceled", "6659786047619", "2026-10-29T21:30:00Z", ["49782161539"], "#GOR196459679-R2")])
+
+        assertEquals(1, result.recordCount)
+        assertEquals("OPEN", ((Map) ((List) result.records)[0]).returnStatusFromEvents)
+    }
+
+    @Test
+    void aCanceledThenReopenedReturnIsKeptAsOpen() {
+        Map result = rebuild(
+                [event("1", "return_created", "6457693798531", "2026-10-29T10:00:00Z", ["49829642371"], "#GOR195817958-R1")],
+                [event("3", "return_reopened", "6457693798531", "2026-10-29T12:00:00Z", [], "#GOR195817958-R1"),
+                 event("2", "return_canceled", "6457693798531", "2026-10-29T11:00:00Z", ["49829642371"], "#GOR195817958-R1")])
+
+        assertEquals(1, result.recordCount, "the LAST event decides, by createdAt, not by arrival order")
+        assertEquals("OPEN", ((Map) ((List) result.records)[0]).returnStatusFromEvents)
+    }
+
+    @Test
+    void aLifecycleEventBeforeTheReturnWasCreatedIsIgnored() {
+        // A reused line on an earlier, already-canceled return must not cancel the new one.
+        Map result = rebuild(
+                [event("1", "return_created", "6457693798531", "2026-10-29T12:00:00Z", ["49829642371"], "#GOR195817958-R2")],
+                [event("2", "return_canceled", "6457693798531", "2026-10-29T11:00:00Z", ["49829642371"], "#GOR195817958-R1")])
+
+        assertEquals(1, result.recordCount)
+    }
+
+    @Test
+    void aFailedLifecycleScanKeepsEveryRowAndSaysSo() {
+        Map result = rebuild(
+                [event("1", "return_created", "6457693798531", "2026-10-29T18:09:22Z", ["49829642371"], "#GOR195817958-R1")],
+                [], [], [], true)
+
+        assertEquals([], result.errors, "status is enrichment: its failure must not fail the extract")
+        assertEquals(1, result.recordCount, "fail safe: unknown status keeps the row reported")
+        Map row = (Map) ((List) result.records)[0]
+        assertFalse(row.containsKey("returnStatusFromEvents"), "unknown, not OPEN")
+        assertFalse(row.containsKey("orderReturnStatus"), "unknown: absent, as before DAR-BE-179")
+        assertTrue(((List) result.warnings).any { it.toString().contains("return status") }, "${result.warnings}")
+    }
+
+    @Test
+    void noLifecycleScanRunsWhenNothingWasRebuilt() {
+        List<String> documents = []
+        Closure executor = unreadableOrderExecutor([event("401", "refund_created", "6000000000001", "2026-10-16T10:00:00Z")],
+                [:], documents)
+        ShopifyReturnRefsSupport.extractReturnRefs(authConfig(), "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z", [:], executor)
+
+        assertFalse(documents.contains("lifecycleEvents"), "${documents}")
+    }
+
+    @Test
+    void returnNamesAreReadFromEveryLiveMessageShape() {
+        // gorjana (AfterShip) and Dolls Kill (AfterShip for TikTok, Cavalry, Shopify's own wording), 2026-11-02.
+        assertEquals("#GOR196861210-R1", ShopifyReturnRefsSupport.returnName("AfterShip Returns created return #GOR196861210-R1."))
+        assertEquals("#GOR19495-20010-R1", ShopifyReturnRefsSupport.returnName("AfterShip Returns canceled return #GOR19495-20010-R1."))
+        assertEquals("DK577640022111326495-R1", ShopifyReturnRefsSupport.returnName("AfterShip for TikTok created return DK577640022111326495-R1."))
+        assertEquals("DK4867492-R1", ShopifyReturnRefsSupport.returnName("Cavalry closed return DK4867492-R1."))
+        assertEquals("DK5129406-R1", ShopifyReturnRefsSupport.returnName("Return DK5129406-R1 was closed."))
+        assertEquals("DK5129406-R1", ShopifyReturnRefsSupport.returnName("A staff member processed 2 items from return DK5129406-R1."))
+        assertNull(ShopifyReturnRefsSupport.returnName("A refund was created."))
+        assertNull(ShopifyReturnRefsSupport.returnName(null))
+    }
+
+    @Test
+    void aDollsKillCloseWithNoLineItemsMatchesByItsUnprefixedName() {
+        Map created = event("1", "return_created", "7327623053569", "2026-10-29T07:36:05Z", ["49829642371"])
+        created.message = "AfterShip for TikTok created return DK5129406-R1."
+        Map closed = event("2", "return_closed", "7327623053569", "2026-10-29T09:00:00Z", [])
+        closed.message = "Return DK5129406-R1 was closed."
+
+        assertEquals("CLOSED", ((Map) ((List) rebuild([created], [closed]).records)[0]).returnStatusFromEvents)
+    }
+
+    @Test
+    void theReturnNameIsReadThroughALinkInTheMessage() {
+        Map created = event("1", "return_created", "6322769625219", "2026-10-29T19:13:34Z", ["49829642371"])
+        created.message = 'AfterShip Returns created return <a href="https://x.myshopify.com/admin/orders/1/returns/2">#GOR195405111-R1</a>.'
+        Map closed = event("2", "return_closed", "6322769625219", "2026-10-29T19:14:07Z", [])
+        closed.message = 'AfterShip Returns closed return <a href="https://x.myshopify.com/admin/orders/1/returns/2">#GOR195405111-R1</a>.'
+
+        Map result = rebuild([created], [closed])
+
+        assertEquals("CLOSED", ((Map) ((List) result.records)[0]).returnStatusFromEvents)
     }
 
     @Test
@@ -1322,7 +1541,7 @@ class ShopifyReturnRefsSupportTests {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
                 "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z", [:], executor)
 
-        assertEquals(["events", "nodes", "returnLineItems"], documents)
+        assertEquals(["events", "nodes", "returnLineItems", "lifecycleEvents"], documents)
         assertEquals(1, result.recordCount, "one RETURN row per return_created event: ${result.records}")
         Map row = (Map) ((List) result.records)[0]
         assertEquals("301523693011075", row.refundOrReturnId, "keyed by the event: no refund or return id is reachable")
@@ -1378,6 +1597,7 @@ class ShopifyReturnRefsSupportTests {
         assertEquals(0, filters.unreadableOrderCount)
         assertEquals(0, filters.unreadableOrderReturnRows)
         assertEquals(0, filters.unreadableOrderRefundOnlyCount)
+        assertEquals(0, filters.unreadableOrderCanceledReturnsSuppressed)
         assertEquals([], result.warnings)
     }
 }
