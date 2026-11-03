@@ -226,6 +226,69 @@
         </actions>
     </service>
 
+    <service verb="run" noun="ShopifyGraphqlAgentQuery" allow-remote="true" authenticate="true">
+        <description>DAR-CLI-003. Runs one fresh, read-only GraphQL query a tenant user's agent wrote, through a Shopify
+            connection the active tenant stores. One query only (no mutation, subscription or introspection); the answer
+            is returned as Shopify gave it, up to 5 MB, or refused with advice when larger; the connection's access token
+            is never returned. Needs run access. Every call is logged for the tenant.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+            <parameter name="document" required="true" allow-html="any"/>
+            <parameter name="variables" type="Map"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="data" type="Map"/>
+            <parameter name="rowCount" type="Integer"><description>The edge count when the answer is one connection, else blank.</description></parameter>
+            <parameter name="truncated" type="Boolean"/>
+            <parameter name="durationMs" type="Long"/>
+            <parameter name="code"/>
+            <parameter name="retryAfterSeconds" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <set field="queryResult" from="shopify.facade.graphql.ShopifyAgentQuerySupport.runAgentQuery(ec, context)"/>
+            <set field="data" from="queryResult?.data"/>
+            <set field="rowCount" from="queryResult?.rowCount"/>
+            <set field="truncated" from="queryResult?.truncated"/>
+            <set field="durationMs" from="queryResult?.durationMs"/>
+            <set field="code" from="queryResult?.code"/>
+            <set field="retryAfterSeconds" from="queryResult?.retryAfterSeconds"/>
+            <if condition="queryResult?.error">
+                <message error="true">${queryResult.error}</message>
+            </if>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="errors" from="ec.message.errors"/>
+        </actions>
+    </service>
+
+    <service verb="get" noun="ShopifyGraphqlSchema" authz-action="view" allow-remote="true" authenticate="true">
+        <description>DAR-CLI-003. The Shopify Admin GraphQL schema a tenant's agent can ask about, trimmed to the types
+            reachable from the Query root (names, kinds, fields, arguments, enum values and descriptions; mutations and
+            subscriptions left out). Read from Shopify once and kept 24 hours per connection. Needs view access.</description>
+        <in-parameters>
+            <parameter name="shopifyAuthConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="schema" type="Map"/>
+            <parameter name="code"/>
+            <parameter name="retryAfterSeconds" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <set field="schemaResult" from="shopify.facade.graphql.ShopifyAgentQuerySupport.getSchema(ec, context)"/>
+            <set field="schema" from="schemaResult?.schema"/>
+            <set field="code" from="schemaResult?.code"/>
+            <set field="retryAfterSeconds" from="schemaResult?.retryAfterSeconds"/>
+            <if condition="schemaResult?.error">
+                <message error="true">${schemaResult.error}</message>
+            </if>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="errors" from="ec.message.errors"/>
+        </actions>
+    </service>
+
     <service verb="probe" noun="ShopifyAuthConnection" allow-remote="false" authenticate="true">
         <description>Connection diagnostics for a saved Shopify auth config. Registered on the
             SourceSystemConnector SHOPIFY row as healthCheckServiceName and invoked only through
