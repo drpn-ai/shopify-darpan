@@ -1,6 +1,7 @@
 package shopify.facade.graphql
 
 import darpan.agent.AgentQueryLane
+import darpan.agent.AgentQuerySupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
@@ -195,6 +196,27 @@ class ShopifyAgentQuerySmokeTests {
         assertTrue(text.contains("trimmed schema"), text)
         assertFalse(text.contains("fewer fields"), text)
         assertNull(s.schema)
+    }
+
+    @Test
+    void "final review R25: a connection another tenant granted is refused for run and schema, the owner still works"() {
+        ec.entity.makeValue("darpan.auth.ConfigTenantAccess").setAll([configTypeEnumId: "SCFG_SHOPIFY_AUTH", configId: "SHOP_B",
+                tenantUserGroupId: TENANT_A, fromDate: FROM]).createOrUpdate()
+        try {
+            Map r = run(TENANT_A, "SHOP_B", ORDERS)
+            assertFalse(r.ok as boolean)
+            assertEquals("REFUSED", r.code)
+            assertTrue("${r.errors}".contains(AgentQuerySupport.SHARED_CONNECTION_REFUSAL), "${r.errors}")
+            Map s = schema(TENANT_A, "SHOP_B")
+            assertFalse(s.ok as boolean)
+            assertTrue("${s.errors}".contains(AgentQuerySupport.SHARED_CONNECTION_REFUSAL), "${s.errors}")
+            assertTrue(sent.isEmpty(), "nothing is sent on a granted connection")
+            assertTrue(run(TENANT_B, "SHOP_B", ORDERS).ok as boolean)
+            answer = { Map req -> [statusCode: 200, body: JsonOutput.toJson([data: INTROSPECTION])] }
+            assertTrue(schema(TENANT_B, "SHOP_B").ok as boolean)
+        } finally {
+            ec.entity.find("darpan.auth.ConfigTenantAccess").condition("configId", "SHOP_B").disableAuthz().deleteAll()
+        }
     }
 
     @Test

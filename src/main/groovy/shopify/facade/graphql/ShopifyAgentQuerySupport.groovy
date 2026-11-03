@@ -41,6 +41,7 @@ class ShopifyAgentQuerySupport {
         Map variables = context.get("variables") instanceof Map ? new LinkedHashMap((Map) context.get("variables")) : null
         Map gate = gateConfig(ec, configId, meta)
         if (gate == null) return null
+        if (gate.refused) return (Map) gate.refused
         // The document check is last so a refusal is logged with the secrets already set on meta.
         String problem = AgentQuerySupport.checkGraphqlQuery(document)
         if (problem) return AgentQuerySupport.refuse(ec, meta, problem)
@@ -60,6 +61,7 @@ class ShopifyAgentQuerySupport {
         Map meta = [systemEnumId: SYSTEM_ENUM_ID, connectionId: configId, queryText: "introspection (schema)"]
         Map gate = gateConfig(ec, configId, meta)
         if (gate == null) return null
+        if (gate.refused) return (Map) gate.refused
 
         // The gate ran above, so a cache hit is never served to a caller who failed it. The config's last-updated stamp
         // is in the key: an edited connection (new shop, new version) does not serve the old schema.
@@ -85,12 +87,18 @@ class ShopifyAgentQuerySupport {
 
     // ---- shared plumbing ------------------------------------------------------------------------------------------
 
-    /** [transportConfig, stamp] or null with an error on ec. meta.secrets is set before anything that can fail with a message. */
+    /**
+     * [transportConfig, stamp], [refused: the logged REFUSED answer], or null with an error on ec. meta.secrets is set
+     * before anything that can fail with a message.
+     */
     private static Map gateConfig(def ec, String configId, Map meta) {
         def config = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [requiredEndpointSystemEnumId: SYSTEM_ENUM_ID])
         if (config == null || ec.message.hasError()) return null
         Map transportConfig = [shopApiUrl: config.shopApiUrl, apiVersion: config.apiVersion, accessToken: config.accessToken]
         meta.secrets = secretsOf(transportConfig)
+        // Final review R25: fresh queries and schema reads run only on the active tenant's own connection.
+        String notOwned = AgentQuerySupport.requireOwnedConnection(ec, config.companyUserGroupId)
+        if (notOwned) return [refused: AgentQuerySupport.refuse(ec, meta, notOwned)]
         return [transportConfig: transportConfig, stamp: config.lastUpdatedStamp?.toString() ?: ""]
     }
 
