@@ -75,8 +75,8 @@ class ShopifyAgentQuerySupport {
 
         final Map transportConfig = (Map) gate.transportConfig
         Map answer = AgentQuerySupport.run(ec, meta, {
-            Map data = singleAnswer(transportConfig, GraphqlSchemaTrim.INTROSPECTION_QUERY, null)
-            return [rows: [GraphqlSchemaTrim.trim(data)], hasMore: false, offset: 0] as Map
+            Map data = singleAnswer(transportConfig, GraphqlSchemaTrim.INTROSPECTION_QUERY, null, false)
+            return [rows: [GraphqlSchemaTrim.trimWithinCap(data)], hasMore: false, offset: 0] as Map
         } as Closure<Map>)
         Map out = unwrap(answer)
         if (out.rows) cache.put(key, [at: System.currentTimeMillis(), schema: copyOf((Map) ((List) out.rows)[0])])
@@ -95,14 +95,14 @@ class ShopifyAgentQuerySupport {
     }
 
     /** One call, no retry (maxAttempts 1) so a retry cannot pass the 60 s wall clock. */
-    private static Map singleAnswer(Map transportConfig, String document, Map variables) {
+    private static Map singleAnswer(Map transportConfig, String document, Map variables, boolean capAnswer = true) {
         Map options = [connectTimeoutMillis: CONNECT_TIMEOUT_MILLIS, readTimeoutMillis: READ_TIMEOUT_MILLIS, maxAttempts: 1]
         if (httpExecutorOverride != null) options.httpExecutor = httpExecutorOverride
         Map result = ShopifyGraphqlTransport.execute(transportConfig, document, variables ?: [:], options)
         if (result.ok == false) throw new IllegalStateException(((result.errors ?: ["Shopify did not answer."]) as List).join(" "))
         Map data = result.data instanceof Map ? (Map) result.data : [:]
         // A single 5 MB body cap; a JSON document cannot be cut partway, so an over-size answer is refused with advice.
-        if (JsonOutput.toJson(data).getBytes(StandardCharsets.UTF_8).length > AgentQuerySupport.MAX_BODY_BYTES - 64) {
+        if (capAnswer && JsonOutput.toJson(data).getBytes(StandardCharsets.UTF_8).length > AgentQuerySupport.MAX_BODY_BYTES - 64) {
             throw new AgentQuerySupport.AgentQueryRefused("The answer is larger than 5 MB; ask for fewer fields or a smaller 'first'.")
         }
         return data
@@ -111,6 +111,7 @@ class ShopifyAgentQuerySupport {
     /** rows:[payload] becomes data/schema; rowCount is the edge count of the one top-level connection, else null. */
     private static Map unwrap(Map answer) {
         if (answer.error) return answer
+        if (!(answer.rows instanceof List) || ((List) answer.rows).isEmpty()) return [error: "The system returned no usable answer.", code: "ERROR"]
         Map payload = ((List) answer.rows)[0] as Map
         Map out = new LinkedHashMap(answer)
         out.schema = payload

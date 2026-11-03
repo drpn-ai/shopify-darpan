@@ -173,6 +173,31 @@ class ShopifyAgentQuerySmokeTests {
     }
 
     @Test
+    void "a raw introspection over 5 MB is not capped when the trimmed schema fits"() {
+        Map raw = new LinkedHashMap(INTROSPECTION.__schema as Map)
+        raw.types = (raw.types as List) + [[kind: "OBJECT", name: "Unreachable", description: "x" * (5 * 1024 * 1024 + 100), fields: []]]
+        answer = { Map req -> [statusCode: 200, body: JsonOutput.toJson([data: [__schema: raw]])] }
+        Map s = schema(TENANT_A, "SHOP_A")
+        assertTrue(s.ok as boolean, "${s.errors}")
+        assertEquals("Query", (s.schema as Map).queryType)
+        assertFalse((s.schema as Map).types.any { it.name == "Unreachable" })
+    }
+
+    @Test
+    void "a trimmed schema over 5 MB is refused with schema advice, without an exception"() {
+        Map raw = new LinkedHashMap(INTROSPECTION.__schema as Map)
+        raw.types = (raw.types as List).collect { Map t -> t.name == "Order" ? (t + [description: "x" * (5 * 1024 * 1024 + 100)]) : t }
+        answer = { Map req -> [statusCode: 200, body: JsonOutput.toJson([data: [__schema: raw]])] }
+        Map s = schema(TENANT_A, "SHOP_A")
+        assertFalse(s.ok as boolean)
+        assertEquals("REFUSED", s.code)
+        String text = "${s.errors}"
+        assertTrue(text.contains("trimmed schema"), text)
+        assertFalse(text.contains("fewer fields"), text)
+        assertNull(s.schema)
+    }
+
+    @Test
     void "another tenant's config is refused"() {
         Map r = run(TENANT_A, "SHOP_B", ORDERS)
         assertFalse(r.ok as boolean, "tenant A reached tenant B's connection")
