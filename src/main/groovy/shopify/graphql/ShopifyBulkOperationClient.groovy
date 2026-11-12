@@ -190,6 +190,20 @@ class ShopifyBulkOperationClient {
                 .replace("\n", "\\n")
     }
 
+    /**
+     * Start a bulk query once and return at once: no concurrent-start retry, no polling, no download.
+     * The connection check uses it to learn whether Shopify lets this token run bulk reads at all
+     * (DAR-BE-243). The result keeps the transport's graphqlErrors/statusCode on failure.
+     */
+    static Map<String, Object> startOnce(Map authConfig, String bulkQueryDocument, Map options = [:]) {
+        return startQuery(authConfig, bulkQueryDocument, options)
+    }
+
+    /** True when a failed start only means another bulk query of this app is still running. */
+    static boolean isConcurrentStartFailure(Map<String, Object> result) {
+        return isConcurrentBulkOperationFailure(result)
+    }
+
     private static Map<String, Object> startQuery(Map authConfig, String bulkQueryDocument, Map options) {
         // Audit H6.5 — bulkOperationRunQuery is a NON-idempotent mutation. If the first attempt
         // reaches Shopify and the response or socket drops, Shopify accepts the start; a retry then

@@ -46,6 +46,23 @@ class ShopifyConnectionProbeTests {
         return [httpExecutor: { Map request -> responder.call(((Map) request.body).query as String) }]
     }
 
+    private static boolean isBulkStart(String query) {
+        return query.contains("bulkOperationRunQuery")
+    }
+
+    private static Map<String, Object> bulkStarted() {
+        return ok([bulkOperationRunQuery: [bulkOperation: [id: "gid://shopify/BulkOperation/1", status: "CREATED"],
+                                           userErrors   : []]])
+    }
+
+    /** Shop, one order, and a bulk start that Shopify accepts. */
+    private static Map<String, Object> healthy(String query) {
+        if (isBulkStart(query)) return bulkStarted()
+        return query.contains("orders(")
+                ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
+                : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+    }
+
     private static Map<String, Object> checkFor(Map<String, Object> result, String key) {
         Map<String, Object> row = ((List<Map<String, Object>>) result.checks).find { it.key == key }
         assertNotNull(row, "expected a '${key}' check row, got ${((List) result.checks)*.key}")
@@ -62,20 +79,20 @@ class ShopifyConnectionProbeTests {
         List<String> queries = []
         Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery { String query ->
             queries.add(query)
-            return query.contains("orders(")
-                    ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
-                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+            return healthy(query)
         })
 
         assertStatus(result, "credential", "PASS")
         assertStatus(result, "reachable", "PASS")
         assertStatus(result, "apiVersion", "PASS")
         assertStatus(result, "ordersRead", "PASS")
+        assertStatus(result, "bulkRead", "PASS")
         assertEquals("example.myshopify.com", checkFor(result, "reachable").detail)
 
-        // Two separate calls, and the orders probe asks for exactly one order.
-        assertEquals(2, queries.size())
+        // Three separate calls; the orders probe asks for exactly one order, the bulk start for none.
+        assertEquals(3, queries.size())
         assertTrue(queries[1].contains("orders(first: 1)"), queries[1])
+        assertTrue(isBulkStart(queries[2]), queries[2])
     }
 
     @Test
@@ -91,6 +108,7 @@ class ShopifyConnectionProbeTests {
         assertStatus(result, "reachable", "SKIP")
         assertStatus(result, "apiVersion", "SKIP")
         assertStatus(result, "ordersRead", "SKIP")
+        assertStatus(result, "bulkRead", "SKIP")
     }
 
     @Test
@@ -240,6 +258,11 @@ class ShopifyConnectionProbeTests {
                             ? graphqlError("Access denied. Token ${secret} lacks scope.".toString())
                             : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
                 }),
+                ShopifyConnectionProbe.probeAuthConfig(config([accessToken: secret]), byQuery { String query ->
+                    isBulkStart(query)
+                            ? graphqlError("Access denied for bulkOperationRunQuery field. Token ${secret}.".toString())
+                            : healthy(query)
+                }),
         ]
 
         results.each { Map<String, Object> result ->
@@ -253,9 +276,7 @@ class ShopifyConnectionProbeTests {
         List<String> queries = []
         Map<String, Object> options = byQuery { String query ->
             queries.add(query)
-            return query.contains("orders(")
-                    ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
-                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
+            return healthy(query)
         }
 
         Map<String, Object> one = ShopifyConnectionProbe.probeStage(config(), options,
@@ -271,8 +292,13 @@ class ShopifyConnectionProbeTests {
 
         Map<String, Object> three = ShopifyConnectionProbe.probeStage(config(), options, (String) two.nextStage)
         assertEquals(["ordersRead"], ((List<Map>) three.checks)*.key)
-        assertNull(three.nextStage, "the last stage must end the walk")
+        assertEquals("bulk", three.nextStage)
         assertEquals(2, queries.size())
+
+        Map<String, Object> four = ShopifyConnectionProbe.probeStage(config(), options, (String) three.nextStage)
+        assertEquals(["bulkRead"], ((List<Map>) four.checks)*.key)
+        assertNull(four.nextStage, "the last stage must end the walk")
+        assertEquals(3, queries.size())
     }
 
     @Test
@@ -284,7 +310,7 @@ class ShopifyConnectionProbeTests {
                 [:], darpan.facade.settings.SourceConnectionDiagnosticsSupport.STAGE_FIRST)
 
         assertNull(result.nextStage)
-        assertEquals(["credential", "reachable", "apiVersion", "ordersRead"], ((List<Map>) result.checks)*.key)
+        assertEquals(["credential", "reachable", "apiVersion", "ordersRead", "bulkRead"], ((List<Map>) result.checks)*.key)
         assertStatus(result, "credential", "FAIL")
         assertStatus(result, "ordersRead", "SKIP")
     }
@@ -292,11 +318,7 @@ class ShopifyConnectionProbeTests {
     @Test
     void walkingTheStagesMatchesRunningThemAllAtOnce() {
         // The staged path and the one-shot path must not drift apart.
-        Closure<Map<String, Object>> responder = { String query ->
-            query.contains("orders(")
-                    ? ok([orders: [edges: [[node: [id: "gid://shopify/Order/1"]]]]])
-                    : ok([shop: [name: "Example", myshopifyDomain: "example.myshopify.com"]])
-        }
+        Closure<Map<String, Object>> responder = { String query -> healthy(query) }
 
         Map<String, Object> oneShot = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery(responder))
 
@@ -310,5 +332,79 @@ class ShopifyConnectionProbeTests {
 
         assertEquals(((List<Map>) oneShot.checks)*.key, walked*.key)
         assertEquals(((List<Map>) oneShot.checks)*.status, walked*.status)
+    }
+
+    // DAR-BE-243: New Era's Partner-app token read one order fine and every run still failed, because
+    // Shopify refused it bulk reads. The check now starts one empty bulk read after the orders row.
+
+    @Test
+    void aTokenRefusedBulkReadsFailsThatRowAndNamesTheSwitch() {
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery { String query ->
+            isBulkStart(query)
+                    ? graphqlError("Access denied for bulkOperationRunQuery field. Required access: Only accessible by supported access tokens.",
+                            "ACCESS_DENIED")
+                    : healthy(query)
+        })
+
+        assertStatus(result, "ordersRead", "PASS")
+        assertStatus(result, "bulkRead", "FAIL")
+        String detail = checkFor(result, "bulkRead").detail as String
+        assertTrue(detail.contains("Allow bulk queries"), detail)
+        assertFalse(detail.contains("read_orders"), "orders read fine, so this is not a scope problem: ${detail}")
+    }
+
+    @Test
+    void aBulkReadAlreadyRunningStillProvesAccess() {
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery { String query ->
+            isBulkStart(query)
+                    ? ok([bulkOperationRunQuery: [bulkOperation: null, userErrors: [
+                            [field: null, message: "A bulk query operation for this app and shop is already in progress: gid://shopify/BulkOperation/9."]]]])
+                    : healthy(query)
+        })
+
+        assertStatus(result, "bulkRead", "PASS")
+    }
+
+    @Test
+    void aBulkStartWithAnotherUserErrorFailsWithoutEchoingIt() {
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery { String query ->
+            isBulkStart(query)
+                    ? ok([bulkOperationRunQuery: [bulkOperation: null, userErrors: [[field: ["query"], message: "Invalid bulk query: upstream text"]]]])
+                    : healthy(query)
+        })
+
+        assertStatus(result, "bulkRead", "FAIL")
+        assertFalse((checkFor(result, "bulkRead").detail as String).contains("upstream text"))
+    }
+
+    @Test
+    void theBulkStartAsksForNothing() {
+        // The export Shopify starts must be empty: a filter no order can match, sent as a variable.
+        List<Map> bodies = []
+        ShopifyConnectionProbe.probeAuthConfig(config(), [httpExecutor: { Map request ->
+            Map body = (Map) request.body
+            bodies.add(body)
+            return healthy(body.query as String)
+        }])
+
+        Map bulkBody = bodies.find { isBulkStart(it.query as String) }
+        assertNotNull(bulkBody)
+        assertEquals(ShopifyConnectionProbe.BULK_PROBE_QUERY, ((Map) bulkBody.variables).query)
+        assertTrue((((Map) bulkBody.variables).query as String).contains("created_at:<1970-01-02"))
+    }
+
+    @Test
+    void aFailedOrdersReadSkipsTheBulkStart() {
+        List<String> queries = []
+        Map<String, Object> result = ShopifyConnectionProbe.probeAuthConfig(config(), byQuery { String query ->
+            queries.add(query)
+            return query.contains("orders(")
+                    ? graphqlError("Access denied for orders field. Required access: `read_orders` access scope.", "ACCESS_DENIED")
+                    : healthy(query)
+        })
+
+        assertStatus(result, "ordersRead", "FAIL")
+        assertStatus(result, "bulkRead", "SKIP")
+        assertFalse(queries.any { isBulkStart(it) }, "no bulk start after the orders read failed")
     }
 }

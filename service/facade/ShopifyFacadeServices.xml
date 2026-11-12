@@ -293,7 +293,9 @@
         <description>Connection diagnostics for a saved Shopify auth config. Registered on the
             SourceSystemConnector SHOPIFY row as healthCheckServiceName and invoked only through
             facade.SettingsFacadeServices.test#SourceConnection, which owns the permission gate.
-            Read-only, single order, no retries. Never writes to ec.message: a rejected credential
+            Reads only, no retries: one order, then one bulk read that matches no order, because
+            runs read through bulk operations and Shopify gates those on the token (DAR-BE-243).
+            Never writes to ec.message: a rejected credential
             is a check row, not a service error.</description>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true"/>

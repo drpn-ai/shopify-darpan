@@ -5,6 +5,7 @@ import darpan.facade.settings.SourceConnectionDiagnosticsSupport as Checks
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import shopify.graphql.ShopifyBulkOperationClient
 import shopify.graphql.ShopifyGraphqlTransport
 
 import static darpan.common.ValueSupport.normalize
@@ -28,6 +29,15 @@ class ShopifyConnectionProbe {
     static final String SHOP_QUERY = "{ shop { name myshopifyDomain } }"
     /** One order only — honors the standing one-order-per-query rule for live Shopify probing. */
     static final String ORDERS_QUERY = "{ orders(first: 1) { edges { node { id } } } }"
+    /**
+     * Bulk read that matches nothing, so the export Shopify starts is empty. Runs read through bulk
+     * operations, and Shopify gates those on the token, not the scopes: a Partner-made app must have
+     * bulk queries turned on (DAR-BE-243), so "Orders readable" can pass while every run fails.
+     */
+    static final String BULK_PROBE_QUERY = '{ orders(query: "created_at:<1970-01-02") { edges { node { id } } } }'
+    static final String BULK_DENIED_DETAIL = "Shopify refused bulk reads for this token, and runs need them. " +
+            "If a Partner made this app, its owner turns on Allow bulk queries (Partner Dashboard > the app > " +
+            "API access requests); it lapses after 31 days without a bulk query. An app the store makes itself needs no switch."
 
     // An operator is watching a popup: fail fast, and never retry. A probe that silently retries
     // reports a flaky connection as healthy.
@@ -39,7 +49,8 @@ class ShopifyConnectionProbe {
     static final String STAGE_CREDENTIAL = "credential"
     static final String STAGE_CONNECT = "connect"
     static final String STAGE_ORDERS = "orders"
-    static final List<String> STAGES = [STAGE_CREDENTIAL, STAGE_CONNECT, STAGE_ORDERS].asImmutable()
+    static final String STAGE_BULK = "bulk"
+    static final List<String> STAGES = [STAGE_CREDENTIAL, STAGE_CONNECT, STAGE_ORDERS, STAGE_BULK].asImmutable()
 
     /**
      * Entity-facing entry point: resolve the stored config, then delegate. The accessToken read is
@@ -112,6 +123,7 @@ class ShopifyConnectionProbe {
             case STAGE_CREDENTIAL: result = credentialStage(config); break
             case STAGE_CONNECT: result = connectStage(config, options); break
             case STAGE_ORDERS: result = ordersStage(config, options); break
+            case STAGE_BULK: result = bulkStage(config, options); break
             default: result = [checks: [], nextStage: null]
         }
         // Every stage call reports the same per-endpoint state alongside its own rows, so a caller
@@ -134,7 +146,8 @@ class ShopifyConnectionProbe {
             return [checks   : [Checks.check("credential", "Credential readable", Checks.STATUS_FAIL, failure),
                                 skipped("reachable", "Shop reachable"),
                                 skipped("apiVersion", "API version supported"),
-                                skipped("ordersRead", "Orders readable")],
+                                skipped("ordersRead", "Orders readable"),
+                                skippedBulk()],
                     nextStage: null]
         }
         return [checks: [Checks.check("credential", "Credential readable", Checks.STATUS_PASS)],
@@ -160,14 +173,16 @@ class ShopifyConnectionProbe {
             return [checks   : [Checks.check("reachable", "Shop reachable", Checks.STATUS_PASS, shopApiUrl, elapsedMillis),
                                 Checks.check("apiVersion", "API version supported", Checks.STATUS_FAIL,
                                         "The shop did not serve API version ${apiVersion}. Check the version and the shop URL.".toString()),
-                                skipped("ordersRead", "Orders readable")],
+                                skipped("ordersRead", "Orders readable"),
+                                skippedBulk()],
                     nextStage: null]
         }
         if (!result.ok) {
             return [checks   : [Checks.check("reachable", "Shop reachable", Checks.STATUS_FAIL,
                                         describeTransportFailure(statusCode), elapsedMillis),
                                 skipped("apiVersion", "API version supported"),
-                                skipped("ordersRead", "Orders readable")],
+                                skipped("ordersRead", "Orders readable"),
+                                skippedBulk()],
                     nextStage: null]
         }
 
@@ -179,6 +194,7 @@ class ShopifyConnectionProbe {
         if (!anyEndpointEnabled(config)) {
             checks.add(Checks.check("ordersRead", "Orders readable", Checks.STATUS_SKIP,
                     "This configuration has no endpoints enabled."))
+            checks.add(skippedBulk())
             return [checks: checks, nextStage: null]
         }
         return [checks: checks, nextStage: STAGE_ORDERS]
@@ -206,7 +222,45 @@ class ShopifyConnectionProbe {
             row = Checks.check("ordersRead", "Orders readable", Checks.STATUS_FAIL,
                     describeTransportFailure(statusCodeOf(result)), elapsedMillis)
         }
+        if (row.status != Checks.STATUS_PASS) return [checks: [row, skippedBulk()], nextStage: null]
+        return [checks: [row], nextStage: STAGE_BULK]
+    }
+
+    /**
+     * Starts one empty bulk read (BULK_PROBE_QUERY). Reached only after "Orders readable" passed, so an
+     * access-denied answer here is the token kind, not a missing scope. Upstream text is not echoed.
+     */
+    private static Map<String, Object> bulkStage(Map<String, Object> config, Map options) {
+        long startedAt = System.currentTimeMillis()
+        Map<String, Object> result
+        try {
+            result = ShopifyBulkOperationClient.startOnce(authConfigOf(config), BULK_PROBE_QUERY, transportOptions(options))
+        } catch (Throwable t) {
+            logger.warn("Shopify probe bulk start failed: ${t.class.simpleName}")
+            result = [ok: false, statusCode: 0, errors: []] as Map<String, Object>
+        }
+        long elapsedMillis = System.currentTimeMillis() - startedAt
+
+        Map<String, Object> row
+        if (result?.ok != false) {
+            row = Checks.check("bulkRead", "Bulk reads allowed", Checks.STATUS_PASS, "Shopify started a bulk read", elapsedMillis)
+        } else if (ShopifyBulkOperationClient.isConcurrentStartFailure(result)) {
+            // Shopify checks access before concurrency, so "one is already running" still proves access.
+            row = Checks.check("bulkRead", "Bulk reads allowed", Checks.STATUS_PASS, "a bulk read is already running", elapsedMillis)
+        } else if (indicatesMissingScope(result)) {
+            row = Checks.check("bulkRead", "Bulk reads allowed", Checks.STATUS_FAIL, BULK_DENIED_DETAIL, elapsedMillis)
+        } else if (statusCodeOf(result) > 0 && statusCodeOf(result) != 200) {
+            row = Checks.check("bulkRead", "Bulk reads allowed", Checks.STATUS_FAIL,
+                    describeTransportFailure(statusCodeOf(result)), elapsedMillis)
+        } else {
+            row = Checks.check("bulkRead", "Bulk reads allowed", Checks.STATUS_FAIL,
+                    "Shopify did not start a bulk read.", elapsedMillis)
+        }
         return [checks: [row], nextStage: null]
+    }
+
+    private static Map<String, Object> skippedBulk() {
+        return skipped("bulkRead", "Bulk reads allowed")
     }
 
     private static Map<String, Object> authConfigOf(Map<String, Object> config) {
@@ -219,7 +273,7 @@ class ShopifyConnectionProbe {
         return Checks.check(key, label, Checks.STATUS_SKIP, "Not attempted.")
     }
 
-    private static Map<String, Object> execute(Map<String, Object> authConfig, String query, Map options) {
+    private static Map<String, Object> transportOptions(Map options) {
         Map<String, Object> transportOptions = [
                 connectTimeoutMillis: CONNECT_TIMEOUT_MILLIS,
                 readTimeoutMillis   : READ_TIMEOUT_MILLIS,
@@ -228,8 +282,12 @@ class ShopifyConnectionProbe {
         // Tests inject their own executor; the real path falls through to the transport's own
         // client, which enforces the outbound host policy.
         if (options?.httpExecutor != null) transportOptions.put("httpExecutor", options.httpExecutor)
+        return transportOptions
+    }
+
+    private static Map<String, Object> execute(Map<String, Object> authConfig, String query, Map options) {
         try {
-            return ShopifyGraphqlTransport.execute(authConfig, query, [:], transportOptions)
+            return ShopifyGraphqlTransport.execute(authConfig, query, [:], transportOptions(options))
         } catch (Throwable t) {
             logger.warn("Shopify probe transport call failed: ${t.class.simpleName}")
             return [ok: false, statusCode: 0, errors: []] as Map<String, Object>
