@@ -69,6 +69,9 @@ class ShopifySourceCatalog {
             // DAR-BE-153: the ids HotWax keeps as OPP manualRefNum; a capture names its authorization.
             "transactions.id",
             "transactions.parentTransaction.id",
+            // DAR-BE-251: units ordered (the sum of line quantities), a scalar, so no line-item children; compared
+            // against HotWax's item rows (RAILS 2026-11-12: equal on 590 of 590 orders).
+            "subtotalLineItemsQuantity",
         ],
         supportedFilters         : [
             updatedAtFrom : [queryName: "updated_at", comparator: ">=", type: "datetime", sortKey: "UPDATED_AT"],
@@ -104,6 +107,7 @@ class ShopifySourceCatalog {
             [fieldPath: "subtotalPriceSet.shopMoney.currencyCode", label: "Subtotal Currency", type: "CurrencyCode", selectionPath: "subtotalPriceSet.shopMoney.currencyCode"],
             [fieldPath: "sourceName", label: "Order Source Name", type: "String", selectionPath: "sourceName"],
             [fieldPath: "requiresShipping", label: "Requires Shipping", type: "Boolean", selectionPath: "requiresShipping"],
+            [fieldPath: "subtotalLineItemsQuantity", label: "Units Ordered", type: "Int", selectionPath: "subtotalLineItemsQuantity"],
             [fieldPath: "transactions.kind", label: "Transaction Kind", type: "String", selectionPath: "transactions.kind"],
             [fieldPath: "transactions.status", label: "Transaction Status", type: "String", selectionPath: "transactions.status"],
             [fieldPath: "transactions.gateway", label: "Transaction Gateway", type: "String", selectionPath: "transactions.gateway"],

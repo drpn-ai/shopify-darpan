@@ -44,6 +44,9 @@ class ShopifyOrderPaymentSignalTests {
                 script.contains("normalizedRecord.paymentTransactionIds = ShopifyOrderPaymentSignal.paymentTransactionIds(normalizedRecord.transactions)"))
         org.junit.jupiter.api.Assertions.assertTrue(
                 script.contains("normalizedRecord.transactionIds = ShopifyOrderPaymentSignal.transactionIds(normalizedRecord.transactions)"))
+        // DAR-BE-251: only when Shopify answered it, so a record (and the characterization fixtures) without it is unchanged.
+        org.junit.jupiter.api.Assertions.assertTrue(
+                script.contains("if (normalizedRecord.subtotalLineItemsQuantity != null) normalizedRecord.itemQuantity = normalize(normalizedRecord.subtotalLineItemsQuantity)"))
     }
 
     // DAR-BE-153. The ids HotWax keeps as OPP manualRefNum (gorjana probe 2026-10-28): a card's CAPTURE, a one-step SALE.

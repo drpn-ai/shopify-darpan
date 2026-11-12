@@ -154,8 +154,9 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         // DAR-BE-063 added sourceName and requiresShipping; DAR-BE-064 added transactions.kind/status
         // (a plain LIST, not a connection, so bulk returns it inline). All additive: the legacy set is intact.
         // DAR-BE-153 added transactions.id and transactions.parentTransaction.id: the ids HotWax keeps as OPP manualRefNum.
+        // DAR-BE-251 added subtotalLineItemsQuantity: units ordered, a scalar (no line-item children).
         assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping", "transactions.kind", "transactions.status", "transactions.gateway",
-                "transactions.id", "transactions.parentTransaction.id"] as Set),
+                "transactions.id", "transactions.parentTransaction.id", "subtotalLineItemsQuantity"] as Set),
                 ((List<String>) result.selectedFieldPaths) as Set)
 
         String queryDocument = result.queryDocument as String

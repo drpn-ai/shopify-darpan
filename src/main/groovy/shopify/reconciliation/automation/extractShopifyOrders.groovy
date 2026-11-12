@@ -35,6 +35,8 @@ Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object>
     normalizedRecord.transactionIds = ShopifyOrderPaymentSignal.transactionIds(normalizedRecord.transactions)
     // DAR-BE-125 (R20): Y only when Shopify fulfilled the whole order; compared against HotWax isCompleted.
     normalizedRecord.isFulfilled = normalize(normalizedRecord.displayFulfillmentStatus) == "FULFILLED" ? "Y" : "N"
+    // DAR-BE-251: units ordered, compared against HotWax itemQuantity (the sum of its item rows' quantities).
+    if (normalizedRecord.subtotalLineItemsQuantity != null) normalizedRecord.itemQuantity = normalize(normalizedRecord.subtotalLineItemsQuantity)
     return normalizedRecord
 }
 Map<String, Object> resolved = ShopifyExtractSupport.resolveConfigAndWindow(ec, shopifyAuthConfigId, companyUserGroupId,
