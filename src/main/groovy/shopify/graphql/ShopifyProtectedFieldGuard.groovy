@@ -56,9 +56,10 @@ class ShopifyProtectedFieldGuard {
         List<String> operations = (List<String>) report.operations
         if (operations.size() != 1) return couldNotCheck("it holds ${operations.size()} operations, and only one may be sent.")
         List<Map> fields = (List<Map>) report.fields
-        List<Map> rootFields = fields.findAll { ((List) it.path).size() == 1 }
+        // A fragment step is not depth: `mutation { ... on Mutation { webhookSubscriptionCreate } }` is a root field too.
+        List<Map> rootFields = fields.findAll { names((List<String>) it.path).size() == 1 }
         if (operations[0] == "mutation") {
-            List<String> others = rootFields.collect { ((List<String>) it.path)[0] }.findAll { it != BULK_RUN_QUERY || !bulkRunAllowed }
+            List<String> others = rootFields.collect { names((List<String>) it.path)[0] }.findAll { it != BULK_RUN_QUERY || !bulkRunAllowed }
             if (others || !rootFields) return "Darpan only reads from Shopify, so this ${others ? others.unique().join(', ') : 'mutation'} was not sent."
         } else if (operations[0] != "query") {
             return "Darpan only reads from Shopify with queries, so this ${operations[0]} was not sent."
@@ -69,17 +70,16 @@ class ShopifyProtectedFieldGuard {
             List<String> path = (List<String>) field.path
             Map<String, Map> arguments = (Map<String, Map>) field.arguments
             if (isRefused(path)) refused << label(path)
-            if (path.size() == 1 && path[0] == BULK_RUN_QUERY) {
+            if (names(path) == [BULK_RUN_QUERY]) {
                 // Every bulk job, however many are aliased into the document, is checked; one that can't be read is refused.
-                String inner = stringArgument(arguments?.get("query"), variables)
-                if (!inner) return couldNotCheck("a bulk job's query is missing or not a plain string.")
+                def inner = stringArgument(arguments?.get("query"), variables)
+                if (!(inner instanceof String) || !inner) return couldNotCheck("a bulk job's query is missing or not a plain string.")
                 String innerRefusal = checkDocument(inner, [:], false)
                 if (innerRefusal) return innerRefusal
             } else if (arguments?.containsKey("query")) {
-                Map arg = arguments.get("query")
-                if (arg.kind == "other") return couldNotCheck("the search on ${label(path)} is not a plain string.")
-                String search = stringArgument(arg, variables)
-                String bad = search ? refusedSearchTerm(search) : null
+                def search = stringArgument(arguments.get("query"), variables)
+                if (search.is(NOT_A_STRING)) return couldNotCheck("the search on ${label(path)} is not a plain string.")
+                String bad = search ? refusedSearchTerm((String) search) : null
                 if (bad) return "Darpan reads Shopify customer data at Level 1 only, so a search on ${label(path)} by \"${bad}\" was not sent; searches use key:value terms on keys that name no person."
             }
         }
@@ -119,13 +119,28 @@ class ShopifyProtectedFieldGuard {
         return null
     }
 
-    private static String stringArgument(Map arg, Map variables) {
-        if (arg?.kind == "string") return arg.value as String
-        if (arg?.kind == "variable") {
-            def value = variables?.get(arg.name)
-            return value instanceof CharSequence ? value.toString() : null
+    /** Marks an argument that is set to something other than a string or null; such a value cannot be checked. */
+    private static final Object NOT_A_STRING = new Object()
+
+    /**
+     * The string an argument will carry to Shopify, null when it carries none, or NOT_A_STRING. A $variable that is
+     * sent is read from variables; one that is not sent falls back to its default, as the server does.
+     */
+    private static Object stringArgument(Map arg, Map variables) {
+        if (arg == null || arg.kind == "null") return null
+        if (arg.kind == "string") return arg.value as String
+        if (arg.kind == "variable") {
+            if (variables?.containsKey(arg.name)) {
+                def value = variables.get(arg.name)
+                return value == null ? null : value instanceof CharSequence ? value.toString() : NOT_A_STRING
+            }
+            return arg.hasDefault ? stringArgument((Map) arg.default, [:]) : null
         }
-        return null
+        return NOT_A_STRING
+    }
+
+    private static List<String> names(List<String> path) {
+        return path.findAll { !it.startsWith("on:") }
     }
 
     private static String label(List<String> path) {

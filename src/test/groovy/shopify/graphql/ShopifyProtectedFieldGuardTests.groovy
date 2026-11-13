@@ -104,6 +104,26 @@ class ShopifyProtectedFieldGuardTests {
     }
 
     @Test
+    void aFragmentAtTheRootCannotSmuggleAMutationOrABulkJob() {
+        String smuggled = 'mutation { bulkOperationRunQuery(query: "{ shop { id } }") { bulkOperation { id } } ' +
+                '... on Mutation { webhookSubscriptionCreate(topic: ORDERS_CREATE, webhookSubscription: {callbackUrl: "https://x.example"}) { userErrors { message } } } }'
+        assertTrue(ShopifyProtectedFieldGuard.refusal(smuggled)?.contains("webhookSubscriptionCreate"), "a root fragment is still the root")
+        String fragmentBulk = 'mutation { ... on Mutation { bulkOperationRunQuery(query: "{ orders { edges { node { email } } } }") { bulkOperation { id } } } }'
+        assertTrue(ShopifyProtectedFieldGuard.refusal(fragmentBulk)?.contains("orders.edges.node.email"), "a bulk job inside a fragment is still checked")
+    }
+
+    @Test
+    void aVariablesDefaultIsCheckedWhenNoValueIsSent() {
+        String withDefault = 'query($q: String = "email:someone@example.com") { customers(first: 1, query: $q) { edges { node { id } } } }'
+        assertTrue(ShopifyProtectedFieldGuard.refusal(withDefault, [:]) != null, "Shopify would search by the default")
+        assertNull(ShopifyProtectedFieldGuard.refusal(withDefault, [q: "updated_at:>='2026-11-01'"]), "a sent value replaces the default")
+        assertTrue(ShopifyProtectedFieldGuard.refusal('query($q: String = 5) { orders(first: 1, query: $q) { edges { node { id } } } }', [:])?.contains("not a plain string"))
+        assertTrue(ShopifyProtectedFieldGuard.refusal('query($q: String) { orders(first: 1, query: $q) { edges { node { id } } } }', [q: ["email:x"]])?.contains("not a plain string"))
+        String bulkDefault = 'mutation($query: String! = "{ orders { edges { node { phone } } } }") { bulkOperationRunQuery(query: $query) { bulkOperation { id } } }'
+        assertTrue(ShopifyProtectedFieldGuard.refusal(bulkDefault, [:])?.contains("orders.edges.node.phone"), "a bulk job's default query is checked")
+    }
+
+    @Test
     void anUnreadableQueryIsRefusedAndNothingIsSent() {
         assertTrue(ShopifyProtectedFieldGuard.refusal('{ orders { edges { node { id ')?.startsWith("Darpan could not check"))
         boolean sent = false
