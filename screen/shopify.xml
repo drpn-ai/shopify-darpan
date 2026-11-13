@@ -32,5 +32,25 @@
         <default-response type="none"/>
     </transition>
 
+    <!-- DAR-BE-273: Shopify webhook receiver — POST /apps/shopify/webhook (app/uninstalled and the three privacy topics).
+         PUBLIC BY NECESSITY: Shopify posts here with no session. Shopify's X-Shopify-Hmac-Sha256 over the body, made
+         with the store's Darpan app's secret, is the only thing trusted; see ShopifyWebhookSupport. No session token
+         (server-to-server POST). Answers 200/401/400/500 with a one-word body; never echoes the payload. -->
+    <transition name="webhook" method="post" require-session-token="false" read-only="true">
+        <actions>
+            <script><![CDATA[
+                Map headers = [topic     : ec.web.request.getHeader("X-Shopify-Topic"),
+                               hmac      : ec.web.request.getHeader("X-Shopify-Hmac-Sha256"),
+                               shopDomain: ec.web.request.getHeader("X-Shopify-Shop-Domain"),
+                               webhookId : ec.web.request.getHeader("X-Shopify-Webhook-Id")]
+                Map answer = shopify.privacy.ShopifyWebhookSupport.handle(ec, headers, ec.web.getRequestBodyText())
+                ec.web.response.setStatus(answer.status as int)
+                ec.web.response.setContentType("text/plain")
+                ec.web.response.writer.write(answer.message as String)
+            ]]></script>
+        </actions>
+        <default-response type="none"/>
+    </transition>
+
     <widgets/>
 </screen>
