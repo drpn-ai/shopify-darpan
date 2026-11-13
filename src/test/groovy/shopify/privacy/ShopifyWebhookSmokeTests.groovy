@@ -85,8 +85,29 @@ class ShopifyWebhookSmokeTests {
     }
 
     @Test
+    void aSignedBodyResentWithAnotherStoreInTheHeaderIsRefused() {
+        // Review finding: the header is not signed. A body naming another store, correctly signed, sent with this store
+        // in the header must not act on this store.
+        String body = JsonOutput.toJson([shop_id: 1, shop_domain: "someone-else.myshopify.com"])
+        assertEquals(400, post("shop/redact", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
+        assertEquals(["2001", "2002"], shopifyRecordIds())
+        assertEquals("shpat_app", config("HOOK_APP_CFG").accessToken)
+    }
+
+    @Test
+    void shopRedactLeavesAPastedConnectionToTheSameStoreAlone() {
+        // Review finding: the store uninstalled the app, not Darpan. The tenant also connects the store with a pasted
+        // token, so the app's connection is cleared but the pasted one and the findings stay (flagged for review).
+        String body = JsonOutput.toJson([shop_id: 1, shop_domain: SHOP])
+        assertEquals(200, post("shop/redact", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
+        assertNull(config("HOOK_APP_CFG").accessToken)
+        assertEquals("shpat_pasted", config("HOOK_PASTED_CFG").accessToken)
+        assertEquals(["2001", "2002"], shopifyRecordIds())
+    }
+
+    @Test
     void uninstallClearsOnlyThisAppsConnectionToTheStore() {
-        String body = JsonOutput.toJson([id: 1, domain: SHOP])
+        String body = JsonOutput.toJson([id: 1, domain: SHOP, myshopify_domain: SHOP])
         assertEquals(200, post("app/uninstalled", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
         def app = config("HOOK_APP_CFG")
         assertNull(app.accessToken)
@@ -110,8 +131,6 @@ class ShopifyWebhookSmokeTests {
         assertEquals(200, post("customers/data_request", requestBody, ShopifyWebhookSupport.signature(SECRET, requestBody)).status)
         assertEquals(200, post("orders/create", shopBody, ShopifyWebhookSupport.signature(SECRET, shopBody)).status, "ignored topic")
         assertEquals(["2001", "2002"], shopifyRecordIds(), "neither deletes anything")
-        assertEquals(200, post("shop/redact", shopBody, ShopifyWebhookSupport.signature(SECRET, shopBody)).status)
-        assertEquals([], shopifyRecordIds())
         assertEquals(400, post("shop/redact", "not json", ShopifyWebhookSupport.signature(SECRET, "not json")).status)
     }
 

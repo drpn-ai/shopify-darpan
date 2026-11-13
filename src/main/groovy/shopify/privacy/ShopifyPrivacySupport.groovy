@@ -41,6 +41,16 @@ class ShopifyPrivacySupport {
                 .collect { normalize(it.companyUserGroupId) }.findAll { it } as Set<String>
     }
 
+    /** The tenants connected to this store through one Darpan app (shop/redact from that app's webhook). */
+    static Set<String> tenantsForShopViaApp(def ec, String shop, String appId) {
+        if (!ShopifyInstallSupport.isValidShopDomain(shop) || !appId) return [] as Set<String>
+        List configs = (TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.CONFIG_ENTITY,
+                        "privacy shop redact: tenants connected through the signing app; each then handled with its own tenant condition")
+                ?.condition("shopifyAppId", appId)?.useCache(false)?.list() ?: []) as List
+        return configs.findAll { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) == shop }
+                .collect { normalize(it.companyUserGroupId) }.findAll { it } as Set<String>
+    }
+
     /** An order id as Darpan may have stored it: the numeric id and its GraphQL global id. */
     static Set<String> orderIdForms(Object rawIds) {
         Collection ids = rawIds instanceof Collection ? (Collection) rawIds : (rawIds != null ? [rawIds] : [])
@@ -102,17 +112,20 @@ class ShopifyPrivacySupport {
      * ANOTHER Shopify store the records are kept and the tenant is listed for a person to review rather than deleting
      * the other store's audit data.
      */
-    static Map<String, Object> redactShop(def ec, Object rawShopDomain) {
+    static Map<String, Object> redactShop(def ec, Object rawShopDomain, Object rawAppId = null) {
         String shop = normalize(rawShopDomain)?.toLowerCase(Locale.ROOT)
+        String appId = normalize(rawAppId)
         Map<String, Object> out = [shopDomain: shop, connectionsCleared: 0, deletedByTenant: [:], needsReview: []]
-        Set<String> tenants = tenantsForShop(ec, shop)
+        Set<String> tenants = appId ? tenantsForShopViaApp(ec, shop, appId) : tenantsForShop(ec, shop)
         if (!tenants) { logger.info("Shopify shop redact for an unknown store; nothing held"); return out }
         tenants.each { String tenantId ->
             List configs = ((TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.CONFIG_ENTITY,
                             "privacy shop redact: this tenant's connections, explicit companyUserGroupId condition applied")
                     ?.condition("companyUserGroupId", tenantId)?.useCache(false)?.list() ?: []) as List)
-            List thisStore = configs.findAll { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) == shop }
-            boolean otherStoreActive = configs.any { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) != shop && normalize(it.isActive) != "N" }
+            // With an app: only that app's connections to the store are cleared; anything else still live for the tenant
+            // (a pasted token to the same store, or another store) means its findings may still be in use.
+            List thisStore = configs.findAll { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) == shop && (!appId || normalize(it.shopifyAppId) == appId) }
+            boolean otherStoreActive = configs.any { !(it in thisStore) && normalize(it.isActive) != "N" }
             thisStore.each { def config ->
                 config.setAll([accessToken: null, refreshToken: null, accessTokenExpiresDate: null, refreshTokenExpiresDate: null, isActive: "N"])
                 ShopifyInstallSupport.withAuthzLifted(ec) { -> config.update() }

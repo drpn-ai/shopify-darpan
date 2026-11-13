@@ -59,6 +59,14 @@ class ShopifyWebhookSupport {
             payload = null
         }
         if (payload == null) return [status: 400, message: "bad request"]
+        // The header is not signed; the body is. A PUBLIC app's one secret signs every store's webhooks, so a body
+        // captured from one store could be re-sent with another store in the header. Act only when the signed body
+        // names the same store.
+        String signedShop = normalize(payload.shop_domain ?: payload.myshopify_domain)?.toLowerCase(Locale.ROOT)
+        if (signedShop != shop) {
+            logger.warn("Shopify webhook {} refused: the signed body names a different store than the header", topic)
+            return [status: 400, message: "bad request"]
+        }
 
         try {
             switch (topic) {
@@ -78,7 +86,9 @@ class ShopifyWebhookSupport {
                     logger.info("Shopify customer redact for {} (webhook {}): {}", shop, webhookId, redacted?.deletedByTenant)
                     break
                 case TOPIC_SHOP_REDACT:
-                    Map result = (Map) call(ec, "redact#Shop", [shopDomain: shop]).result
+                    // Only tenants connected through THIS app: a pasted-token connection to the same store is not the
+                    // app's to break (the store uninstalled the app, not Darpan).
+                    Map result = (Map) call(ec, "redact#Shop", [shopDomain: shop, shopifyAppId: normalize(app.shopifyAppId)]).result
                     logger.info("Shopify shop redact for {} (webhook {}): cleared {}, deleted {}, needs review {}", shop, webhookId,
                             result?.connectionsCleared, result?.deletedByTenant, result?.needsReview)
                     break

@@ -36,10 +36,12 @@
             when the tenant connects another Shopify store).</description>
         <in-parameters>
             <parameter name="shopDomain" required="true"/>
+            <parameter name="shopifyAppId"><description>The app whose webhook asked: only tenants connected through it
+                are touched. Empty means every tenant connecting the store (an operator's call).</description></parameter>
         </in-parameters>
         <out-parameters><parameter name="result" type="Map"/></out-parameters>
         <actions>
-            <set field="result" from="shopify.privacy.ShopifyPrivacySupport.redactShop(ec, shopDomain)"/>
+            <set field="result" from="shopify.privacy.ShopifyPrivacySupport.redactShop(ec, shopDomain, shopifyAppId)"/>
         </actions>
     </service>
 </services>
