@@ -79,7 +79,7 @@ class ShopifyWebhookSupport {
             switch (topic) {
                 case TOPIC_UNINSTALLED:
                     // An app an operator has switched off acts on nothing but the privacy topics.
-                    if (normalize(app.isActive) == "N") break
+                    if (normalize(app.isActive) != "Y") break
                     int cleared = clearAppConnections(ec, shop, normalize(app.shopifyAppId))
                     logger.info("Shopify app {} uninstalled from {} (webhook {}): {} connection(s) cleared", app.shopifyAppId, shop, webhookId, cleared)
                     break
