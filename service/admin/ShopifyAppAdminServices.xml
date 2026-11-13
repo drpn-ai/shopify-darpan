@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DAR-BE-275. Darpan admins (super admins) register the Shopify apps Darpan owns: a CUSTOM app made for one
+  store, or the PUBLIC App Store app. admin.* and therefore inside the DARPAN_ADMIN_API fence (the pattern
+  admin\..* covers this file); each service checks super admin again first. The client secret is accepted on
+  save and never returned (hasClientSecret only).
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="list" noun="ShopifyApps" allow-remote="true" authenticate="true">
+        <description>Every Darpan Shopify app, without its client secret.</description>
+        <out-parameters><parameter name="shopifyApps" type="List"/></out-parameters>
+        <actions>
+            <if condition="!darpan.admin.AdminAccessSupport.requireSuperAdmin(ec)"><return/></if>
+            <entity-find entity-name="darpan.shopify.ShopifyApp" list="appList" use-cache="false">
+                <order-by field-name="shopifyAppId"/>
+            </entity-find>
+            <set field="shopifyApps" from="[]"/>
+            <iterate list="appList" entry="app">
+                <script>shopifyApps.add([shopifyAppId: app.shopifyAppId, description: app.description,
+                        distribution: app.distribution, shopDomain: app.shopDomain, clientId: app.clientId,
+                        scopes: app.scopes, isActive: app.isActive, hasClientSecret: app.clientSecret as boolean,
+                        createdDate: app.createdDate, lastUpdatedDate: app.lastUpdatedDate])</script>
+            </iterate>
+        </actions>
+    </service>
+
+    <service verb="save" noun="ShopifyApp" allow-remote="true" authenticate="true">
+        <description>Creates or updates a Darpan Shopify app. On update, an empty clientId, clientSecret or scopes
+            keeps the stored value. One active CUSTOM app per store and one active PUBLIC app.</description>
+        <in-parameters>
+            <parameter name="shopifyAppId"><description>Empty creates a new app.</description></parameter>
+            <parameter name="description"/>
+            <parameter name="distribution" required="true"><description>CUSTOM or PUBLIC.</description></parameter>
+            <parameter name="shopDomain"><description>CUSTOM only: the store the app is for.</description></parameter>
+            <parameter name="clientId"/>
+            <parameter name="clientSecret"><description>Required when creating; never returned.</description></parameter>
+            <parameter name="scopes"><description>Comma-separated, such as read_orders,read_returns,read_all_orders.</description></parameter>
+            <parameter name="isActive"/>
+        </in-parameters>
+        <out-parameters><parameter name="shopifyApp" type="Map"/></out-parameters>
+        <actions>
+            <if condition="!darpan.admin.AdminAccessSupport.requireSuperAdmin(ec)"><return/></if>
+            <set field="distribution" from="distribution?.trim()?.toUpperCase()"/>
+            <if condition="!(distribution in ['CUSTOM', 'PUBLIC'])">
+                <return error="true" message="Distribution must be CUSTOM or PUBLIC."/>
+            </if>
+            <set field="storeDomain" from="distribution == 'CUSTOM' ? shopify.facade.settings.ShopifyInstallSupport.normalizeShopDomain(shopDomain) : null"/>
+            <if condition="distribution == 'CUSTOM' &amp;&amp; !storeDomain">
+                <return error="true" message="A custom app needs the store it is for, such as your-store.myshopify.com."/>
+            </if>
+
+            <if condition="shopifyAppId">
+                <entity-find-one entity-name="darpan.shopify.ShopifyApp" value-field="app" for-update="true"/>
+            </if>
+            <if condition="app == null">
+                <if condition="!clientId || !clientSecret || !scopes">
+                    <return error="true" message="A new app needs its client ID, client secret and scopes."/>
+                </if>
+                <entity-make-value entity-name="darpan.shopify.ShopifyApp" value-field="app"/>
+                <set field="app.createdDate" from="ec.user.nowTimestamp"/>
+                <if condition="shopifyAppId"><set field="app.shopifyAppId" from="shopifyAppId"/>
+                    <else><entity-sequenced-id-primary value-field="app"/></else></if>
+                <set field="app.isActive" value="Y"/>
+            </if>
+
+            <set field="willBeActive" from="isActive ? (isActive == 'Y') : (app.isActive != 'N')"/>
+            <if condition="willBeActive">
+                <entity-find entity-name="darpan.shopify.ShopifyApp" list="clashes" use-cache="false">
+                    <econdition field-name="distribution"/>
+                    <econdition field-name="shopDomain" from="storeDomain" ignore-if-empty="false"/>
+                    <econdition field-name="isActive" value="Y"/>
+                    <econdition field-name="shopifyAppId" operator="not-equals" from="app.shopifyAppId"/>
+                </entity-find>
+                <if condition="clashes">
+                    <return error="true" message="Another active ${distribution == 'CUSTOM' ? 'app is already set up for ' + storeDomain : 'public app exists'} (${clashes[0].shopifyAppId})."/>
+                </if>
+            </if>
+
+            <set field="app.distribution" from="distribution"/>
+            <set field="app.shopDomain" from="storeDomain"/>
+            <if condition="description != null"><set field="app.description" from="description"/></if>
+            <if condition="clientId"><set field="app.clientId" from="clientId.trim()"/></if>
+            <if condition="clientSecret"><set field="app.clientSecret" from="clientSecret.trim()"/></if>
+            <if condition="scopes"><set field="app.scopes" from="shopify.facade.settings.ShopifyInstallSupport.splitScopes(scopes).join(',')"/></if>
+            <if condition="isActive"><set field="app.isActive" from="isActive == 'Y' ? 'Y' : 'N'"/></if>
+            <set field="app.lastUpdatedDate" from="ec.user.nowTimestamp"/>
+            <script>app.createOrUpdate()</script>
+
+            <set field="shopifyApp" from="[shopifyAppId: app.shopifyAppId, description: app.description,
+                    distribution: app.distribution, shopDomain: app.shopDomain, clientId: app.clientId,
+                    scopes: app.scopes, isActive: app.isActive, hasClientSecret: app.clientSecret as boolean]"/>
+        </actions>
+    </service>
+</services>
