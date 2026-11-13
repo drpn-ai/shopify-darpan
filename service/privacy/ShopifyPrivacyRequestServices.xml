@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DAR-BE-272. Shopify's three privacy requests. Internal only (allow-remote="false"): DAR-BE-273's HMAC-checked webhook
+  receiver calls them. Authentication is left as the default; the receiver, which has no session, calls them with authz
+  disabled after verifying Shopify's signature. Logic and scope: shopify.privacy.ShopifyPrivacySupport.
+-->
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="report" noun="CustomerData" allow-remote="false">
+        <description>customers/data_request: the Shopify records Darpan holds for the listed orders, per tenant.</description>
+        <in-parameters>
+            <parameter name="shopDomain" required="true"/>
+            <parameter name="orderIds" type="List"/>
+        </in-parameters>
+        <out-parameters><parameter name="report" type="Map"/></out-parameters>
+        <actions>
+            <set field="report" from="shopify.privacy.ShopifyPrivacySupport.reportCustomerData(ec, shopDomain, orderIds)"/>
+        </actions>
+    </service>
+
+    <service verb="redact" noun="Customer" allow-remote="false">
+        <description>customers/redact: delete the Shopify records for the listed orders (orders_to_redact), per tenant.</description>
+        <in-parameters>
+            <parameter name="shopDomain" required="true"/>
+            <parameter name="orderIds" type="List"/>
+        </in-parameters>
+        <out-parameters><parameter name="result" type="Map"/></out-parameters>
+        <actions>
+            <set field="result" from="shopify.privacy.ShopifyPrivacySupport.redactCustomer(ec, shopDomain, orderIds)"/>
+        </actions>
+    </service>
+
+    <service verb="redact" noun="Shop" allow-remote="false">
+        <description>shop/redact: clear the store's tokens and delete each tenant's Shopify finding records (kept for review
+            when the tenant connects another Shopify store).</description>
+        <in-parameters>
+            <parameter name="shopDomain" required="true"/>
+        </in-parameters>
+        <out-parameters><parameter name="result" type="Map"/></out-parameters>
+        <actions>
+            <set field="result" from="shopify.privacy.ShopifyPrivacySupport.redactShop(ec, shopDomain)"/>
+        </actions>
+    </service>
+</services>
