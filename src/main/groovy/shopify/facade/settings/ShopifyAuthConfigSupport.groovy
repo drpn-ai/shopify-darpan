@@ -3,6 +3,7 @@ package shopify.facade.settings
 import darpan.common.ValueSupport
 import darpan.facade.common.FacadeSupport
 import darpan.facade.common.PaginationSupport
+import darpan.facade.common.SecretCarryOver
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.SharedConfigGrantSupport
 import darpan.facade.common.TenantAccessSupport
@@ -286,6 +287,15 @@ class ShopifyAuthConfigSupport {
 
         if (!ec.message.hasError() && existingConfig == null && !accessTokenValue) {
             ec.message.addError("Access token is required for new Shopify auth configs.")
+        }
+        // DAR-BE-255 (as DAR-BE-080 for SFTP, database and HotWax): a blank token keeps the stored one only while the
+        // shop URL is the same. The allow-list admits any *.myshopify.com store and any path on it, so an editor (a
+        // shared peer, too) could otherwise point the config at a store of their own and have the next test or run
+        // send it this store's token.
+        List<String> movedFields = existingConfig?.accessToken ? SecretCarryOver.changedFields(
+                ["shop URL": existingConfig.shopApiUrl], ["shop URL": shopApiUrlValue], ["shop URL"]) : []
+        if (!ec.message.hasError() && movedFields && !accessTokenValue) {
+            ec.message.addError(SecretCarryOver.refusal(movedFields, "access token"))
         }
 
         Map<String, Object> output = [:]

@@ -151,6 +151,7 @@ class ShopifySharedConfigAccessTests {
             description        : "Edited by member",
             shopApiUrl         : "https://owner-shared-save.myshopify.com/admin/api",
             apiVersion         : "2025-10",
+            accessToken        : "member-shopify-token",
             canReadOrders      : true,
         ])
         assertTrue((Boolean) result.ok, result.errors?.toString())
@@ -164,6 +165,34 @@ class ShopifySharedConfigAccessTests {
                 "a member's save must never transfer ownership of the shared row")
         Map<String, Object> saved = (Map<String, Object>) result.savedShopifyAuthConfig
         assertTrue(saved.isShared as boolean, "the save response must also flag the row isShared for the peer")
+    }
+
+    /** DAR-BE-255: a blank token is kept only while the shop URL is the same; a peer cannot carry it to their own store. */
+    @Test
+    void aMovedShopUrlNeedsTheAccessTokenAgain() {
+        String configId = "SHOPIFYMOVE" // no underscore: the shop URL built from it must pass the save's URL check
+        seedShopifyFixture(configId, "Move fixture")
+        seedGrant(configId)
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, MEMBER)
+        Map<String, Object> base = [shopifyAuthConfigId: configId, description: "Move fixture", apiVersion: "2025-10"]
+
+        Map<String, Object> same = saveFacade(base + [shopApiUrl: "https://shopifymove.myshopify.com/admin/api/"])
+        assertTrue((Boolean) same.ok, same.errors?.toString())
+        assertEquals("shared-shopify-token", findOne(configId).accessToken, "same shop URL keeps the stored token")
+
+        ec.message.clearErrors()
+        Map<String, Object> refused = saveFacade(base + [shopApiUrl: "https://attacker-store.myshopify.com/admin/api"])
+        assertFalse((Boolean) refused.ok, "a moved shop URL kept the stored token: ${refused}")
+        assertEquals(["Enter the access token again: the shop URL changed, so the saved access token is not sent to the new address."],
+                refused.errors)
+        assertEquals(["https://shopifymove.myshopify.com/admin/api", "shared-shopify-token"],
+                findOne(configId).with { [it.shopApiUrl, it.accessToken] }, "the refused save changed the row")
+
+        ec.message.clearErrors()
+        Map<String, Object> moved = saveFacade(base + [shopApiUrl: "https://new-store.myshopify.com/admin/api", accessToken: "new-store-token"])
+        assertTrue((Boolean) moved.ok, moved.errors?.toString())
+        assertEquals(["https://new-store.myshopify.com/admin/api", "new-store-token"],
+                findOne(configId).with { [it.shopApiUrl, it.accessToken] })
     }
 
     /**

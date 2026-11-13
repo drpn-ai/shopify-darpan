@@ -184,7 +184,7 @@ class ShopifyAuthConfigFacadeSmokeTests {
         Map<String, Object> result = saveFacade([
             shopifyAuthConfigId: "GORJANA_SHOPIFY",
             description        : "Gorjana Shopify Updated",
-            shopApiUrl         : "https://gorjana-updated.myshopify.com/admin/api/",
+            shopApiUrl         : "https://gorjana.myshopify.com/admin/api/", // same shop: a moved one needs the token again (DAR-BE-255)
             apiVersion         : "2025-10",
             accessToken        : "",
             isActive           : true,
@@ -194,7 +194,7 @@ class ShopifyAuthConfigFacadeSmokeTests {
         assertTrue((Boolean) result.ok, result.errors?.toString())
         def saved = findOne([shopifyAuthConfigId: "GORJANA_SHOPIFY"])
         assertEquals("gorjana-shopify-token", saved.accessToken)
-        assertEquals("https://gorjana-updated.myshopify.com/admin/api", saved.shopApiUrl)
+        assertEquals("https://gorjana.myshopify.com/admin/api", saved.shopApiUrl)
         assertEquals("America/Los_Angeles", saved.timeZone)
         assertEquals("N", saved.canReadOrders)
         assertTrue(((Map<String, Object>) result.savedShopifyAuthConfig).hasAccessToken as boolean)
