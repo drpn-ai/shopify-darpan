@@ -95,7 +95,10 @@ class ShopifyGraphqlTransportTests {
     @Test
     void transportNeverRetriesMutationDocuments() {
         int callCount = 0
-        Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig(), "mutation DarpanShopUpdate { shopUpdate { userErrors { message } } }", [:], [
+        // The bulk run is the one mutation Darpan sends (DAR-BE-260 refuses any other before it is sent).
+        Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig(),
+                'mutation DarpanBulkRun($query: String!) { bulkOperationRunQuery(query: $query) { bulkOperation { id } userErrors { message } } }',
+                [query: '{ orders { edges { node { id } } } }'], [
             maxAttempts : 2,
             httpExecutor: { Map<String, Object> request ->
                 callCount++

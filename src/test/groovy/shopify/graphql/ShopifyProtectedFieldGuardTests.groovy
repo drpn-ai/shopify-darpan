@@ -55,6 +55,55 @@ class ShopifyProtectedFieldGuardTests {
     }
 
     @Test
+    void everyBulkJobIsCheckedAndOnlyOneOperationGoesOut() {
+        // Two aliased bulk jobs: the second must not ride past the first's clean query.
+        String twoJobs = 'mutation { a: bulkOperationRunQuery(query: "{ orders { edges { node { id } } } }") { bulkOperation { id } } ' +
+                'b: bulkOperationRunQuery(query: "{ orders { edges { node { email } } } }") { bulkOperation { id } } }'
+        assertTrue(ShopifyProtectedFieldGuard.refusal(twoJobs)?.contains("orders.edges.node.email"))
+        assertTrue(ShopifyProtectedFieldGuard.refusal('query a { shop { id } } query b { orders(first: 1) { edges { node { email } } } }')
+                ?.contains("2 operations"))
+    }
+
+    @Test
+    void darpanSendsNoMutationButTheBulkRead() {
+        // A webhook would carry full order payloads, customer included, to someone else's URL.
+        assertTrue(ShopifyProtectedFieldGuard.refusal('mutation { webhookSubscriptionCreate(topic: ORDERS_CREATE, webhookSubscription: {callbackUrl: "https://x.example"}) { userErrors { message } } }')
+                ?.contains("webhookSubscriptionCreate"))
+        assertTrue(ShopifyProtectedFieldGuard.refusal('mutation { bulkOperationRunMutation(mutation: "mutation { x }", stagedUploadPath: "p") { bulkOperation { id } } }')
+                ?.contains("bulkOperationRunMutation"))
+        assertTrue(ShopifyProtectedFieldGuard.refusal('subscription { x }') != null)
+        // A bulk job's inner document must itself be a query.
+        String nested = 'mutation { bulkOperationRunQuery(query: "mutation { bulkOperationRunQuery(query: \\"{ shop { id } }\\") { bulkOperation { id } } }") { bulkOperation { id } } }'
+        assertTrue(ShopifyProtectedFieldGuard.refusal(nested)?.contains("only reads"))
+    }
+
+    @Test
+    void otherRoadsToAPersonAreClosed() {
+        assertTrue(ShopifyProtectedFieldGuard.refusal('{ customerByIdentifier(identifier: {id: "gid://shopify/Customer/1"}) { id note } }') != null)
+        assertTrue(ShopifyProtectedFieldGuard.refusal('{ customerSegmentMembers(first: 1, query: "") { edges { node { id lastOrderId } } } }') != null)
+        assertTrue(ShopifyProtectedFieldGuard.refusal('{ productVariants(first: 1) { edges { node { displayName } } } }') != null)
+        assertTrue(ShopifyProtectedFieldGuard.refusal('{ orders(first: 1) { edges { node { transactions { paymentDetails { ... on CardPaymentDetails { company } } } } } } }')
+                ?.contains("CardPaymentDetails"))
+        // A connection of customers read by id only is fine.
+        assertNull(ShopifyProtectedFieldGuard.refusal('{ customers(first: 5) { pageInfo { hasNextPage } edges { cursor node { id } } } }'))
+    }
+
+    @Test
+    void aSearchCannotTestWhetherAPersonExists() {
+        assertTrue(ShopifyProtectedFieldGuard.refusal('{ customers(first: 1, query: "email:someone@example.com") { edges { node { id } } } }')?.contains("email:someone@example.com"))
+        assertTrue(ShopifyProtectedFieldGuard.refusal('{ orders(first: 1, query: "someone@example.com") { edges { node { id } } } }') != null, "a bare word matches names and emails")
+        assertTrue(ShopifyProtectedFieldGuard.refusal('query($q: String) { orders(first: 1, query: $q) { edges { node { id } } } }', [q: "shipping_city:Boston"]) != null)
+        assertTrue(ShopifyProtectedFieldGuard.refusal('mutation($query: String!) { bulkOperationRunQuery(query: $query) { bulkOperation { id } } }',
+                [query: '{ orders(query: "-first_name:x") { edges { node { id } } } }']) != null, "the bulk job's own searches are checked too")
+        // The searches Darpan writes keep working.
+        ["updated_at:>='2026-11-01T00:00:00Z' AND -return_status:no_return",
+         "subject_type:Order AND (action:return_created OR action:refund_created) created_at:>='2026-11-01T00:00:00Z'",
+         "(id:18959057551491 OR id:18959060828291)", "created_at:<1970-01-02", "status:any", ""].each { String q ->
+            assertNull(ShopifyProtectedFieldGuard.refusal('query($q: String) { orders(first: 1, query: $q) { edges { node { id } } } }', [q: q]), q)
+        }
+    }
+
+    @Test
     void anUnreadableQueryIsRefusedAndNothingIsSent() {
         assertTrue(ShopifyProtectedFieldGuard.refusal('{ orders { edges { node { id ')?.startsWith("Darpan could not check"))
         boolean sent = false
