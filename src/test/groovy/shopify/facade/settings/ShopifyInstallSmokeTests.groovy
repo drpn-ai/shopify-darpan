@@ -53,7 +53,7 @@ class ShopifyInstallSmokeTests {
         seedTenant(VIEWER, "Viewer tenant")
         grant(VIEWER, TenantAccessSupport.DARPAN_COMPANY_VIEW_ONLY_GROUP_ID)
         ec.entity.makeValue("darpan.shopify.ShopifyApp").setAll([
-                shopifyAppId: APP_ID, distribution: "CUSTOM", shopDomain: SHOP, clientId: "test-client-id",
+                shopifyAppId: APP_ID, distribution: "CUSTOM", shopDomain: SHOP, tenantUserGroupId: OWNER, clientId: "test-client-id",
                 clientSecret: SECRET, scopes: SCOPES, isActive: "Y"]).createOrUpdate()
         ec.entity.makeValue("darpan.shopify.ShopifyAuthConfig").setAll([
                 shopifyAuthConfigId: "PASTED_TOKEN_CONFIG", companyUserGroupId: OWNER, shopApiUrl: "https://${SHOP}".toString(),
@@ -156,6 +156,33 @@ class ShopifyInstallSmokeTests {
         Map<String, Object> viewOnly = beginInstall(SHOP)
         assertFalse(viewOnly.ok as boolean)
         assertNull(viewOnly.authorizeUrl)
+    }
+
+    @Test
+    void anotherTenantCannotStartAnInstallOnThisClientsStore() {
+        // Review finding 1: without the app's tenant, any tenant could send a store's staff a link and keep its token.
+        grant(VIEWER, TenantAccessSupport.DARPAN_COMPANY_EDITOR_GROUP_ID)
+        try {
+            ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, VIEWER)
+            Map<String, Object> result = beginInstall(SHOP)
+            assertFalse(result.ok as boolean)
+            assertNull(result.authorizeUrl)
+        } finally {
+            ec.entity.find(TenantAccessSupport.TENANT_USER_PERMISSION_GROUP_MEMBER_ENTITY_NAME).condition("tenantUserGroupId", VIEWER)
+                    .condition("permissionUserGroupId", TenantAccessSupport.DARPAN_COMPANY_EDITOR_GROUP_ID).deleteAll()
+        }
+    }
+
+    @Test
+    void anAppReassignedWhileTheInstallWasPendingIsRefusedAtTheCallback() {
+        String state = beginState(SHOP)
+        def app = ec.entity.find("darpan.shopify.ShopifyApp").condition("shopifyAppId", APP_ID).useCache(false).one()
+        app.set("tenantUserGroupId", VIEWER); app.update()
+        try {
+            assertTrue(ShopifyInstallSupport.handleCallback(ec, signed([code: "c7", shop: SHOP, state: state])).endsWith("reason=not_configured"))
+        } finally {
+            app.set("tenantUserGroupId", OWNER); app.update()
+        }
     }
 
     @Test

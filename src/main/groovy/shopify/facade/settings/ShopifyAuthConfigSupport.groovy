@@ -324,6 +324,12 @@ class ShopifyAuthConfigSupport {
                     isActive           : isActiveValue,
                     canReadOrders      : canReadOrdersValue,
             ]
+            // DAR-BE-275: a pasted token makes this a pasted-token connection. Left tied to an app install, the
+            // pasted token would be ignored once the old expiry passed, or replaced by the next refresh.
+            if (accessTokenValue && existingConfig?.shopifyAppId) {
+                storeMap.putAll([shopifyAppId: null, refreshToken: null, accessTokenExpiresDate: null,
+                                 refreshTokenExpiresDate: null, grantedScopes: null])
+            }
 
             if (existingConfig == null || !existingConfig.companyUserGroupId) {
                 TenantAccessSupport.assignTenantOwnershipOnCreate(storeMap, ec)

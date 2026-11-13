@@ -47,6 +47,11 @@
         <field name="shopDomain" type="text-medium">
             <description>CUSTOM only: the one store (name.myshopify.com) the app is distributed to.</description>
         </field>
+        <field name="tenantUserGroupId" type="id">
+            <description>CUSTOM only: the one tenant allowed to install this app. Without it, any tenant could
+                start an install on another client's store and, if a staff member of that store followed the
+                link, keep that store's token. The app stays platform-owned (admin-managed, read unscoped).</description>
+        </field>
         <field name="clientId" type="text-medium" cannot-be-null="true"/>
         <field name="clientSecret" type="text-medium" encrypt="true">
             <description>Never returned by any service. Verifies Shopify's HMAC and authenticates the

@@ -49,7 +49,7 @@ class ShopifyAppAdminServicesSmokeTests {
     @Test
     void theSecretIsStoredButNeverReturned() {
         setSuperAdmin(true)
-        Map saved = call("save#ShopifyApp", [distribution: "custom", shopDomain: "https://Secret-Store.myshopify.com/admin",
+        Map saved = call("save#ShopifyApp", [distribution: "custom", shopDomain: "https://Secret-Store.myshopify.com/admin", tenantUserGroupId: "KREWE",
                                              clientId: "cid-1", clientSecret: SECRET, scopes: "read_orders, read_returns"])
         assertFalse(ec.message.hasError(), "${ec.message.errors}")
         Map app = (Map) saved.shopifyApp
@@ -61,7 +61,7 @@ class ShopifyAppAdminServicesSmokeTests {
         assertFalse(call("list#ShopifyApps", [:]).toString().contains(SECRET))
 
         // An update without a secret keeps the stored one.
-        call("save#ShopifyApp", [shopifyAppId: app.shopifyAppId, distribution: "CUSTOM", shopDomain: "secret-store", description: "renamed"])
+        call("save#ShopifyApp", [shopifyAppId: app.shopifyAppId, distribution: "CUSTOM", shopDomain: "secret-store", tenantUserGroupId: "KREWE", description: "renamed"])
         assertFalse(ec.message.hasError(), "${ec.message.errors}")
         def row = ec.entity.find("darpan.shopify.ShopifyApp").condition("shopifyAppId", app.shopifyAppId).disableAuthz().useCache(false).one()
         assertEquals(SECRET, row.clientSecret)
@@ -71,9 +71,9 @@ class ShopifyAppAdminServicesSmokeTests {
     @Test
     void aSecondActiveAppForTheSameStoreAndACustomAppWithoutAStoreAreRefused() {
         setSuperAdmin(true)
-        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "dup-store", clientId: "a", clientSecret: "s", scopes: "read_orders"])
+        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "dup-store", tenantUserGroupId: "KREWE", clientId: "a", clientSecret: "s", scopes: "read_orders"])
         assertFalse(ec.message.hasError(), "${ec.message.errors}")
-        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "dup-store", clientId: "b", clientSecret: "s", scopes: "read_orders"])
+        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "dup-store", tenantUserGroupId: "KREWE", clientId: "b", clientSecret: "s", scopes: "read_orders"])
         assertTrue(ec.message.errors.join(" ").contains("already set up for dup-store.myshopify.com"))
 
         ec.message.clearErrors()
@@ -81,8 +81,12 @@ class ShopifyAppAdminServicesSmokeTests {
         assertTrue(ec.message.errors.join(" ").contains("needs the store"))
 
         ec.message.clearErrors()
-        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "no-secret", clientId: "c", scopes: "read_orders"])
+        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "no-secret", tenantUserGroupId: "KREWE", clientId: "c", scopes: "read_orders"])
         assertTrue(ec.message.errors.join(" ").contains("client secret"))
+
+        ec.message.clearErrors()
+        call("save#ShopifyApp", [distribution: "CUSTOM", shopDomain: "no-tenant", clientId: "c", clientSecret: "s", scopes: "read_orders"])
+        assertTrue(ec.message.errors.join(" ").contains("tenant allowed to install"))
     }
 
     private Map call(String verbNoun, Map params) {

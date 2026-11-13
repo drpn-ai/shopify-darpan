@@ -80,18 +80,19 @@ class ShopifyInstallSupport {
     // ---- apps ----------------------------------------------------------------------------------
 
     /**
-     * The active app to install on this store: the CUSTOM app made for it, else the PUBLIC app.
-     * ShopifyApp is platform-owned (no tenant), so it is read unscoped.
+     * The active CUSTOM app made for this store AND this tenant, or null. ShopifyApp is platform-owned, so it is
+     * read unscoped with an explicit tenant condition. The PUBLIC app is never installed from here: a public
+     * install starts in Shopify and needs its own way to tie the store to a tenant (DAR-BE-197 Phase 2).
      */
-    static def findAppForShop(def ec, String shopDomain) {
-        if (!shopDomain) return null
-        List apps = (TenantScopedFinder.findGlobalUnscoped(ec, APP_ENTITY,
-                        "platform-owned Darpan Shopify app chosen by store domain; holds no tenant data")
+    static def findAppForShop(def ec, String shopDomain, String tenantId) {
+        if (!shopDomain || !tenantId) return null
+        return TenantScopedFinder.findGlobalUnscoped(ec, APP_ENTITY,
+                        "platform-owned Darpan Shopify app chosen by store domain, pinned to the requesting tenant")
+                ?.condition("distribution", DISTRIBUTION_CUSTOM)
+                ?.condition("shopDomain", shopDomain)
+                ?.condition("tenantUserGroupId", tenantId)
                 ?.condition("isActive", "Y")
-                ?.useCache(false)?.list() ?: []) as List
-        def custom = apps.find { normalize(it.distribution) == DISTRIBUTION_CUSTOM && normalize(it.shopDomain)?.toLowerCase(Locale.ROOT) == shopDomain }
-        if (custom != null) return custom
-        return apps.find { normalize(it.distribution) == DISTRIBUTION_PUBLIC }
+                ?.useCache(false)?.list()?.find { true }
     }
 
     static def findApp(def ec, Object rawAppId) {
@@ -126,9 +127,9 @@ class ShopifyInstallSupport {
             ec.message.addError("Enter the store's address, such as your-store.myshopify.com.")
             return null
         }
-        def app = findAppForShop(ec, shopDomain)
+        def app = findAppForShop(ec, shopDomain, tenantId)
         if (app == null || !normalize(app.clientId) || !normalize(app.clientSecret)) {
-            ec.message.addError("No Darpan Shopify app is set up for ${shopDomain}.")
+            ec.message.addError("No Darpan Shopify app is set up for ${shopDomain} in this tenant.")
             return null
         }
         String redirectUri = resolveRedirectUri(ec)
@@ -287,7 +288,7 @@ class ShopifyInstallSupport {
                 shopifyAppId      : appId,
                 installedDate     : now,
         ] + tokenFields).each { key, value -> created.set(key, value) }
-        created.setSequencedIdPrimary()
+        created.set("shopifyAuthConfigId", TenantScopedFinder.mintId(ec, CONFIG_ENTITY, "shopifyAuthConfigId"))
         created.create()
         return normalize(created.shopifyAuthConfigId)
     }
@@ -315,6 +316,10 @@ class ShopifyInstallSupport {
         def app = findApp(ec, state.shopifyAppId)
         String clientSecret = normalize(app?.clientSecret)
         if (app == null || normalize(app.isActive) == "N" || !clientSecret) return failureUrl(appBaseUrl, "not_configured")
+        // Re-checked here, not only at begin: the app may have been reassigned while the install was pending.
+        if (normalize(app.distribution) != DISTRIBUTION_CUSTOM || normalize(app.tenantUserGroupId) != state.companyUserGroupId) {
+            return failureUrl(appBaseUrl, "not_configured")
+        }
 
         if (!verifyHmac(params, clientSecret)) {
             logger.warn("Shopify install callback for tenant {} failed the HMAC check", state.companyUserGroupId)

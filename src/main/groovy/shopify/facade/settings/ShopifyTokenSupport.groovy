@@ -31,7 +31,12 @@ class ShopifyTokenSupport {
 
     /** Refresh this long before expiry, so a request never leaves with a token about to die. */
     static final long REFRESH_MARGIN_MILLIS = 5 * 60_000L
-    static final int REFRESH_TX_TIMEOUT_SECONDS = 60
+    /**
+     * Must outlast a wait for the lock (another thread's refresh: up to 30 s of HTTP) plus this thread's own
+     * refresh (up to 30 s). If it timed out after Shopify issued new tokens, the rollback would lose the only
+     * live refresh token.
+     */
+    static final int REFRESH_TX_TIMEOUT_SECONDS = 180
 
     static boolean isAppIssued(def config) {
         return config != null && normalize(config.shopifyAppId) != null && config.accessTokenExpiresDate != null

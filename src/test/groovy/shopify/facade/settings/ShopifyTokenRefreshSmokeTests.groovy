@@ -40,7 +40,7 @@ class ShopifyTokenRefreshSmokeTests {
         ReconciliationSmokeTestSupport.seedCompanyScope(ec)
         ec.artifactExecution.disableAuthz()
         ec.entity.makeValue("darpan.shopify.ShopifyApp").setAll([
-                shopifyAppId: APP_ID, distribution: "CUSTOM", shopDomain: SHOP, clientId: "cid",
+                shopifyAppId: APP_ID, distribution: "CUSTOM", shopDomain: SHOP, tenantUserGroupId: TENANT, clientId: "cid",
                 clientSecret: "secret", scopes: "read_orders", isActive: "Y"]).createOrUpdate()
     }
 
@@ -118,6 +118,35 @@ class ShopifyTokenRefreshSmokeTests {
         assertEquals(1, refreshCalls.get(), "the single-use refresh token was spent twice")
         assertEquals(["shpat_after_race", "shpat_after_race"], results)
         assertEquals("shprt_after_race", read("RACE_CFG").refreshToken)
+    }
+
+    @Test
+    void pastingATokenOntoAnAppInstallMakesItAPastedConnection() {
+        // Review finding 3: left tied to the app, the pasted token was ignored past the old expiry or replaced by a refresh.
+        saveConfig("REPASTE_CFG", [accessToken: "shpat_old", refreshToken: "shprt_old", accessTokenExpiresDate: inMinutes(30)])
+        ec.user.setPreference(darpan.facade.common.TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, TENANT)
+        Map out = (Map) ec.service.sync().name("facade.ShopifyFacadeServices.save#ShopifyAuthConfig").parameters([
+                shopifyAuthConfigId: "REPASTE_CFG", shopApiUrl: "https://${SHOP}".toString(), apiVersion: "2026-04",
+                accessToken: "shpat_pasted_now"]).disableAuthz().call()
+        assertTrue(out.ok as boolean, "${out.errors}")
+        def stored = read("REPASTE_CFG")
+        assertEquals("shpat_pasted_now", stored.accessToken)
+        assertNull(stored.shopifyAppId)
+        assertNull(stored.refreshToken)
+        countingHook(200, newTokens("never", "never"))
+        assertEquals("shpat_pasted_now", ShopifyTokenSupport.accessTokenFor(ec, stored))
+        assertEquals(0, refreshCalls.get())
+    }
+
+    @Test
+    void aConfigTransferLeavesTheAppInstallBehind() {
+        // Review finding 2: a copied single-use refresh token lets whichever instance refreshes first cut the other off.
+        String entity = "darpan.shopify.ShopifyAuthConfig"
+        assertEquals(["accessToken"], darpan.admin.transfer.TransferSpecs.secretFields(ec, entity))
+        List values = darpan.admin.transfer.TransferSpecs.valueFields(ec, darpan.admin.transfer.TransferSpecs.specForEntity(entity))
+        ["shopifyAppId", "refreshToken", "accessTokenExpiresDate", "refreshTokenExpiresDate", "grantedScopes"].each {
+            assertTrue(!(it in values), "${it} must not travel")
+        }
     }
 
     @Test
