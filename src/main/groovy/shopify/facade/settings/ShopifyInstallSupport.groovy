@@ -341,13 +341,32 @@ class ShopifyInstallSupport {
                     state.companyUserGroupId, tokens.grantedScopes, app.scopes)
             return failureUrl(appBaseUrl, "missing_scopes")
         }
+        // The callback has no Darpan session, so no artifact authz flows down to the entity write. Everything that
+        // authorises it has been checked above (single-use state bound to this tenant and store, Shopify's HMAC, the
+        // app's tenant, the granted scopes), and storeInstall writes only that tenant's row. Found by the live install
+        // test (2026-11-13): ArtifactAuthorizationException on create of ShopifyAuthConfig.
         try {
-            storeInstall(ec, state, tokens)
+            withAuthzLifted(ec) { -> storeInstall(ec, state, tokens) }
         } catch (Throwable t) {
             logger.error("Shopify install could not be stored for tenant {}: {}", state.companyUserGroupId, t.class.simpleName)
             return failureUrl(appBaseUrl, "store_failed")
         }
         return "${appBaseUrl}/settings?shopify=connected".toString()
+    }
+
+    /**
+     * DAR-BE-275: the one place this component lifts artifact authz (DisableAuthzRatchetTest baselines it). Used only
+     * for writes to a ShopifyAuthConfig row whose tenant was already established without a session: the install
+     * callback (state + HMAC) and a token refresh (the caller resolved the config through its tenant/shared-access
+     * check; a scheduled run has no user). Restores the previous state afterwards.
+     */
+    static Object withAuthzLifted(def ec, Closure work) {
+        boolean wasDisabled = ec.artifactExecution.disableAuthz()
+        try {
+            return work.call()
+        } finally {
+            if (!wasDisabled) ec.artifactExecution.enableAuthz()
+        }
     }
 
     private static String stateReasonSlug(String reason) {

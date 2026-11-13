@@ -110,6 +110,24 @@ class ShopifyInstallSmokeTests {
     }
 
     @Test
+    void theCallbackStoresTheInstallWithNoSessionAndAuthzOn() {
+        // Live test 2026-11-13 found this: the real callback has no user and authz on, and the create was refused
+        // (ArtifactAuthorizationException -> store_failed). Every other test here runs with authz disabled.
+        String state = beginState(SHOP)
+        String username = ec.user.username
+        ec.user.logoutUser()
+        ec.artifactExecution.enableAuthz()
+        try {
+            assertNull(ec.user.userId)
+            assertTrue(ShopifyInstallSupport.handleCallback(ec, signed([code: "c9", shop: SHOP, state: state])).endsWith("shopify=connected"))
+        } finally {
+            ec.artifactExecution.disableAuthz()
+            ec.user.internalLoginUser(username)
+        }
+        assertEquals("shpat_new_c9", installedRow().accessToken)
+    }
+
+    @Test
     void aForgedSignatureIsRefusedAndDoesNotBurnTheState() {
         String state = beginState(SHOP)
         Map forged = signed([code: "c3", shop: SHOP, state: state])

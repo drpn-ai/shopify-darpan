@@ -88,7 +88,7 @@ class ShopifyTokenSupport {
             locked.set("accessTokenExpiresDate", tokens.accessTokenExpiresDate)
             locked.set("refreshTokenExpiresDate", tokens.refreshTokenExpiresDate)
             if (tokens.grantedScopes) locked.set("grantedScopes", tokens.grantedScopes)
-            locked.update()
+            ShopifyInstallSupport.withAuthzLifted(ec) { -> locked.update() }
             return (String) tokens.accessToken
         }
         if (tokens.invalidGrant == true) {
@@ -97,7 +97,7 @@ class ShopifyTokenSupport {
             logger.warn("Shopify refused the refresh token for config {}; the store must install the app again", configId)
             locked.set("accessToken", null)
             locked.set("refreshToken", null)
-            locked.update()
+            ShopifyInstallSupport.withAuthzLifted(ec) { -> locked.update() }
             return null
         }
         // A timeout or 5xx: keep the tokens and use the current one while it still works; the next
