@@ -28,6 +28,10 @@ class ShopifyGraphqlTransport {
     static Map<String, Object> execute(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
         String normalizedQuery = normalize(queryDocument)
         if (!normalizedQuery) return safeFailure("Shopify GraphQL query document is required.", false)
+        // DAR-BE-260: every Shopify call passes here, so this is the one place customer email, phone, name and
+        // address are kept out — catalog extracts, lookups, free-form queries, agent queries and automations alike.
+        String protectedFieldRefusal = ShopifyProtectedFieldGuard.refusal(normalizedQuery, variables ?: [:])
+        if (protectedFieldRefusal) return safeFailure(protectedFieldRefusal, false)
         String accessToken = normalize(authConfig?.accessToken)
         if (!accessToken) return safeFailure("Shopify access token is not configured.", false)
 
