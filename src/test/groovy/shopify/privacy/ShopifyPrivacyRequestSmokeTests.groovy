@@ -99,7 +99,7 @@ class ShopifyPrivacyRequestSmokeTests {
     void shopRedactClearsTheStoreButKeepsATenantsOtherStoreData() {
         Map result = (Map) call("redact#Shop", [shopDomain: SHOP]).result
         assertEquals(2, result.connectionsCleared)
-        assertEquals([(A): 3L], result.deletedByTenant, "A connects only this store: its Shopify records go")
+        assertEquals([(A): 3L, (B): 0L], result.deletedByTenant, "A connects only this store: its Shopify records go; B nothing it can prove")
         assertEquals([B], result.needsReview, "B connects another store: kept, flagged for a person")
         assertEquals([], shopifyRecordIds(A))
         assertEquals(["#1002", "1001", "1003"].sort(), shopifyRecordIds(B))
@@ -111,6 +111,17 @@ class ShopifyPrivacyRequestSmokeTests {
         }
         def other = ec.entity.find("darpan.shopify.ShopifyAuthConfig").condition("shopifyAuthConfigId", "${B}_CFG2".toString()).useCache(false).one()
         assertEquals("shpat_B2", other.accessToken, "the other store's connection is untouched")
+    }
+
+    @Test
+    void recordsThatSayTheirConnectionAreErasedExactlyEvenWithASecondStore() {
+        // DAR-BE-284: B connects two stores. Records read through this store's connection go; the other store's stay.
+        finding(B, "F4", [["SHOPIFY", "1004", null]], "${B}_CFG".toString())
+        finding(B, "F5", [["SHOPIFY", "5005", null]], "${B}_CFG2".toString())
+        Map result = (Map) call("redact#Shop", [shopDomain: SHOP]).result
+        assertEquals(1L, ((Map) result.deletedByTenant)[B], "only the record read through this store's connection")
+        assertEquals(["#1002", "1001", "1003", "5005"].sort(), shopifyRecordIds(B), "legacy records kept for review, the other store's record kept")
+        assertEquals([B], result.needsReview)
     }
 
     @Test
@@ -127,14 +138,14 @@ class ShopifyPrivacyRequestSmokeTests {
         return out
     }
 
-    private void finding(String t, String id, List<List<String>> recs) {
+    private void finding(String t, String id, List<List<String>> recs, String sourceConfigId = null) {
         String f = "${t}_${id}".toString()
         java.sql.Date today = new java.sql.Date(System.currentTimeMillis())
         upsert("darpan.audit.AuditFinding", [findingId: f, companyUserGroupId: t, statementId: "${t}_R1".toString(), checkId: "${t}_CHK".toString(),
                 recordKey: f, period: "2026-11", stateEnumId: "AUDFS_OPEN", headline: "missing", firstFoundDate: today, lastSeenDate: today])
         recs.eachWithIndex { List<String> r, int i ->
             upsert("darpan.audit.AuditFindingRecord", [findingId: f, recordSeqId: String.format("%02d", i + 1), companyUserGroupId: t,
-                    systemEnumId: r[0], recordType: "order", recordId: r[1], internalId: r[2],
+                    systemEnumId: r[0], recordType: "order", recordId: r[1], internalId: r[2], sourceConfigId: sourceConfigId,
                     recordData: r[0] == "SHOPIFY" ? "{\"email\":\"shopper@example.com\"}" : "{}"])
         }
     }

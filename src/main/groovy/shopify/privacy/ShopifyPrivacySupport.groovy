@@ -131,13 +131,24 @@ class ShopifyPrivacySupport {
                 ShopifyInstallSupport.withAuthzLifted(ec) { -> config.update() }
                 out.connectionsCleared = (out.connectionsCleared as int) + 1
             }
+            // DAR-BE-284: records that say which connection read them go exactly when it was this store's.
+            List<String> storeConfigIds = thisStore.collect { normalize(it.shopifyAuthConfigId) }.findAll { it } as List<String>
+            long deleted = storeConfigIds ? ((recordFind(ec, tenantId, null,
+                    "privacy shop redact: the store's connections, explicit companyUserGroupId condition applied")
+                    ?.condition("sourceConfigId", org.moqui.entity.EntityCondition.IN, storeConfigIds)?.deleteAll() ?: 0L) as Long) : 0L
+            // Records written before 2026-11-13 do not say: delete them only when the tenant has no other live
+            // connection that could have read them; otherwise keep them for a person to review.
+            def legacy = recordFind(ec, tenantId, null, "privacy shop redact: legacy records, explicit companyUserGroupId condition applied")
+                    ?.condition("sourceConfigId", null)
             if (otherStoreActive) {
-                (out.needsReview as List).add(tenantId)
-                logger.warn("Shopify shop redact: tenant {} still connects another Shopify store; its Shopify finding records were kept for review", tenantId)
+                if (legacy?.count()) {
+                    (out.needsReview as List).add(tenantId)
+                    logger.warn("Shopify shop redact: tenant {} still has another live Shopify connection; its Shopify finding records from before connections were recorded were kept for review", tenantId)
+                }
             } else {
-                (out.deletedByTenant as Map)[tenantId] = (recordFind(ec, tenantId, null,
-                        "privacy shop redact: explicit companyUserGroupId condition applied")?.deleteAll() ?: 0L) as Long
+                deleted += (legacy?.deleteAll() ?: 0L) as Long
             }
+            (out.deletedByTenant as Map)[tenantId] = deleted
         }
         return out
     }
