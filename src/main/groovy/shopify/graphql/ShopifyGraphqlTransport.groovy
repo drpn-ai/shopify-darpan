@@ -1,12 +1,10 @@
 package shopify.graphql
 
+import darpan.facade.common.OutboundHttpClient
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-
-import java.net.HttpURLConnection
-import java.nio.charset.StandardCharsets
 
 import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeInt
@@ -199,29 +197,30 @@ class ShopifyGraphqlTransport {
     // save path enforces. Runs only on the real network path; tests inject their own httpExecutor.
     private static final List<String> OUTBOUND_HOST_SUFFIXES = [".myshopify.com"]
 
-    private static Map<String, Object> executeHttpRequest(Map<String, Object> request) {
+    // DAR-BE-262 follow-up: sent through darpan's OutboundHttpClient, whose DNS step is the same policy's check, so a host
+    // that passes validate and then resolves to an internal address when connecting is refused at the connect (an
+    // IOException, retried like any failed attempt). No redirects, no cookies. The connect timeout picks the shared
+    // guarded client for that timeout; the read timeout is applied per wait for bytes, as HttpURLConnection's was.
+    // {@code client} replaces the shared guarded client (tests pass one with their own DNS step).
+    static Map<String, Object> executeHttpRequest(Map<String, Object> request, org.eclipse.jetty.client.HttpClient client = null) {
         def __urlCheck = darpan.facade.common.OutboundHttpPolicy.validate(request.url?.toString(), OUTBOUND_HOST_SUFFIXES)
         if (!__urlCheck.ok) throw new OutboundPolicyBlockedException("Shopify endpoint URL blocked by outbound policy: ${__urlCheck.error}")
-        HttpURLConnection connection = (HttpURLConnection) new URL(request.url.toString()).openConnection()
-        connection.requestMethod = "POST"
-        connection.doOutput = true
-        connection.connectTimeout = (request.connectTimeoutMillis ?: DEFAULT_CONNECT_TIMEOUT_MILLIS) as int
-        connection.readTimeout = (request.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) as int
-        ((Map<String, String>) request.headers).each { String key, String value -> connection.setRequestProperty(key, value) }
+        long connectTimeout = (request.connectTimeoutMillis ?: DEFAULT_CONNECT_TIMEOUT_MILLIS) as long
+        long readTimeout = (request.readTimeoutMillis ?: DEFAULT_READ_TIMEOUT_MILLIS) as long
+        org.eclipse.jetty.client.HttpClient http = client ?: OutboundHttpClient.shared(connectTimeout)
 
         long started = System.currentTimeMillis()
         Integer statusCode = null
         try {
-            byte[] bodyBytes = JsonOutput.toJson(request.body ?: [:]).getBytes(StandardCharsets.UTF_8)
-            connection.outputStream.withCloseable { OutputStream output -> output.write(bodyBytes) }
-
-            statusCode = connection.responseCode
-            InputStream input = statusCode >= 400 ? connection.errorStream : connection.inputStream
-            String responseBody = input != null ? input.getText("UTF-8") : ""
-            return [
-                statusCode: statusCode,
-                body      : responseBody,
-            ]
+            String json = JsonOutput.toJson(request.body ?: [:])
+            return OutboundHttpClient.stream(http, "POST", request.url.toString(), (Map) request.headers, json, readTimeout) { Map answer ->
+                statusCode = answer.statusCode as Integer
+                // A GraphQL answer is bounded by Shopify's query cost; read whole, as before (error bodies too).
+                return [
+                    statusCode: statusCode,
+                    body      : ((InputStream) answer.body).getText("UTF-8"),
+                ] as Map<String, Object>
+            }
         } finally {
             // DAR-BE-129. One line per Shopify request, so a run's calls can be counted by system and operation:
             // op is the document's operation name, or its first selected field when the document is anonymous.

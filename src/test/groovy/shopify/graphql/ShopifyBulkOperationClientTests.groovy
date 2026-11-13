@@ -403,4 +403,63 @@ class ShopifyBulkOperationClientTests {
                 body      : JsonOutput.toJson(body),
         ]
     }
+
+    /** DAR-BE-262 follow-up: a loopback listener counting connections, and a guarded client whose lookup answers loopback. */
+    private static Map loopbackListener() {
+        ServerSocket server = new ServerSocket(0, 5, InetAddress.getByAddress([127, 0, 0, 1] as byte[]))
+        server.setSoTimeout(200)
+        java.util.concurrent.atomic.AtomicInteger accepted = new java.util.concurrent.atomic.AtomicInteger()
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean(false)
+        Thread acceptor = Thread.start {
+            while (!stop.get()) {
+                try { Socket sock = server.accept(); accepted.incrementAndGet(); sock.close() } catch (SocketTimeoutException ignored) { } catch (IOException ignored) { break }
+            }
+        }
+        def lookup = { String host -> [InetAddress.getByAddress(host, [127, 0, 0, 1] as byte[])] as InetAddress[] } as java.util.function.Function<String, InetAddress[]>
+        org.eclipse.jetty.client.HttpClient guarded = darpan.facade.common.OutboundHttpClient.newClient(
+                new darpan.facade.common.OutboundHttpClient.VettedAddressResolver(lookup))
+        return [server: server, accepted: accepted, stop: stop, acceptor: acceptor, guarded: guarded]
+    }
+
+    private static void closeListener(Map l) {
+        (l.stop as java.util.concurrent.atomic.AtomicBoolean).set(true)
+        (l.guarded as org.eclipse.jetty.client.HttpClient).stop()
+        (l.server as ServerSocket).close()
+        (l.acceptor as Thread).join(2000)
+    }
+
+    @Test
+    void "DAR-BE-262: a result URL whose host resolves to an internal address at the connect gets no socket and writes nothing"() {
+        Map l = loopbackListener()
+        File target = Files.createTempFile("bulk-rebind", ".jsonl").toFile()
+        target.text = "earlier attempt"
+        try {
+            int port = (l.server as ServerSocket).localPort
+            def thrown = null
+            try {
+                ShopifyBulkOperationClient.executeDownloadRequest([url: "https://storage.rebind.invalid:${port}/result.jsonl?sig=x".toString(),
+                        connectTimeoutMillis: 5000, readTimeoutMillis: 5000, targetFile: target], (org.eclipse.jetty.client.HttpClient) l.guarded)
+            } catch (IOException e) {
+                thrown = e
+            }
+            assertTrue(thrown instanceof IOException, "refused at the connect: ${thrown}")
+            Thread.sleep(300)
+            assertEquals(0, (l.accepted as java.util.concurrent.atomic.AtomicInteger).get(), "no connection reached the loopback listener")
+            assertEquals("earlier attempt", target.text, "nothing was written")
+        } finally {
+            closeListener(l)
+            target.delete()
+        }
+    }
+
+    @Test
+    void "DAR-BE-262: a result URL the policy refuses outright fails before any request"() {
+        def e = null
+        try {
+            ShopifyBulkOperationClient.executeDownloadRequest([url: "https://169.254.169.254/latest/meta-data", targetFile: new File("unused")], null)
+        } catch (ShopifyGraphqlTransport.OutboundPolicyBlockedException blocked) {
+            e = blocked
+        }
+        assertTrue(e != null && e.message.contains("blocked by outbound policy"), "${e}")
+    }
 }

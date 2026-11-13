@@ -171,4 +171,55 @@ class ShopifyGraphqlTransportTests {
             accessToken: "shpat_secret_token",
         ]
     }
+
+    /** DAR-BE-262 follow-up: a loopback listener counting connections, and a guarded client whose lookup answers loopback. */
+    private static Map loopbackListener() {
+        ServerSocket server = new ServerSocket(0, 5, InetAddress.getByAddress([127, 0, 0, 1] as byte[]))
+        server.setSoTimeout(200)
+        java.util.concurrent.atomic.AtomicInteger accepted = new java.util.concurrent.atomic.AtomicInteger()
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean(false)
+        Thread acceptor = Thread.start {
+            while (!stop.get()) {
+                try { Socket sock = server.accept(); accepted.incrementAndGet(); sock.close() } catch (SocketTimeoutException ignored) { } catch (IOException ignored) { break }
+            }
+        }
+        def lookup = { String host -> [InetAddress.getByAddress(host, [127, 0, 0, 1] as byte[])] as InetAddress[] } as java.util.function.Function<String, InetAddress[]>
+        org.eclipse.jetty.client.HttpClient guarded = darpan.facade.common.OutboundHttpClient.newClient(
+                new darpan.facade.common.OutboundHttpClient.VettedAddressResolver(lookup))
+        return [server: server, accepted: accepted, stop: stop, acceptor: acceptor, guarded: guarded]
+    }
+
+    private static void closeListener(Map l) {
+        (l.stop as java.util.concurrent.atomic.AtomicBoolean).set(true)
+        (l.guarded as org.eclipse.jetty.client.HttpClient).stop()
+        (l.server as ServerSocket).close()
+        (l.acceptor as Thread).join(2000)
+    }
+
+    @Test
+    void "DAR-BE-262: a shop host that resolves to an internal address at the connect gets no socket and the attempt fails retryably"() {
+        Map l = loopbackListener()
+        try {
+            int port = (l.server as ServerSocket).localPort
+            Map result = ShopifyGraphqlTransport.execute([shopApiUrl: "https://rebind-test.myshopify.com:${port}".toString(), apiVersion: "2025-01",
+                    accessToken: "shpat_test"], "query { shop { name } }", [:],
+                    [maxAttempts: 2, retryDelayMillis: 1, httpExecutor: { Map<String, Object> request ->
+                        ShopifyGraphqlTransport.executeHttpRequest(request, (org.eclipse.jetty.client.HttpClient) l.guarded) }])
+            assertFalse(result.ok as boolean)
+            assertEquals(["Shopify GraphQL request failed before a valid response was received."], result.errors)
+            Thread.sleep(300)
+            assertEquals(0, (l.accepted as java.util.concurrent.atomic.AtomicInteger).get(), "no connection reached the loopback listener")
+        } finally {
+            closeListener(l)
+        }
+    }
+
+    @Test
+    void "DAR-BE-262: a host off the myshopify allow-list is still refused before any request, and not retried"() {
+        Map result = ShopifyGraphqlTransport.execute([shopApiUrl: "https://evil.example.com", apiVersion: "2025-01", accessToken: "shpat_test"],
+                "query { shop { name } }", [:], [maxAttempts: 3])
+        assertFalse(result.ok as boolean)
+        assertFalse(result.retryable as boolean)
+        assertTrue((result.errors as List)[0].toString().contains("blocked by outbound policy"), result.errors.toString())
+    }
 }

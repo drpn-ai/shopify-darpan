@@ -5,7 +5,6 @@ import groovy.json.JsonSlurper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-import java.net.HttpURLConnection
 import java.nio.file.Files
 
 class ShopifyBulkOperationClient {
@@ -406,30 +405,37 @@ class ShopifyBulkOperationClient {
         ]
     }
 
-    private static Map<String, Object> executeDownloadRequest(Map<String, Object> request) {
+    /**
+     * One streamed GET of the result into request.targetFile. {@code client} replaces the shared guarded client (tests
+     * pass one with their own DNS step).
+     *
+     * DAR-BE-262 follow-up: through darpan's OutboundHttpClient (vetted DNS at the connect, no redirects, no cookies), and
+     * STREAMED: a month of bulk JSONL can pass the client's 256 MB buffered cap, so the answer goes to disk as it arrives
+     * and is never held. The read timeout bounds each wait for bytes, not the whole download.
+     */
+    static Map<String, Object> executeDownloadRequest(Map<String, Object> request, org.eclipse.jetty.client.HttpClient client = null) {
         // Audit #15 parity: the bulk-result URL comes from the GraphQL response body and is served
         // off-domain (a signed storage URL), so re-validate it with no host allow-list — https is
         // still forced and loopback/link-local/RFC1918/cloud-metadata targets are blocked.
         def __urlCheck = darpan.facade.common.OutboundHttpPolicy.validate(request.url?.toString(), null)
         if (!__urlCheck.ok) throw new ShopifyGraphqlTransport.OutboundPolicyBlockedException("Shopify bulk result URL blocked by outbound policy: ${__urlCheck.error}")
-        HttpURLConnection connection = (HttpURLConnection) new URL(request.url.toString()).openConnection()
-        connection.requestMethod = "GET"
-        // The signed result URL is a direct download; never auto-follow a redirect past the policy check.
-        connection.instanceFollowRedirects = false
-        connection.connectTimeout = (request.connectTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_CONNECT_TIMEOUT_MILLIS) as int
-        connection.readTimeout = (request.readTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_READ_TIMEOUT_MILLIS) as int
+        long connectTimeout = (request.connectTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_CONNECT_TIMEOUT_MILLIS) as long
+        long readTimeout = (request.readTimeoutMillis ?: ShopifyGraphqlTransport.DEFAULT_READ_TIMEOUT_MILLIS) as long
+        // The signed result URL is a direct download; the client never follows a redirect past the policy check.
+        org.eclipse.jetty.client.HttpClient http = client ?: darpan.facade.common.OutboundHttpClient.shared(connectTimeout)
 
         long started = System.currentTimeMillis()
         Integer statusCode = null
         File target = (File) request.targetFile
         try {
-            statusCode = connection.responseCode
-            if (statusCode >= 200 && statusCode < 300) {
-                // DAR-BE-162: straight to disk, never into a String. A FileOutputStream truncates the file in place,
-                // so it keeps the owner-only permissions newResultFile gave it.
-                connection.inputStream.withCloseable { InputStream input ->
-                    new FileOutputStream(target).withCloseable { OutputStream output -> input.transferTo(output) }
+            darpan.facade.common.OutboundHttpClient.stream(http, "GET", request.url.toString(), [:], null, readTimeout) { Map answer ->
+                statusCode = answer.statusCode as Integer
+                if (statusCode >= 200 && statusCode < 300) {
+                    // DAR-BE-162: straight to disk, never into a String. A FileOutputStream truncates the file in place,
+                    // so it keeps the owner-only permissions newResultFile gave it.
+                    new FileOutputStream(target).withCloseable { OutputStream output -> ((InputStream) answer.body).transferTo(output) }
                 }
+                return null
             }
             return [statusCode: statusCode]
         } finally {
