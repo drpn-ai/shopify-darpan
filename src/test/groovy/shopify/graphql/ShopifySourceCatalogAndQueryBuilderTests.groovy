@@ -128,6 +128,22 @@ class ShopifySourceCatalogAndQueryBuilderTests {
     }
 
     @Test
+    void savedRunStillSelectingAProtectedCustomerFieldFailsInsteadOfReadingIt() {
+        // DAR-BE-260: email and shipping address are Shopify protected customer data at Level 2; a run saved
+        // before they left the catalog must stop at the builder, not quietly read them.
+        ["email", "customer.email", "shippingAddress.city", "shippingAddress.provinceCode", "shippingAddress.zip"].each { String fieldPath ->
+            IllegalArgumentException error = assertThrows(IllegalArgumentException) {
+                ShopifyGraphqlQueryBuilder.buildQuery([
+                    sourceDefinitionId: "SHOPIFY_ORDERS",
+                    apiVersion        : "2026-04",
+                    selectedFieldPaths: ["id", fieldPath],
+                ])
+            }
+            assertTrue(error.message.contains("Unsupported Shopify field path"), fieldPath)
+        }
+    }
+
+    @Test
     void bulkQueryBuilderReproducesLegacyExtractionDocument() {
         Map<String, Object> result = ShopifyGraphqlQueryBuilder.buildBulkQuery([
             sourceDefinitionId: "SHOPIFY_ORDERS",
@@ -144,7 +160,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         // The exact field set the pre-unification extraction selected; the JSONL record shape is a
         // downstream contract for reconciliation schemas and $.records[*] rules.
         Set<String> legacyBulkSelection = [
-            "id", "legacyResourceId", "name", "createdAt", "updatedAt", "processedAt", "email",
+            "id", "legacyResourceId", "name", "createdAt", "updatedAt", "processedAt",
             "cancelledAt", "totalPrice", "displayFinancialStatus", "displayFulfillmentStatus", "currencyCode",
             "currentTotalPriceSet.shopMoney.amount", "currentTotalPriceSet.shopMoney.currencyCode",
             "currentTotalTaxSet.shopMoney.amount", "currentTotalTaxSet.shopMoney.currencyCode",
@@ -155,6 +171,7 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         // (a plain LIST, not a connection, so bulk returns it inline). All additive: the legacy set is intact.
         // DAR-BE-153 added transactions.id and transactions.parentTransaction.id: the ids HotWax keeps as OPP manualRefNum.
         // DAR-BE-251 added subtotalLineItemsQuantity: units ordered, a scalar (no line-item children).
+        // DAR-BE-260 dropped email: Shopify protected customer data stays at Level 1 (no name, email, phone, address).
         assertEquals(legacyBulkSelection + (["sourceName", "requiresShipping", "transactions.kind", "transactions.status", "transactions.gateway",
                 "transactions.id", "transactions.parentTransaction.id", "subtotalLineItemsQuantity"] as Set),
                 ((List<String>) result.selectedFieldPaths) as Set)
