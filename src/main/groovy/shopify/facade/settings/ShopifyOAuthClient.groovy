@@ -1,15 +1,13 @@
 package shopify.facade.settings
 
+import darpan.facade.common.OutboundHttpClient
 import darpan.facade.common.OutboundHttpPolicy
+import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.sql.Timestamp
-import java.time.Duration
 
 import static darpan.common.ValueSupport.normalize
 
@@ -90,23 +88,22 @@ class ShopifyOAuthClient {
         return new Timestamp(now.time + (new BigDecimal(seconds.toString()).longValue() * 1000L))
     }
 
+    /**
+     * Through darpan's OutboundHttpClient like every other Shopify call (DAR-BE-262): the policy's DNS check runs at the
+     * connect, so a *.myshopify.com name that resolves to an internal address is refused; no redirects, no cookies.
+     * Shopify's token endpoint takes the same fields as JSON.
+     */
     private static Map<String, Object> postForm(String url, Map<String, String> form) {
         def check = OutboundHttpPolicy.validate(url, OUTBOUND_HOST_SUFFIXES)
         if (!check.ok) throw new IllegalStateException("Shopify token endpoint blocked by outbound policy")
-        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(20))
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(ShopifyInstallSupport.formEncode(form)))
-                .build()
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString())
-        Object parsed = null
+        Map answer = OutboundHttpClient.send(OutboundHttpClient.shared(10_000L), "POST", url,
+                [Accept: "application/json"], JsonOutput.toJson(form), 20)
+        Object parsed
         try {
-            parsed = new JsonSlurper().parseText(response.body() ?: "{}")
+            parsed = new JsonSlurper().parseText((answer.body ?: "{}") as String)
         } catch (Exception ignored) {
             parsed = [:]
         }
-        return [status: response.statusCode(), body: parsed instanceof Map ? parsed : [:]]
+        return [status: answer.statusCode, body: parsed instanceof Map ? parsed : [:]]
     }
 }
