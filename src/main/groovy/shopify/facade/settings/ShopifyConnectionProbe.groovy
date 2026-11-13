@@ -74,7 +74,7 @@ class ShopifyConnectionProbe {
         String accessToken = null
         String credentialError = null
         try {
-            accessToken = normalize(config.accessToken)
+            accessToken = ShopifyTokenSupport.accessTokenFor(ec, config)
         } catch (Throwable t) {
             logger.warn("Shopify probe could not read the stored access token for ${configId}: ${t.class.simpleName}")
             credentialError = "The stored access token could not be decrypted."

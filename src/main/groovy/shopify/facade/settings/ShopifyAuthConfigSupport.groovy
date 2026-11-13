@@ -189,10 +189,21 @@ class ShopifyAuthConfigSupport {
      * script services; nothing else of the config is handed on.
      */
     static Map<String, Object> transportConfig(def authConfig) {
+        if (!ShopifyTokenSupport.isAppIssued(authConfig)) {
+            return [
+                    shopApiUrl : authConfig.shopApiUrl,
+                    apiVersion : authConfig.apiVersion,
+                    accessToken: authConfig.accessToken,
+            ]
+        }
+        // DAR-BE-275: an app-issued token lives one hour and a bulk read can run longer, so the
+        // transport asks the supplier for a current token on every request instead of holding one copy.
+        String configId = ValueSupport.normalize(authConfig.shopifyAuthConfigId)
         return [
-                shopApiUrl : authConfig.shopApiUrl,
-                apiVersion : authConfig.apiVersion,
-                accessToken: authConfig.accessToken,
+                shopApiUrl         : authConfig.shopApiUrl,
+                apiVersion         : authConfig.apiVersion,
+                accessToken        : ShopifyTokenSupport.currentAccessToken(null, configId),
+                accessTokenSupplier: { -> ShopifyTokenSupport.currentAccessToken(null, configId) },
         ]
     }
 

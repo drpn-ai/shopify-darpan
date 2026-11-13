@@ -50,11 +50,7 @@ class ShopifyGraphqlFacadeSupport {
         }
 
         if (!ec.message.hasError()) {
-            Map<String, Object> authConfigMap = [
-                    shopApiUrl : authConfig.shopApiUrl,
-                    apiVersion : authConfig.apiVersion,
-                    accessToken: authConfig.accessToken,
-            ]
+            Map<String, Object> authConfigMap = ShopifyAuthConfigSupport.transportConfig(authConfig)
             Map<String, Object> graphqlResult = ShopifyGraphqlTransport.execute(authConfigMap, queryValue, variablesValue, [
                     connectTimeoutMillis: serviceContext?.connectTimeoutMillis,
                     readTimeoutMillis   : serviceContext?.readTimeoutMillis,

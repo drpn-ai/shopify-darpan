@@ -30,12 +30,12 @@ class ShopifyGraphqlTransport {
         // address are kept out — catalog extracts, lookups, free-form queries, agent queries and automations alike.
         String protectedFieldRefusal = ShopifyProtectedFieldGuard.refusal(normalizedQuery, variables ?: [:])
         if (protectedFieldRefusal) return safeFailure(protectedFieldRefusal, false)
-        String accessToken = normalize(authConfig?.accessToken)
+        String accessToken = resolveAccessToken(authConfig)
         if (!accessToken) return safeFailure("Shopify access token is not configured.", false)
 
         Map<String, Object> request
         try {
-            request = buildRequest(authConfig, normalizedQuery, variables ?: [:], options)
+            request = buildRequest(authConfig + [accessToken: accessToken], normalizedQuery, variables ?: [:], options)
         } catch (Exception e) {
             return safeFailure(e.message ?: "Shopify GraphQL request could not be built.", false)
         }
@@ -68,6 +68,23 @@ class ShopifyGraphqlTransport {
             if (delayMillis > 0L) Thread.sleep(delayMillis)
         }
         return lastResult ?: safeFailure("Shopify GraphQL request did not return a response.", false)
+    }
+
+    /**
+     * DAR-BE-275: a connection made by a Darpan app install carries an accessTokenSupplier (its token
+     * expires hourly and is refreshed under a lock); a pasted token is used as given.
+     */
+    static String resolveAccessToken(Map authConfig) {
+        Object supplier = authConfig?.accessTokenSupplier
+        if (supplier instanceof Closure) {
+            try {
+                return normalize(((Closure) supplier).call())
+            } catch (Exception e) {
+                logger.warn("Shopify access token could not be refreshed: ${e.class.simpleName}")
+                return null
+            }
+        }
+        return normalize(authConfig?.accessToken)
     }
 
     static boolean isMutationDocument(String queryDocument) {

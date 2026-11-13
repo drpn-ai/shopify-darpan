@@ -94,7 +94,9 @@ class ShopifyAgentQuerySupport {
     private static Map gateConfig(def ec, String configId, Map meta) {
         def config = ShopifyAuthConfigSupport.requireUsableAuthConfig(ec, configId, [requiredEndpointSystemEnumId: SYSTEM_ENUM_ID])
         if (config == null || ec.message.hasError()) return null
-        Map transportConfig = [shopApiUrl: config.shopApiUrl, apiVersion: config.apiVersion, accessToken: config.accessToken]
+        // One current token per agent call (refreshed first if due), so secretsOf can redact exactly it.
+        Map transportConfig = [shopApiUrl: config.shopApiUrl, apiVersion: config.apiVersion,
+                               accessToken: shopify.facade.settings.ShopifyTokenSupport.accessTokenFor(ec, config)]
         meta.secrets = secretsOf(transportConfig)
         // Final review R25: fresh queries and schema reads run only on the active tenant's own connection.
         String notOwned = AgentQuerySupport.requireOwnedConnection(ec, config.companyUserGroupId)
