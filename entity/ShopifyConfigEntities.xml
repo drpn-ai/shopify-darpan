@@ -13,10 +13,66 @@
         <field name="accessToken" type="text-long" encrypt="true"/>
         <field name="isActive" type="text-indicator" default="'Y'"/>
         <field name="canReadOrders" type="text-indicator" default="'N'"/>
+        <!-- DAR-BE-275: set only on a config created by a Darpan app install. Null means the token was
+             pasted (issued by another app) and never expires or refreshes. -->
+        <field name="shopifyAppId" type="id"/>
+        <field name="refreshToken" type="text-medium" encrypt="true">
+            <description>Single-use: each refresh returns a new one and the old one stops working, so a
+                refresh runs only under a row lock (ShopifyTokenSupport).</description>
+        </field>
+        <field name="accessTokenExpiresDate" type="date-time"/>
+        <field name="refreshTokenExpiresDate" type="date-time"/>
+        <field name="grantedScopes" type="text-medium"/>
+        <field name="installedDate" type="date-time"/>
 
         <relationship type="one" title="Company" related="moqui.security.UserGroup" short-alias="company">
             <key-map field-name="companyUserGroupId" related-field-name="userGroupId"/>
         </relationship>
+        <relationship type="one" related="darpan.shopify.ShopifyApp" short-alias="app">
+            <key-map field-name="shopifyAppId"/>
+        </relationship>
+    </entity>
+
+    <!-- DAR-BE-275 -->
+    <entity entity-name="ShopifyApp" package="darpan.shopify" short-alias="shopifyApp" use="configuration" cache="never">
+        <description>A Shopify app that Darpan owns (in Darpan's Shopify organization), used to install
+            Darpan on a store instead of pasting a token another app issued. Platform-owned, not
+            tenant-owned: managed only through admin.* services. A CUSTOM app is created for one store
+            (shopDomain); a PUBLIC app (shopDomain empty) is the App Store listing.</description>
+        <field name="shopifyAppId" type="id" is-pk="true"/>
+        <field name="description" type="text-medium"/>
+        <field name="distribution" type="text-short" cannot-be-null="true">
+            <description>CUSTOM or PUBLIC. Shopify fixes this when the app is created.</description>
+        </field>
+        <field name="shopDomain" type="text-medium">
+            <description>CUSTOM only: the one store (name.myshopify.com) the app is distributed to.</description>
+        </field>
+        <field name="clientId" type="text-medium" cannot-be-null="true"/>
+        <field name="clientSecret" type="text-medium" encrypt="true">
+            <description>Never returned by any service. Verifies Shopify's HMAC and authenticates the
+                code exchange and token refresh.</description>
+        </field>
+        <field name="scopes" type="text-medium" cannot-be-null="true"/>
+        <field name="isActive" type="text-indicator" default="'Y'"/>
+        <field name="createdDate" type="date-time"/>
+        <field name="lastUpdatedDate" type="date-time"/>
+    </entity>
+
+    <!-- DAR-BE-275 -->
+    <entity entity-name="ShopifyInstallState" package="darpan.shopify" use="transactional" cache="never">
+        <description>A single-use CSRF token for one in-flight Shopify app install. The install
+            callback is a public endpoint (Shopify redirects the merchant's browser there with no Darpan
+            session), so this row is what binds the returning code to the tenant, user, app and store
+            that asked for it. Minted by an authenticated facade call, consumed exactly once, expires in
+            minutes.</description>
+        <field name="stateToken" type="text-medium" is-pk="true"/>
+        <field name="companyUserGroupId" type="id" cannot-be-null="true"/>
+        <field name="initiatedByUserId" type="id"/>
+        <field name="shopifyAppId" type="id" cannot-be-null="true"/>
+        <field name="shopDomain" type="text-medium" cannot-be-null="true"/>
+        <field name="createdDate" type="date-time"/>
+        <field name="expiresDate" type="date-time"/>
+        <field name="consumedDate" type="date-time"/>
     </entity>
 
 </entities>

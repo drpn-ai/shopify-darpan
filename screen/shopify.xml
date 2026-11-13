@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DAR-BE-275 — mounted at /apps/shopify by this component's MoquiConf.xml, so core Darpan carries no
+     Shopify endpoint and runs unchanged when shopify-darpan is not installed. -->
+<screen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/xml-screen-3.xsd"
+        default-menu-include="false" require-authentication="false">
+
+    <!-- Shopify app install callback — GET /apps/shopify/installCallback
+         PUBLIC BY NECESSITY: Shopify redirects the merchant's browser here, so the request carries no
+         Darpan session. Two things authorise it, and nothing else in the query string is trusted:
+         the single-use, expiring state minted by the authenticated facade.ShopifyFacadeServices
+         begin#ShopifyInstall (tenant, user, app and store), and Shopify's HMAC over the parameters,
+         keyed by that app's client secret. See ShopifyInstallSupport.handleCallback.
+         Never logs or reflects the code. Always ends in a redirect back to the SPA with a short slug.
+
+         read-only="true" IS REQUIRED and does not mean it writes nothing (it stores the connection):
+         Moqui refuses to run a transition with actions on a request with URL parameters as blanket CSRF
+         protection, and an OAuth callback is unavoidably such a GET. The state and the HMAC are the
+         CSRF defence here (same reasoning as slackOauthCallback in darpan's screen/darpan.xml). -->
+    <transition name="installCallback" method="get" read-only="true">
+        <actions>
+            <script><![CDATA[
+                Map params = new LinkedHashMap(ec.web.request.getParameterMap())
+                String redirectUrl = shopify.facade.settings.ShopifyInstallSupport.handleCallback(ec, params)
+                if (redirectUrl) {
+                    ec.web.response.sendRedirect(redirectUrl)
+                } else {
+                    ec.web.response.setContentType("text/plain")
+                    ec.web.response.writer.write("Darpan has no app base URL configured to return you to. Set DARPAN_APP_BASE_URL.")
+                }
+            ]]></script>
+        </actions>
+        <default-response type="none"/>
+    </transition>
+
+    <widgets/>
+</screen>

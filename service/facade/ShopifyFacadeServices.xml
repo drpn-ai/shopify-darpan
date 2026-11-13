@@ -2,6 +2,35 @@
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
+    <!-- DAR-BE-275 -->
+    <service verb="begin" noun="ShopifyInstall" allow-remote="true" authenticate="true">
+        <description>Start installing Darpan's Shopify app on a store for the active tenant: mint a
+            single-use state and return the Shopify authorize URL the browser should be sent to. Does not
+            contact Shopify. The install creates its own connection; existing connections are untouched.</description>
+        <in-parameters>
+            <parameter name="shopDomain" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="authorizeUrl"/>
+        </out-parameters>
+        <actions>
+            <set field="tenantId" from="darpan.facade.common.TenantAccessSupport.currentActiveTenantUserGroupId(ec)"/>
+            <if condition="!tenantId"><message error="true">Active tenant is required to connect Shopify.</message></if>
+            <if condition="!ec.message.hasError()">
+                <set field="ignoreWriteAccess" from="darpan.facade.common.TenantAccessSupport.requireActiveTenantWriteAccess(ec, 'Your active tenant only has view access for Shopify connections.')"/>
+            </if>
+            <if condition="!ec.message.hasError()">
+                <set field="authorizeUrl" from="shopify.facade.settings.ShopifyInstallSupport.beginInstall(ec, tenantId, darpan.facade.common.TenantAccessSupport.currentUserId(ec), shopDomain)"/>
+            </if>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="messages" from="darpan.facade.common.FacadeSupport.getMessages(ec)"/>
+            <set field="errors" from="darpan.facade.common.FacadeSupport.getErrors(ec)"/>
+        </actions>
+    </service>
+
     <service verb="list" noun="ShopifyAuthConfigs" authz-action="view" allow-remote="true" authenticate="true">
         <description>List Shopify auth configs for the active tenant with secret redaction indicators.</description>
         <in-parameters>

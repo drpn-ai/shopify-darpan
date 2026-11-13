@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<moqui-conf xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/moqui-conf-3.xsd">
+    <!-- DAR-BE-275: the Shopify app install callback lives in this component, at /apps/shopify. -->
+    <screen-facade>
+        <screen location="component://webroot/screen/webroot/apps.xml">
+            <subscreens-item name="shopify" menu-include="false" location="component://shopify-darpan/screen/shopify.xml"/>
+        </screen>
+    </screen-facade>
+</moqui-conf>
