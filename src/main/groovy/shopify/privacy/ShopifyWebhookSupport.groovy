@@ -68,9 +68,18 @@ class ShopifyWebhookSupport {
             return [status: 400, message: "bad request"]
         }
 
+        // The topic header is not signed either: a signed customers/data_request body re-sent as shop/redact must not
+        // erase anything. Each topic acts only on a body of its own shape.
+        if (!shapeMatches(topic, payload)) {
+            logger.warn("Shopify webhook {} for {} refused: the signed body is not a {} payload", topic, shop, topic)
+            return [status: 400, message: "bad request"]
+        }
+
         try {
             switch (topic) {
                 case TOPIC_UNINSTALLED:
+                    // An app an operator has switched off acts on nothing but the privacy topics.
+                    if (normalize(app.isActive) == "N") break
                     int cleared = clearAppConnections(ec, shop, normalize(app.shopifyAppId))
                     logger.info("Shopify app {} uninstalled from {} (webhook {}): {} connection(s) cleared", app.shopifyAppId, shop, webhookId, cleared)
                     break
@@ -102,12 +111,25 @@ class ShopifyWebhookSupport {
         return [status: 200, message: "ok"]
     }
 
+    /** Shopify's payload for each topic, so an unsigned topic header cannot turn one request into another. */
+    static boolean shapeMatches(String topic, Map payload) {
+        switch (topic) {
+            case TOPIC_UNINSTALLED: return payload.myshopify_domain != null && payload.id != null
+            case TOPIC_DATA_REQUEST: return payload.data_request instanceof Map && payload.customer instanceof Map
+            case TOPIC_CUSTOMER_REDACT: return payload.customer instanceof Map && payload.orders_to_redact != null && payload.data_request == null
+            case TOPIC_SHOP_REDACT: return payload.shop_id != null && payload.customer == null && payload.data_request == null
+            default: return true // ignored topics act on nothing
+        }
+    }
+
     /** The Darpan app whose secret signed this body, or null. Only apps that can be installed on this store are tried. */
     static def verifiedApp(def ec, String shop, String givenHmac, String body) {
         if (!givenHmac) return null
         List apps = (TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.APP_ENTITY,
                         "webhook signature check: platform-owned Darpan apps that can be installed on this store")
-                ?.condition("isActive", "Y")?.useCache(false)?.list() ?: []) as List
+                ?.useCache(false)?.list() ?: []) as List
+        // Inactive apps are tried too: shop/redact arrives 48 hours after an uninstall, often after an operator has
+        // switched the app off, and the erase is still owed.
         List candidates = apps.findAll {
             String distribution = normalize(it.distribution)
             distribution == ShopifyInstallSupport.DISTRIBUTION_PUBLIC ||

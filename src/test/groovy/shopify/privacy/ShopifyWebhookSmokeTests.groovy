@@ -76,7 +76,7 @@ class ShopifyWebhookSmokeTests {
 
     @Test
     void aForgedOrBorrowedSignatureIsRefusedAndNothingRuns() {
-        String body = JsonOutput.toJson([shop_domain: SHOP, orders_to_redact: [2001]])
+        String body = JsonOutput.toJson([shop_domain: SHOP, customer: [id: 9], orders_to_redact: [2001]])
         assertEquals(401, post("customers/redact", body, "bm90IGEgc2lnbmF0dXJl").status)
         // Signed with ANOTHER store's Darpan app: a real secret, but not this store's.
         assertEquals(401, post("customers/redact", body, ShopifyWebhookSupport.signature(OTHER_SECRET, body)).status)
@@ -92,6 +92,36 @@ class ShopifyWebhookSmokeTests {
         assertEquals(400, post("shop/redact", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
         assertEquals(["2001", "2002"], shopifyRecordIds())
         assertEquals("shpat_app", config("HOOK_APP_CFG").accessToken)
+    }
+
+    @Test
+    void aSignedBodyResentUnderAnotherTopicIsRefused() {
+        // Review finding: the topic header is not signed. A genuine data request re-sent as shop/redact erases nothing.
+        String body = JsonOutput.toJson([shop_domain: SHOP, customer: [id: 9], orders_requested: [2001], data_request: [id: 5]])
+        assertEquals(400, post("shop/redact", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
+        assertEquals(400, post("customers/redact", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
+        assertEquals(["2001", "2002"], shopifyRecordIds())
+        assertEquals("shpat_app", config("HOOK_APP_CFG").accessToken)
+    }
+
+    @Test
+    void anAppSwitchedOffStillReceivesPrivacyRequestsButNotUninstalls() {
+        // Review finding: shop/redact comes 48 h after uninstall, often after the app is switched off; it is still owed.
+        ec.user.internalLoginUser(username); ec.artifactExecution.disableAuthz()
+        def app = ec.entity.find("darpan.shopify.ShopifyApp").condition("shopifyAppId", "HOOK_APP").useCache(false).one()
+        app.set("isActive", "N"); app.update()
+        ec.user.logoutUser(); ec.artifactExecution.enableAuthz()
+        try {
+            String redact = JsonOutput.toJson([shop_domain: SHOP, customer: [id: 9], orders_to_redact: [2002]])
+            assertEquals(200, post("customers/redact", redact, ShopifyWebhookSupport.signature(SECRET, redact)).status)
+            assertEquals(["2001"], shopifyRecordIds())
+            String uninstall = JsonOutput.toJson([id: 1, myshopify_domain: SHOP])
+            assertEquals(200, post("app/uninstalled", uninstall, ShopifyWebhookSupport.signature(SECRET, uninstall)).status)
+            assertEquals("shpat_app", config("HOOK_APP_CFG").accessToken, "a switched-off app's uninstall acts on nothing")
+        } finally {
+            ec.user.internalLoginUser(username); ec.artifactExecution.disableAuthz()
+            app.set("isActive", "Y"); app.update()
+        }
     }
 
     @Test
@@ -127,7 +157,7 @@ class ShopifyWebhookSmokeTests {
     @Test
     void shopRedactDataRequestAndOtherTopicsAnswer200() {
         String shopBody = JsonOutput.toJson([shop_id: 1, shop_domain: SHOP])
-        String requestBody = JsonOutput.toJson([shop_domain: SHOP, orders_requested: [2002]])
+        String requestBody = JsonOutput.toJson([shop_domain: SHOP, customer: [id: 9], orders_requested: [2002], data_request: [id: 5]])
         assertEquals(200, post("customers/data_request", requestBody, ShopifyWebhookSupport.signature(SECRET, requestBody)).status)
         assertEquals(200, post("orders/create", shopBody, ShopifyWebhookSupport.signature(SECRET, shopBody)).status, "ignored topic")
         assertEquals(["2001", "2002"], shopifyRecordIds(), "neither deletes anything")

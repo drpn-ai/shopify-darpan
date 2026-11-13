@@ -36,7 +36,9 @@
          PUBLIC BY NECESSITY: Shopify posts here with no session. Shopify's X-Shopify-Hmac-Sha256 over the body, made
          with the store's Darpan app's secret, is the only thing trusted; see ShopifyWebhookSupport. No session token
          (server-to-server POST). Answers 200/401/400/500 with a one-word body; never echoes the payload. -->
-    <transition name="webhook" method="post" require-session-token="false" read-only="true">
+    <!-- begin-transaction="false": each service commits its own work inside handle(), so a failed commit is a 500
+         and Shopify retries; with the transition's own transaction, the 200 was written before it committed. -->
+    <transition name="webhook" method="post" require-session-token="false" read-only="true" begin-transaction="false">
         <actions>
             <script><![CDATA[
                 Map headers = [topic     : ec.web.request.getHeader("X-Shopify-Topic"),
