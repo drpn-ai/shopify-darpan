@@ -284,7 +284,6 @@ class ShopifyInstallSupport {
                 shopApiUrl        : shopApiUrl,
                 apiVersion        : defaultApiVersion(),
                 timeZone          : "UTC",
-                canReadOrders     : "N",
                 shopifyAppId      : appId,
                 installedDate     : now,
         ] + tokenFields).each { key, value -> created.set(key, value) }
