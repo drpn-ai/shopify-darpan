@@ -20,7 +20,7 @@
             <set field="tenantId" from="darpan.facade.common.TenantAccessSupport.currentActiveTenantUserGroupId(ec)"/>
             <if condition="!tenantId"><message error="true">Active tenant is required to connect Shopify.</message></if>
             <if condition="!ec.message.hasError()">
-                <set field="ignoreWriteAccess" from="darpan.facade.common.TenantAccessSupport.requireActiveTenantWriteAccess(ec, 'Your active tenant only has view access for Shopify connections.')"/>
+                <set field="ignoreWriteAccess" from="darpan.facade.common.TenantAccessSupport.requireActiveTenantRunAccess(ec, 'Your active tenant only has view access for Shopify connections.')"/>
             </if>
             <if condition="!ec.message.hasError()">
                 <set field="authorizeUrl" from="shopify.facade.settings.ShopifyInstallSupport.beginInstall(ec, tenantId, darpan.facade.common.TenantAccessSupport.currentUserId(ec), shopDomain)"/>

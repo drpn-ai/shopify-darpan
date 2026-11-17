@@ -286,7 +286,7 @@ class ShopifyAuthConfigSupport {
         }
 
         if (!ec.message.hasError()) {
-            TenantAccessSupport.requireActiveTenantWriteAccess(
+            TenantAccessSupport.requireActiveTenantRunAccess(
                     ec,
                     "Your active tenant only has view access for Shopify auth settings."
             )
@@ -396,7 +396,7 @@ class ShopifyAuthConfigSupport {
         }
 
         if (!ec.message.hasError()) {
-            TenantAccessSupport.requireActiveTenantWriteAccess(
+            TenantAccessSupport.requireActiveTenantRunAccess(
                     ec,
                     "Your active tenant only has view access for Shopify auth settings."
             )
