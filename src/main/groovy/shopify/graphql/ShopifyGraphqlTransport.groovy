@@ -50,12 +50,14 @@ class ShopifyGraphqlTransport {
             try {
                 Map<String, Object> response = (Map<String, Object>) httpExecutor.call(request)
                 lastResult = parseResponse(response, attempt, maxAttempts)
+                countCall(lastResult)
             } catch (OutboundPolicyBlockedException policyBlocked) {
                 logger.warn("Shopify GraphQL request blocked by outbound policy (attempt ${attempt}/${maxAttempts}): ${policyBlocked.message}")
                 lastResult = safeFailure(policyBlocked.message, false)
             } catch (Exception e) {
                 logger.warn("Shopify GraphQL request attempt ${attempt}/${maxAttempts} failed: ${e.class.simpleName}: ${e.message}")
                 lastResult = safeFailure("Shopify GraphQL request failed before a valid response was received.", attempt < maxAttempts)
+                countCall(lastResult)
             }
 
             if (lastResult.ok || !lastResult.retryable || attempt >= maxAttempts) return lastResult
@@ -85,6 +87,15 @@ class ShopifyGraphqlTransport {
             }
         }
         return normalize(authConfig?.accessToken)
+    }
+
+    /** DAR-BE-320: one request was sent to Shopify (not one our outbound policy blocked); tally it with its cost and any throttle. */
+    private static void countCall(Map<String, Object> result) {
+        ShopifyCallTally.add("graphql")
+        Map cost = result?.cost instanceof Map ? (Map) result.cost : null
+        Object requested = cost?.get('requestedQueryCost')
+        if (requested instanceof Number) ShopifyCallTally.add("costPoints", ((Number) requested).longValue())
+        if (result?.throttled || (result?.statusCode as Integer) == 429) ShopifyCallTally.add("throttled")
     }
 
     static boolean isMutationDocument(String queryDocument) {

@@ -211,6 +211,7 @@ class ShopifyBulkOperationClient {
         // loop in runQuery to back off and re-issue the start, which IS safe.
         Map<String, Object> mutationOptions = new LinkedHashMap<String, Object>(options ?: [:])
         mutationOptions.maxAttempts = 1
+        ShopifyCallTally.add("bulkStarts")
         Map<String, Object> graphqlResult = ShopifyGraphqlTransport.execute(authConfig, RUN_QUERY_MUTATION, [
                 query       : bulkQueryDocument,
                 groupObjects: false,
@@ -240,6 +241,7 @@ class ShopifyBulkOperationClient {
 
     private static Map<String, Object> pollOperation(Map authConfig, String operationId, Map options) {
         boolean useIdQuery = supportsBulkOperationById(authConfig?.apiVersion)
+        ShopifyCallTally.add("bulkPolls")
         String queryDocument = useIdQuery ? STATUS_BY_ID_QUERY : CURRENT_STATUS_QUERY
         Map variables = useIdQuery ? [id: operationId] : [:]
         Map<String, Object> graphqlResult = ShopifyGraphqlTransport.execute(authConfig, queryDocument, variables, options ?: [:])
@@ -349,6 +351,7 @@ class ShopifyBulkOperationClient {
         // The result download is an idempotent GET (unlike the H6.5-capped start mutation), so
         // transient 429/5xx failures retry instead of hard-failing a completed long-running operation.
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            ShopifyCallTally.add("downloads")
             result = download(url, target, options)
             if (result.ok != false || result.retryable != true || attempt >= maxAttempts) {
                 if (result.ok == false) result.downloadAttemptCount = attempt

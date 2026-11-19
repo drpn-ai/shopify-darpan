@@ -4,6 +4,7 @@ import groovy.json.JsonOutput
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
@@ -152,6 +153,41 @@ class ShopifyGraphqlTransportTests {
         assertFalse((Boolean) result.ok)
         assertEquals(false, result.retryable)
         assertTrue(((List<String>) result.errors).first().contains("blocked by outbound policy"))
+    }
+
+    @Test
+    void everyRequestSentIsTalliedWithItsCostAndThrottles() {
+        // DAR-BE-320: an extract shows how many calls it made to Shopify (requestMetadata.shopifyCalls).
+        ShopifyCallTally.start()
+        int callCount = 0
+        ShopifyGraphqlTransport.execute(authConfig(), "query ShopifyOrders { shop { name } }", [:], [
+            maxAttempts     : 2,
+            retryDelayMillis: 1,
+            httpExecutor    : { Map<String, Object> request ->
+                callCount++
+                if (callCount == 1) {
+                    return [statusCode: 200, body: JsonOutput.toJson([
+                        errors    : [[message: "Throttled", extensions: [code: "THROTTLED"]]],
+                        extensions: [cost: [requestedQueryCost: 100, throttleStatus: [currentlyAvailable: 0, restoreRate: 50]]],
+                    ])]
+                }
+                return [statusCode: 200, body: JsonOutput.toJson([data: [shop: [name: "Shop"]],
+                        extensions: [cost: [requestedQueryCost: 7]]])]
+            },
+        ])
+        Map<String, Long> tally = ShopifyCallTally.stop()
+
+        assertEquals([graphql: 2L, costPoints: 107L, throttled: 1L], tally)
+        assertNull(ShopifyCallTally.snapshot(), "stop() ends counting on this thread")
+    }
+
+    @Test
+    void aRequestOurOutboundPolicyBlocksIsNotTallied() {
+        ShopifyCallTally.start()
+        ShopifyGraphqlTransport.execute(authConfig(), "query ShopifyOrders { shop { name } }", [:], [
+            httpExecutor: { Map<String, Object> request -> throw new ShopifyGraphqlTransport.OutboundPolicyBlockedException("blocked") },
+        ])
+        assertNull(ShopifyCallTally.stop(), "nothing reached Shopify")
     }
 
     @Test

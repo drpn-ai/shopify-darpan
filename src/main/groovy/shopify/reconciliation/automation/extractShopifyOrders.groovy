@@ -3,6 +3,7 @@ import darpan.facade.common.DataManagerSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
 import shopify.graphql.ShopifyBulkOperationClient
+import shopify.graphql.ShopifyCallTally
 import shopify.graphql.ShopifySourceCatalog
 // Moqui extract scripts carry no package declaration, so an unimported class reference compiles
 // fine (Groovy treats it as a dynamic property) and fails only at RUNTIME. Import every support class.
@@ -12,6 +13,8 @@ import shopify.reconciliation.automation.ShopifyOrderPaymentSignal
 import java.sql.Timestamp
 
 List<String> outputWarnings = []
+// DAR-BE-320: count every call this extract makes to Shopify (requestMetadata.shopifyCalls).
+ShopifyCallTally.start()
 
 Closure<String> normalize = { Object value -> ValueSupport.normalize(value) }
 Closure<Map<String, Object>> normalizeShopifyOrderRecord = { Map<String, Object> record ->
@@ -162,6 +165,7 @@ try {
             filters                 : filteredOrders.configuredExclusions != null ?
                     [configuredExclusions: filteredOrders.configuredExclusions] : null,
     ])
+    metadata.shopifyCalls = ShopifyCallTally.stop()
     requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>
     extractWriter.finish(ec, fileLocation as String, requestMetadata)
     warnings = outputWarnings

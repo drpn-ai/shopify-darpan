@@ -4,6 +4,7 @@
 import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import shopify.graphql.ShopifyBulkOperationClient
+import shopify.graphql.ShopifyCallTally
 import shopify.graphql.ShopifySourceCatalog
 // Required, not optional: Moqui extract scripts carry no package declaration, so an unimported
 // class reference compiles fine (Groovy treats it as a dynamic property) and fails only at RUNTIME.
@@ -16,6 +17,8 @@ import shopify.reconciliation.automation.ShopifyOrderLineUnitSupport
 import java.sql.Timestamp
 
 List<String> outputWarnings = []
+// DAR-BE-320: count every call this extract makes to Shopify (requestMetadata.shopifyCalls).
+ShopifyCallTally.start()
 
 Closure<String> normalize = { Object value -> ValueSupport.normalize(value) }
 Map<String, Object> resolved = ShopifyExtractSupport.resolveConfigAndWindow(ec, shopifyAuthConfigId, companyUserGroupId,
@@ -133,6 +136,7 @@ try {
             filters              : filteredUnits.configuredExclusions != null ?
                     [configuredExclusions: filteredUnits.configuredExclusions] : null,
     ])
+    metadata.shopifyCalls = ShopifyCallTally.stop()
     requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>
     int orphanLineItemCount = (assembledUnits.orphanLineItemCount ?: 0) as int
     if (orphanLineItemCount > 0) {

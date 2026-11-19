@@ -2,6 +2,7 @@ import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
+import shopify.graphql.ShopifyCallTally
 import shopify.reconciliation.automation.ShopifyCompletedReturnsSupport
 import shopify.reconciliation.automation.ShopifyExtractSupport
 import shopify.reconciliation.automation.ShopifyReturnRefsSupport
@@ -9,6 +10,8 @@ import shopify.reconciliation.automation.ShopifyReturnRefsSupport
 import java.sql.Timestamp
 
 List<String> outputWarnings = []
+// DAR-BE-320: count every call this extract makes to Shopify (requestMetadata.shopifyCalls).
+ShopifyCallTally.start()
 
 Map<String, Object> resolved = ShopifyExtractSupport.resolveConfigAndWindow(ec, shopifyAuthConfigId, companyUserGroupId,
         windowStart, windowEnd, "SHOPIFY_RETURN_REFS")
@@ -66,6 +69,8 @@ List<Map<String, Object>> records = (List<Map<String, Object>>) (extraction.reco
 outputWarnings.addAll((List) (extraction.warnings ?: []))
 outputErrors.addAll((List) (extraction.errors ?: []))
 requestMetadata = extraction.requestMetadata ?: [:]
+Map<String, Long> shopifyCalls = ShopifyCallTally.stop()
+if (shopifyCalls) requestMetadata = (requestMetadata as Map) + [shopifyCalls: shopifyCalls]
 
 if (outputErrors) {
     errors = outputErrors
