@@ -9,6 +9,9 @@
       (ShopifyExcludedSidecarTests, ShopifyOrderLineUnitSupportTests).
     SHOPIFY_RETURN_REFS N: the return-refs extract filters client-side and keeps none of what it drops.
 
+  servingProjectionServiceName: SHOPIFY_RETURN_REFS names project#ShopifyReturnRefsKeptRecords, which refuses every side (the
+    live read adds a 3 h lookback a slice cannot), so even a connector flag flipped to keep instants never serves a copy.
+
   datasetReadParametersJson: sent on every dataset read of the endpoint (a rolling copy of its events).
     SHOPIFY_RETURN_REFS {"preserveWindowInstants":true,"lookbackHours":0}: a run read rounds its window to whole days in the
       store's zone and widens it back by lookbackHours (3, for the OMS sync lag), so the connector row cannot keep its instants
@@ -20,5 +23,6 @@
     <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY" excludedRecordsSidecar="Y"/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_ORDER_LINE_UNITS" excludedRecordsSidecar="Y"/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_RETURN_REFS" excludedRecordsSidecar="N"
+            servingProjectionServiceName="reconciliation.ShopifyOrderExtractionServices.project#ShopifyReturnRefsKeptRecords"
             datasetReadParametersJson='{"preserveWindowInstants":true,"lookbackHours":0}'/>
 </entity-facade-xml>

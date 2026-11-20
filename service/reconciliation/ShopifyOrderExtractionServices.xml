@@ -137,6 +137,18 @@
         </in-parameters>
     </service>
 
+    <service verb="project" noun="ShopifyReturnRefsKeptRecords" allow-remote="false" authenticate="true">
+        <description>DAR-BE-318 (rulings P3b1-9, P3b1-13). The Shopify side of darpan's kept-copy projection for the return-refs
+            events. A run's live read of these events rounds its window to whole days in the store's zone and widens it back by
+            lookbackHours (3), which a slice of the copy cannot reproduce, so this refuses every side: it reads live. Named by the
+            SHOPIFY_RETURN_REFS row (data/ShopifyConnectorSeedData.xml), so flipping that row's preserveWindowInstants to Y can
+            never start serving a copy that lacks the lookback. Reads nothing.</description>
+        <implements service="dataset.DatasetServices.project#KeptRecords"/>
+        <actions>
+            <set field="servingProblem" value="the live read widens the window by its lookback and rounds it to whole days, which a slice of the copy cannot reproduce"/>
+        </actions>
+    </service>
+
     <service verb="extract" noun="ShopifyOrderLineUnits" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://shopify-darpan/src/main/groovy/shopify/reconciliation/automation/extractShopifyOrderLineUnits.groovy">
         <description>Extract Shopify order lines as ONE RECORD PER UNIT for the DAR-BE-050

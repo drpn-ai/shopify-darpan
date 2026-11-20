@@ -136,7 +136,7 @@ class ShopifyReturnRefsRollingCopyTests {
      * the run reads live, with a clear reason, and its file is the live file.
      */
     @Test
-    void aServedReturnRefsRunMatchesALiveRun() {
+    void aReturnRefsRunReadsLiveAndIsNeverServedEvenIfTheConnectorKeepsInstants() {
         def connector = ec.entity.find("darpan.reconciliation.SourceSystemConnector").condition("systemEnumId", SYSTEM)
                 .disableAuthz().useCache(false).one()
         assertNotNull(connector)
@@ -180,6 +180,26 @@ class ShopifyReturnRefsRollingCopyTests {
         Map served = KeptCopySupport.sliceIfServed(ec, side)
         assertEquals(false, served.served)
         assertEquals(KeptCopySupport.ROUNDS_TO_DAYS, served.reason)
+
+        // ruling P3b1-13: were the connector row flipped to keep instants, the system's own serving check still refuses
+        def row = ec.entity.find("darpan.reconciliation.SourceSystemConnector").condition("systemEnumId", SYSTEM).disableAuthz().useCache(false).forUpdate(true).one()
+        row.preserveWindowInstants = "Y"
+        row.update()
+        try {
+            Map flipped = KeptCopySupport.sliceIfServed(ec, KeptCopySupport.side(SourceSystemConnectorSupport.resolve(ec, SYSTEM),
+                    [shopifyAuthConfigId: "rr-parity", windowStart: "2026-11-10T08:00:00Z", windowEnd: "2026-11-11T08:00:00Z",
+                     preserveWindowInstants: true], [tenantId: A, windowStart: START, windowEnd: END]))
+            assertEquals(false, flipped.served)
+            assertTrue((flipped.reason as String).contains("widens the window by its lookback"), flipped.reason as String)
+            List<Map> calls2 = []
+            Map again = interactive(calls2, "rr-flipped", "rr-parity")
+            assertEquals([], again.errors)
+            assertEquals(1, calls2.size(), "the run still reads live")
+        } finally {
+            row = ec.entity.find("darpan.reconciliation.SourceSystemConnector").condition("systemEnumId", SYSTEM).disableAuthz().useCache(false).forUpdate(true).one()
+            row.preserveWindowInstants = "N"
+            row.update()
+        }
     }
 
     // ----------------------------------------------------------------------------------------------------- helpers
