@@ -88,8 +88,9 @@ try {
             idKeys.collate(ShopifyExtractSupport.LOOKUP_IDS_PER_BULK).collect { List<String> chunk ->
                 ShopifyExtractSupport.buildIdsBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS, "DarpanShopifyOrdersByIds", chunk)
             } :
-            [ShopifyExtractSupport.buildCreatedAtBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
-                    "DarpanShopifyOrdersByDateWindow", (String) window.startText, (String) window.endText)]
+            [ShopifyExtractSupport.buildOrdersWindowBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+                    "DarpanShopifyOrdersByDateWindow", (String) window.startText, (String) window.endText,
+                    normalize(windowFieldName))]
 } catch (Exception e) {
     errors = [normalize(e.message) ?: "Shopify bulk query could not be built."]
     warnings = outputWarnings

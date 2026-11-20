@@ -171,10 +171,29 @@ class ShopifyExtractSupport {
 
     static Map<String, Object> buildCreatedAtBulkQuery(String sourceDefinitionId, String operationName,
                                                        String windowStartText, String windowEndText) {
+        return buildOrdersWindowBulkQuery(sourceDefinitionId, operationName, windowStartText, windowEndText, null)
+    }
+
+    /**
+     * DAR-BE-318: the window can match created_at (the default, blank or "createdAt") or updated_at
+     * ("updatedAt", so the kept copy fetches only what changed). Any other field is refused.
+     */
+    static Map<String, Object> buildOrdersWindowBulkQuery(String sourceDefinitionId, String operationName,
+                                                          String windowStartText, String windowEndText,
+                                                          String windowFieldName) {
+        String field = windowFieldName?.trim() ?: "createdAt"
+        Map<String, Object> filters
+        if (field == "createdAt") {
+            filters = [createdAtFrom: windowStartText, createdAtTo: windowEndText]
+        } else if (field == "updatedAt") {
+            filters = [updatedAtFrom: windowStartText, updatedAtTo: windowEndText]
+        } else {
+            throw new IllegalArgumentException("Shopify orders can be windowed by createdAt or updatedAt, not ${windowFieldName}.".toString())
+        }
         return ShopifyGraphqlQueryBuilder.buildBulkQuery([
                 sourceDefinitionId: sourceDefinitionId,
                 operationName     : operationName,
-                filters           : [createdAtFrom: windowStartText, createdAtTo: windowEndText],
+                filters           : filters,
         ])
     }
 

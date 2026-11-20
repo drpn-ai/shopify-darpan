@@ -125,6 +125,11 @@
                     re-checking its older open findings), LOOKUP_IDS_PER_BULK ids a bulk operation. The window
                     parameters are still required but not used for the search.</description>
             </parameter>
+            <parameter name="windowFieldName">
+                <description>DAR-BE-318. Which order timestamp the window matches: createdAt (default, also when
+                    empty) or updatedAt (the kept copy's daily read of what changed). Any other value is
+                    refused. A read by key ignores it.</description>
+            </parameter>
             <parameter name="lookupKeyField">
                 <description>The record field lookupKeys name. Only the order id (id or legacyResourceId) is
                     supported; any other field is refused.</description>

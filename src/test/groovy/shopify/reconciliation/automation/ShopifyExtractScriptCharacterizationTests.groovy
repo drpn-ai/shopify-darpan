@@ -152,6 +152,25 @@ class ShopifyExtractScriptCharacterizationTests {
     }
 
     @Test
+    void ordersWindowFieldNameReachesTheBulkQueryAndAnUnknownOneIsRefused() {
+        // DAR-BE-318: windowFieldName updatedAt windows the read on updated_at; anything else never reaches Shopify.
+        Map result = call("extract#ShopifyOrders", "orders-updated-window", [
+                windowStart: "2026-08-01T00:00:00Z", windowEnd: "2026-08-02T00:00:00Z",
+                preserveWindowInstants: true, windowFieldName: "updatedAt"])
+        assertEquals([], result.errors)
+        String doc = bulkCalls[0].queryDocument as String
+        assertTrue(doc.contains("updated_at:>='2026-08-01T00:00:00Z' updated_at:<'2026-08-02T00:00:00Z'"), doc)
+        assertFalse(doc.contains("created_at"))
+        bulkCalls.clear()
+        Map refused = call("extract#ShopifyOrders", "orders-bad-window", [
+                windowStart: "2026-08-01T00:00:00Z", windowEnd: "2026-08-02T00:00:00Z",
+                preserveWindowInstants: true, windowFieldName: "processedAt"])
+        assertFalse(refused.dataAvailable as boolean)
+        assertTrue((refused.errors as List).toString().contains("createdAt or updatedAt"), refused.errors.toString())
+        assertEquals(0, bulkCalls.size())
+    }
+
+    @Test
     void ordersReadByKeyReadThoseOrdersByIdInChunksInsteadOfTheWindow() {
         // DAR-BE-156: an audit re-checks its older open findings by key, so Shopify must read exactly those orders.
         List<String> keys = (1..251).collect { (18959000000000L + it).toString() }

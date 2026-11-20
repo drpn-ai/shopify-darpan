@@ -2,6 +2,8 @@ package shopify.graphql
 
 import org.junit.jupiter.api.Test
 
+import shopify.reconciliation.automation.ShopifyExtractSupport
+
 import java.util.regex.Pattern
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -491,5 +493,42 @@ class ShopifySourceCatalogAndQueryBuilderTests {
                 "the pre-DAR-BE-063 contract is intact")
         List<String> fieldPaths = ((List<Map>) orders.fields).collect { it.fieldPath as String }
         assertTrue(fieldPaths.containsAll(["sourceName", "requiresShipping"]))
+    }
+
+    // DAR-BE-318 plan 3a task 5: the kept copy reads orders by updated_at.
+    @Test
+    void anUpdatedAtWindowFiltersOnUpdatedAt() {
+        Map<String, Object> built = ShopifyExtractSupport.buildOrdersWindowBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+                "DarpanShopifyOrdersByDateWindow", "2026-04-01T00:00:00Z", "2026-04-02T00:00:00Z", "updatedAt")
+
+        assertEquals("updated_at:>='2026-04-01T00:00:00Z' updated_at:<'2026-04-02T00:00:00Z'", built.searchQuery)
+        assertFalse((built.queryDocument as String).contains("created_at"), "an updated_at window never filters on created_at")
+    }
+
+    @Test
+    void theDefaultWindowIsUnchanged() {
+        Map<String, Object> today = ShopifyGraphqlQueryBuilder.buildBulkQuery([
+                sourceDefinitionId: ShopifySourceCatalog.SHOPIFY_ORDERS,
+                operationName     : "DarpanShopifyOrdersByDateWindow",
+                filters           : [createdAtFrom: "2026-04-01T00:00:00Z", createdAtTo: "2026-04-02T00:00:00Z"],
+        ])
+        [null, "", "  ", "createdAt"].each { String field ->
+            Map<String, Object> built = ShopifyExtractSupport.buildOrdersWindowBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+                    "DarpanShopifyOrdersByDateWindow", "2026-04-01T00:00:00Z", "2026-04-02T00:00:00Z", field)
+            assertEquals(today, built, "window field '${field}' builds today's query")
+        }
+        assertEquals(today, ShopifyExtractSupport.buildCreatedAtBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+                "DarpanShopifyOrdersByDateWindow", "2026-04-01T00:00:00Z", "2026-04-02T00:00:00Z"))
+        assertEquals("created_at:>='2026-04-01T00:00:00Z' created_at:<'2026-04-02T00:00:00Z'", today.searchQuery)
+    }
+
+    @Test
+    void anUnknownWindowFieldIsRefused() {
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException) {
+            ShopifyExtractSupport.buildOrdersWindowBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+                    "DarpanShopifyOrdersByDateWindow", "2026-04-01T00:00:00Z", "2026-04-02T00:00:00Z", "processedAt")
+        }
+        assertTrue(thrown.message.contains("createdAt") && thrown.message.contains("updatedAt"),
+                "the refusal names both allowed values: ${thrown.message}")
     }
 }
