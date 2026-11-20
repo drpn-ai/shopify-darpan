@@ -139,6 +139,46 @@ class ShopifyGraphqlTransportTests {
     }
 
     @Test
+    void "DAR-BE-326: a refused call carries Shopify's own reason and request id, and is not retried"() {
+        int callCount = 0
+        Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig(), "query ShopifyOrders { shop { name } }", [:], [
+            maxAttempts : 3,
+            httpExecutor: { Map<String, Object> request ->
+                callCount++
+                return [statusCode: 403, headers: ["x-request-id": "5d1c-req", "Content-Type": "application/json; charset=utf-8"],
+                        body: JsonOutput.toJson([errors: "[API] This action requires merchant approval for read_orders scope."])]
+            },
+        ])
+
+        assertEquals(1, callCount)
+        assertFalse((Boolean) result.ok)
+        assertFalse((Boolean) result.retryable)
+        assertEquals(403, result.statusCode)
+        assertEquals(["Shopify GraphQL request failed with HTTP 403: [API] This action requires merchant approval for read_orders scope. (Shopify request id 5d1c-req)"],
+                result.errors)
+        assertFalse(result.toString().contains("shpat_secret_token"))
+    }
+
+    @Test
+    void "DAR-BE-326: a list of Shopify error messages is joined and clipped"() {
+        Map<String, Object> result = ShopifyGraphqlTransport.parseResponse([statusCode: 401,
+                body: JsonOutput.toJson([errors: [[message: "Invalid API key or access token"], [message: "x" * 400]]])])
+
+        String error = (result.errors as List)[0].toString()
+        assertTrue(error.startsWith("Shopify GraphQL request failed with HTTP 401: Invalid API key or access token; xxx"), error)
+        assertTrue(error.length() < 400, "clipped: ${error.length()}")
+    }
+
+    @Test
+    void "DAR-BE-326: an answer that is not Shopify's JSON says so instead of echoing the page"() {
+        Map<String, Object> result = ShopifyGraphqlTransport.parseResponse([statusCode: 403,
+                headers: ["Content-Type": "text/html"], body: "<html><body>Access denied by proxy policy</body></html>"])
+
+        assertEquals(["Shopify GraphQL request failed with HTTP 403; the answer was not Shopify's JSON (text/html), so something between Darpan and Shopify may have refused it."],
+                result.errors)
+    }
+
+    @Test
     void transportDoesNotRetryOutboundPolicyBlockedRequests() {
         int callCount = 0
         Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig(), "query ShopifyOrders { shop { name } }", [:], [

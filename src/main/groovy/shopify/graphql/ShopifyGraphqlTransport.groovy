@@ -163,9 +163,12 @@ class ShopifyGraphqlTransport {
         boolean retryableStatus = statusCode == 429 || statusCode >= 500
 
         if (statusCode < 200 || statusCode >= 300) {
+            String refusal = refusalMessage(statusCode, bodyText, headerValue(response?.headers, "Content-Type"),
+                    headerValue(response?.headers, "X-Request-Id"))
+            logger.warn(refusal)
             return [
                 ok        : false,
-                errors    : ["Shopify GraphQL request failed with HTTP ${statusCode}."],
+                errors    : [refusal],
                 statusCode: statusCode,
                 retryable : retryableStatus && attempt < maxAttempts,
             ]
@@ -246,6 +249,7 @@ class ShopifyGraphqlTransport {
                 // A GraphQL answer is bounded by Shopify's query cost; read whole, as before (error bodies too).
                 return [
                     statusCode: statusCode,
+                    headers   : answer.headers,
                     body      : ((InputStream) answer.body).getText("UTF-8"),
                 ] as Map<String, Object>
             }
@@ -256,6 +260,43 @@ class ShopifyGraphqlTransport {
             logger.info("shopify gql call op={} status={} ms={}", op.find() ? (op.group(1) ?: op.group(2)) : null,
                     statusCode, System.currentTimeMillis() - started)
         }
+    }
+
+    /**
+     * DAR-BE-326: a refused call names Shopify's own reason (its top-level {@code errors}: a string, or a list of
+     * strings or {message} maps) and request id, so a 401/403 can be told apart without a deploy. A body that is not
+     * Shopify's JSON (a proxy or CDN page) is never echoed; the message says what kind of answer it was.
+     */
+    static String refusalMessage(int statusCode, String bodyText, String contentType, String requestId) {
+        String head = "Shopify GraphQL request failed with HTTP ${statusCode}".toString()
+        String idPart = requestId ? " (Shopify request id ${clip(requestId, 80)})".toString() : ""
+        Object parsed = null
+        try { parsed = bodyText ? new JsonSlurper().parseText(bodyText) : null } catch (Exception ignored) { }
+        if (parsed instanceof Map) {
+            Object errors = ((Map) parsed).get("errors")
+            List<String> reasons = (errors instanceof List ? (List) errors : [errors])
+                    .collect { Object e -> normalize(e instanceof Map ? ((Map) e).get("message") : e) }
+                    .findAll { String m -> m }
+            String reason = clip(reasons.join("; "), 300)
+            return reason ? "${head}: ${reason}${idPart}".toString() : "${head}.${idPart}".toString()
+        }
+        if (bodyText) {
+            String kind = normalize(contentType?.split(";")?.first()) ?: "no content type"
+            return "${head}; the answer was not Shopify's JSON (${kind}), so something between Darpan and Shopify may have refused it.${idPart}".toString()
+        }
+        return "${head}.${idPart}".toString()
+    }
+
+    private static String headerValue(Object headers, String name) {
+        if (!(headers instanceof Map)) return null
+        Map.Entry entry = ((Map) headers).find { k, v -> k?.toString()?.equalsIgnoreCase(name) } as Map.Entry
+        return normalize(entry?.value)
+    }
+
+    /** One line, control characters dropped, at most {@code max} characters. */
+    private static String clip(String text, int max) {
+        String flat = (text ?: "").replaceAll(/[\p{Cntrl}\s]+/, " ").trim()
+        return flat.length() <= max ? flat : flat.substring(0, max) + "…"
     }
 
     private static Map<String, Object> safeFailure(String message, boolean retryable) {
