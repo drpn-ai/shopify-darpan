@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DAR-BE-318 plan 3b-1 (ruling P3b1-9). What the Shopify endpoints do that darpan core must know without naming Shopify: set
+  here, on the core connector rows by primary key (the other fields stay core's), never in core.
+
+  excludedRecordsSidecar: whether the extract writes the records its source filters set aside beside its file
+  (ExcludedRecordsSidecar.writeBeside). A kept-copy slice writes that side file exactly when this says Y.
+    SHOPIFY Y, SHOPIFY_ORDER_LINE_UNITS Y: the orders and line-unit extracts collect what their filters drop
+      (ShopifyExcludedSidecarTests, ShopifyOrderLineUnitSupportTests).
+    SHOPIFY_RETURN_REFS N: the return-refs extract filters client-side and keeps none of what it drops.
+-->
+<entity-facade-xml type="darpan-seed">
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY" excludedRecordsSidecar="Y"/>
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_ORDER_LINE_UNITS" excludedRecordsSidecar="Y"/>
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_RETURN_REFS" excludedRecordsSidecar="N"/>
+</entity-facade-xml>
