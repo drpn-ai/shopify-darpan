@@ -10,6 +10,18 @@ import shopify.reconciliation.automation.ShopifyReturnRefsSupport
 import java.sql.Timestamp
 
 List<String> outputWarnings = []
+// DAR-BE-318: the events are windowed on their own createdAt, which is all this read does; any other field is refused
+// before Shopify is called. A completedReturns read answers per order, with no event date to window on.
+String windowFieldValue = ValueSupport.normalize(windowFieldName)
+if (windowFieldValue && (windowFieldValue != "createdAt" || completedReturns)) {
+    errors = [(windowFieldValue != "createdAt"
+            ? "Shopify return refs can be windowed by createdAt (the refund's or the return's own), not ${windowFieldValue}."
+            : "Shopify completedReturns reads are per order and have no event createdAt to window on.").toString()]
+    warnings = outputWarnings
+    dataAvailable = false
+    recordCount = 0
+    return
+}
 // DAR-BE-320: count every call this extract makes to Shopify (requestMetadata.shopifyCalls).
 ShopifyCallTally.start()
 

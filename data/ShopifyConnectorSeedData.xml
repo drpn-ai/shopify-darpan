@@ -8,9 +8,17 @@
     SHOPIFY Y, SHOPIFY_ORDER_LINE_UNITS Y: the orders and line-unit extracts collect what their filters drop
       (ShopifyExcludedSidecarTests, ShopifyOrderLineUnitSupportTests).
     SHOPIFY_RETURN_REFS N: the return-refs extract filters client-side and keeps none of what it drops.
+
+  datasetReadParametersJson: sent on every dataset read of the endpoint (a rolling copy of its events).
+    SHOPIFY_RETURN_REFS {"preserveWindowInstants":true,"lookbackHours":0}: a run read rounds its window to whole days in the
+      store's zone and widens it back by lookbackHours (3, for the OMS sync lag), so the connector row cannot keep its instants
+      (that would change every tenant's live read). The copy's read keeps the instants and the lookback off, so it holds
+      exactly the events created in its rolling window. A run side is therefore never cut from it (its live window is the
+      rounded, widened one) and reads live; see ShopifyReturnRefsRollingCopyTests.
 -->
 <entity-facade-xml type="darpan-seed">
     <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY" excludedRecordsSidecar="Y"/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_ORDER_LINE_UNITS" excludedRecordsSidecar="Y"/>
-    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_RETURN_REFS" excludedRecordsSidecar="N"/>
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_RETURN_REFS" excludedRecordsSidecar="N"
+            datasetReadParametersJson='{"preserveWindowInstants":true,"lookbackHours":0}'/>
 </entity-facade-xml>

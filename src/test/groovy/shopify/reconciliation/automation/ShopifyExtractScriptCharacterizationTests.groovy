@@ -324,6 +324,43 @@ class ShopifyExtractScriptCharacterizationTests {
     }
 
     @Test
+    void theReturnRefsWindowFieldIsCreatedAtOnly() {
+        // DAR-BE-318: the events are windowed on their own createdAt; any other field never reaches Shopify.
+        returnRefsResponder = { -> returnRefsResult() }
+        Map ok = call("extract#ShopifyOrderReturnRefs", "return-refs-window-field", window() + [windowFieldName: "createdAt"])
+        assertEquals([], ok.errors)
+        assertEquals(1, returnRefsCalls.size())
+        returnRefsCalls.clear()
+        ["updatedAt", "processedAt"].each { String field ->
+            Map refused = this.call("extract#ShopifyOrderReturnRefs", "return-refs-window-field-bad", window() + [windowFieldName: field])
+            assertFalse(refused.dataAvailable as boolean)
+            assertTrue((refused.errors as List).toString().contains(field), refused.errors.toString())
+            assertTrue((refused.errors as List).toString().contains("createdAt"), refused.errors.toString())
+        }
+        // the completed-returns read is per order, with no event date to window on
+        Map completed = call("extract#ShopifyOrderReturnRefs", "return-refs-window-field-completed",
+                window() + [windowFieldName: "createdAt", completedReturns: "refunded"])
+        assertFalse(completed.dataAvailable as boolean)
+        assertTrue((completed.errors as List).toString().contains("completedReturns"), completed.errors.toString())
+        assertEquals(0, returnRefsCalls.size(), "a refused window field never reaches Shopify")
+    }
+
+    @Test
+    void anAbsentWindowFieldIsToday() {
+        // no windowFieldName: the extract is what it was (its snapshot is returnRefsHappyPathWritesEnvelopeAndLeavesNoWorkFile)
+        // and the support class is handed exactly what it is handed with the event's field named
+        returnRefsResponder = { -> returnRefsResult() }
+        Map absent = call("extract#ShopifyOrderReturnRefs", "return-refs-field-absent", window())
+        Map named = call("extract#ShopifyOrderReturnRefs", "return-refs-field-named", window() + [windowFieldName: "createdAt"])
+        assertEquals([], absent.errors)
+        assertEquals([], named.errors)
+        assertEquals(2, returnRefsCalls.size())
+        assertEquals(returnRefsCalls[0], returnRefsCalls[1])
+        assertEquals(absent.recordCount, named.recordCount)
+        assertEquals(returnRefsCalls[0].options.lookbackHours, 3, "the lookback stays 3 h unless a call says otherwise")
+    }
+
+    @Test
     void returnRefsPassesOverridesAndSanitizesFileName() {
         authConfigFixture.timeZone = "America/Chicago"
         returnRefsResponder = { -> [records: [], warnings: null, errors: null, requestMetadata: null] }

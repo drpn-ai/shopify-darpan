@@ -252,6 +252,12 @@
             hold.</description>
         <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyExtractOutputs"/>
         <in-parameters>
+            <parameter name="windowFieldName">
+                <description>DAR-BE-318. Which event timestamp the window matches: createdAt, the refund's or the return's own
+                    creation, which is what this read always windows on. Blank means the same. Any other value is refused,
+                    and so is a completedReturns read, which has no event date. Names the field so a kept copy of these events
+                    can be keyed and cut on it.</description>
+            </parameter>
             <parameter name="shopifyAuthConfigId" required="true">
                 <description>Tenant-owned Shopify auth config identifier.</description>
             </parameter>
