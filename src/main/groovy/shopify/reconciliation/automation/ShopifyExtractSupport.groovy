@@ -5,7 +5,6 @@ import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
-import darpan.reconciliation.source.SourceFilterSupport
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
@@ -381,62 +380,6 @@ class ShopifyExtractSupport {
             recordsWriter = null
             recordsFile?.delete()
             recordsFile = null
-        }
-    }
-
-    /**
-     * DAR-BE-162: the source filters over a stream of records, a batch at a time through
-     * SourceFilterSupport.applyToRecords, the way the OMS extract filters a page at a time. One batch is in heap, the
-     * dropped records spill to disk through ExcludedRecordsSidecar.merge, and each rule's counts add up across batches.
-     * finish() answers what applyToRecords answers for the whole list, less the kept records (they went to keptSink).
-     */
-    static class BatchedSourceFilter {
-        static final int BATCH_SIZE = 500
-
-        private final List<Map<String, Object>> rules
-        private final Closure keptSink
-        private final List<Map> batch = []
-        private List<Map<String, Object>> configuredExclusions
-        final Map excludedCollector
-
-        BatchedSourceFilter(List<Map<String, Object>> rules, Closure keptSink) {
-            this.rules = rules
-            this.keptSink = keptSink
-            this.excludedCollector = rules ? ExcludedRecordsSidecar.newCollector() : null
-        }
-
-        void add(Map record) {
-            if (!rules) {
-                keptSink.call(record)
-                return
-            }
-            batch.add(record)
-            if (batch.size() >= BATCH_SIZE) filterBatch()
-        }
-
-        Map finish() {
-            if (!rules) return [configuredExclusions: null, excludedCollector: null]
-            // Also lists every rule, at zero, when no record came at all.
-            filterBatch()
-            ExcludedRecordsSidecar.flush(excludedCollector)
-            return [configuredExclusions: configuredExclusions, excludedCollector: excludedCollector]
-        }
-
-        private void filterBatch() {
-            Map filtered = SourceFilterSupport.applyToRecords(new ArrayList<Map>(batch), rules)
-            batch.clear()
-            ((List<Map>) filtered.records).each { Map kept -> keptSink.call(kept) }
-            ExcludedRecordsSidecar.merge(excludedCollector, (Map) filtered.excludedCollector)
-            List<Map<String, Object>> counts = (List<Map<String, Object>>) filtered.configuredExclusions
-            if (configuredExclusions == null) {
-                configuredExclusions = counts
-                return
-            }
-            counts.eachWithIndex { Map<String, Object> count, int i ->
-                Map<String, Object> total = configuredExclusions[i]
-                total.excludedCount = (total.excludedCount as int) + (count.excludedCount as int)
-                total.fieldAbsentCount = (total.fieldAbsentCount as int) + (count.fieldAbsentCount as int)
-            }
         }
     }
 }

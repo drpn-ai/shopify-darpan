@@ -1,5 +1,7 @@
 package shopify.reconciliation.automation
 
+import darpan.reconciliation.source.KeepRules
+import darpan.reconciliation.source.SourceFilterSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
@@ -36,6 +38,15 @@ class ShopifyExtractScriptCharacterizationTests {
     private static final String SERVICES = "reconciliation.ShopifyOrderExtractionServices"
     private static final String TEST_TOKEN = "shopify-extract-characterization"
     private static final String OUTPUT_ROOT = "tmp/shopify-characterization/extract"
+
+    private static final List<Map> VOIDED_FILTER = [[sequenceNum: 1, fieldExpression: "displayFinancialStatus",
+                                                     operator: "EXCLUDE_IN", filterValues: "VOIDED"]]
+
+    private static final List<String> PARITY_KEPT_IDS = ["10", "13", "20", "25", "30", "33", "38"]
+    private static final List<Map> PARITY_COUNTS = [
+            [sequenceNum: 1, excludedCount: 24, fieldAbsentCount: 0], [sequenceNum: 2, excludedCount: 0, fieldAbsentCount: 3],
+            [sequenceNum: 3, excludedCount: 4, fieldAbsentCount: 0], [sequenceNum: 4, excludedCount: 1, fieldAbsentCount: 0],
+            [sequenceNum: 5, excludedCount: 1, fieldAbsentCount: 0]]
 
     private ExecutionContext ec
 
@@ -99,7 +110,7 @@ class ShopifyExtractScriptCharacterizationTests {
     // ---- extract#ShopifyOrders --------------------------------------------------------------
 
     @Test
-    void ordersHappyPathFiltersWritesRawJsonlSidecarAndMetadata() {
+    void ordersHappyPathWritesEveryOrderRawJsonlAndMetadata() {
         bulkResponder = { -> ordersBulkResult() }
         Map result = call("extract#ShopifyOrders", "orders-happy", [
                 windowStart           : "2026-08-01T00:00:00Z",
@@ -109,11 +120,9 @@ class ShopifyExtractScriptCharacterizationTests {
                 fileSide              : "FILE_1",
                 systemEnumId          : "SHOPIFY",
                 sourceTypeEnumId      : "API",
-                sourceFilters         : [[sequenceNum: 1, fieldExpression: "displayFinancialStatus",
-                                          operator: "EXCLUDE_IN", filterValues: "VOIDED"]],
         ])
         assertEquals([], result.errors)
-        assertEquals(2, result.recordCount)
+        assertEquals(3, result.recordCount)
         assertTrue(result.dataAvailable as boolean)
         assertEquals("shopify-orders-1785542400000-1785628800000.json", result.fileName)
         assertEquals(runtimeFile("${OUTPUT_ROOT}/orders-happy").canonicalFile, downloadDirectories[0].canonicalFile,
@@ -122,33 +131,100 @@ class ShopifyExtractScriptCharacterizationTests {
     }
 
     @Test
-    void ordersStreamAcrossFilterBatchesKeepingOrderCountsAndEveryDroppedOrder() {
-        // DAR-BE-162: more orders than one filter batch, so the per-rule counts, the excluded sidecar and the order of
-        // the kept records must come out as if the whole list had been filtered at once.
-        int total = ShopifyExtractSupport.BatchedSourceFilter.BATCH_SIZE * 2 + 37
+    void ordersStreamEveryOrderInOrderWhateverTheFilters() {
+        // DAR-BE-162 / DAR-BE-318: more orders than the old filter batch held (500), each written in the order read, none dropped.
+        int total = 500 * 2 + 37
         List<Map> orders = (1..total).collect { int n ->
             [id: "gid://shopify/Order/${n}".toString(), name: "#${n}".toString(),
              displayFinancialStatus: n % 3 == 0 ? "VOIDED" : "PAID",
              transactions: n % 2 == 0 ? [[kind: "SALE", status: "SUCCESS", gateway: "shopify_payments"]] : []] as Map
         }
         bulkResponder = { -> [ok: true, records: orders, bulkOperation: [id: "gid://shopify/BulkOperation/7", status: "COMPLETED"]] }
-        Map result = call("extract#ShopifyOrders", "orders-stream", window() + [
-                sourceFilters: [[sequenceNum: 1, fieldExpression: "displayFinancialStatus", operator: "EXCLUDE_IN",
-                                 filterValues: "VOIDED"]]])
+        Map result = call("extract#ShopifyOrders", "orders-stream", window() + [sourceFilters: VOIDED_FILTER])
         assertEquals([], result.errors)
-        List<String> keptIds = orders.findAll { it.displayFinancialStatus != "VOIDED" }.collect { (it.id as String).tokenize("/").last() }
-        assertEquals(keptIds, records(result)*.id)
-        assertEquals(keptIds.size(), result.recordCount)
+        assertEquals((1..total).collect { it.toString() }, records(result)*.id)
+        assertEquals(total, result.recordCount)
         Map metadata = (Map) result.requestMetadata
         assertEquals(total, metadata.extractedRecordCount)
-        assertEquals(keptIds.size(), metadata.keptRecordCount)
-        assertEquals([total.intdiv(3), 0], [metadata.filters.configuredExclusions[0].excludedCount,
-                                           metadata.filters.configuredExclusions[0].fieldAbsentCount])
-        assertEquals(keptIds.count { (it as int) % 2 == 0 }, metadata.paymentTransactionYCount)
+        assertEquals(total, metadata.keptRecordCount)
+        assertEquals((1..total).count { it % 2 == 0 }, metadata.paymentTransactionYCount)
+        assertFalse(metadata.containsKey("filters"))
         File folder = runtimeFile("${OUTPUT_ROOT}/orders-stream")
-        File sidecar = folder.listFiles().find { it.name.endsWith(".excluded.json") }
-        assertEquals(total.intdiv(3), ((List) ((Map) new JsonSlurper().parse(sidecar)).records).size())
-        assertEquals([], folder.list().findAll { it.endsWith(".partial") } as List, "no work file is left behind")
+        assertEquals([], folder.list().findAll { it.endsWith(".excluded.json") || it.endsWith(".partial") } as List,
+                "no excluded-records side file and no work file is left behind")
+    }
+
+    @Test
+    void everyOrderIsWrittenWhateverTheFilters() {
+        // DAR-BE-318 (Task 21): the orders extract no longer declares sourceFilters, so Spark Keep owns the filtering (the gate
+        // reads the declared parameters). Valid, invalid and absent filters all write every order and report no filter block.
+        assertFalse(ec.service.getServiceDefinition("${SERVICES}.extract#ShopifyOrders").inParameterNameList.contains("sourceFilters"),
+                "extract#ShopifyOrders must not declare sourceFilters, or the Keep gate keeps the read-time filter")
+        List<List<Map>> variants = [null, [], VOIDED_FILTER,
+                                    [[sequenceNum: 1, fieldExpression: "name", operator: "BOGUS", filterValues: "x"]]]
+        variants.eachWithIndex { List<Map> filters, int i ->
+            bulkResponder = { -> ordersBulkResult() }
+            Map result = this.call("extract#ShopifyOrders", "orders-all-${i}", window() + (filters == null ? [:] : [sourceFilters: filters]))
+            assertEquals([], result.errors, "variant ${i}")
+            assertEquals(3, result.recordCount, "variant ${i}")
+            assertEquals(["1001", "1002", "1003"], records(result)*.id, "variant ${i}")
+            assertFalse(((Map) result.requestMetadata).containsKey("filters"))
+            assertEquals(3, ((Map) result.requestMetadata).keptRecordCount)
+            assertEquals([], runtimeFile("${OUTPUT_ROOT}/orders-all-${i}").list().findAll { it.endsWith(".excluded.json") } as List)
+        }
+        assertEquals(4, bulkCalls.size(), "a malformed rule no longer fails pre-flight: it never reaches the extract")
+    }
+
+    @Test
+    void theUnfilteredExtractIsExactlyWhatTheReadTimeFilterWasHanded() {
+        // DAR-BE-318 parity: Shopify-shaped orders, the same rules. Old = SourceFilterSupport.applyToRecords over the extract's
+        // normalized records (what the deleted BatchedSourceFilter ran, 500 at a time). New = the unfiltered extract, which Spark Keep (darpan core,
+        // KeepColumnParityTests) sets aside from by these same rules. This repo's tests cannot boot Spark (no Spark on its classpath).
+        List<Map> orders = (1..40).collect { int n ->
+            Map order = [id: "gid://shopify/Order/${n}".toString(), name: "#${n}".toString(),
+                         displayFinancialStatus: ["PAID", "VOIDED", "voided ", "PENDING", "REFUNDED"][n % 5],
+                         sourceName: ["web", "pos", "shopify_draft_order", "WEB", " pos"][n % 5],
+                         subtotalLineItemsQuantity: n % 4 + 1,
+                         test: n % 7 == 0,
+                         tags: n % 6 == 0 ? ["wholesale", "vip"] : [],
+                         transactions: n % 2 == 0 ? [[kind: "SALE", status: "SUCCESS", gateway: "shopify_payments"]] : []] as Map
+            if (n % 8 == 0) order.remove("sourceName")           // field absent
+            if (n % 9 == 0) order.sourceName = null               // JSON null
+            if (n % 10 == 0) order.remove("displayFinancialStatus")
+            return order
+        }
+        List<Map> filters = [
+                [sequenceNum: 1, fieldExpression: "displayFinancialStatus", operator: "EXCLUDE_IN", filterValues: "VOIDED,refunded"],
+                [sequenceNum: 2, fieldExpression: "sourceName", operator: "INCLUDE_IN", filterValues: "web,pos"],
+                [sequenceNum: 3, fieldExpression: "itemQuantity", operator: "EXCLUDE_IN", filterValues: "4"],
+                [sequenceNum: 4, fieldExpression: "test", operator: "EXCLUDE_IN", filterValues: "true"],
+                [sequenceNum: 5, fieldExpression: "name", operator: "INCLUDE_PREFIX", filterValues: "#1,#2,#3,#4"],
+        ]
+        bulkResponder = { -> [ok: true, records: orders, bulkOperation: [id: "gid://shopify/BulkOperation/8", status: "COMPLETED"]] }
+        Map result = call("extract#ShopifyOrders", "orders-parity", window())
+        assertEquals([], result.errors)
+        assertEquals(40, result.recordCount)
+        File extract = runtimeFile((result.fileLocation as String).replace("runtime://", ""))
+        List<Map> written = (List<Map>) ((Map) new JsonSlurper().parse(extract)).records
+
+        List<Map<String, Object>> parsed = SourceFilterSupport.parseRules(filters)
+        Map old = SourceFilterSupport.applyToRecords(written, parsed)
+        List<String> oldKept = ((List<Map>) old.records).collect { it.id as String }.sort()
+        assertTrue(oldKept.size() in 1..<40, "the fixture keeps some and sets some aside: ${oldKept.size()}")
+
+        // What the Keep step is handed from these same rules: valid, one rule per filter, owned by the filter's sequence number.
+        List<Map> keepRules = SourceFilterSupport.toKeepRules(parsed)
+        KeepRules.validate(keepRules)
+        assertEquals(["A:1", "A:2", "A:3", "A:4", "A:5"], keepRules*.id)
+        assertEquals(parsed*.fieldExpression, keepRules*.label)
+        // The extract is the old filter's input, unfiltered and in read order: every record the old run saw is there.
+        assertEquals((1..40).collect { it.toString() }, written*.id)
+        assertEquals(oldKept, old.records*.id.sort())
+        // The old run's filter outcome on this data, pinned: if the rules or the data change this changes with them.
+        assertEquals(PARITY_KEPT_IDS, oldKept)
+        assertEquals(PARITY_COUNTS, ((List<Map>) old.configuredExclusions).collect {
+            [sequenceNum: it.sequenceNum, excludedCount: it.excludedCount, fieldAbsentCount: it.fieldAbsentCount]
+        })
     }
 
     @Test
@@ -222,14 +298,6 @@ class ShopifyExtractScriptCharacterizationTests {
         Map result = call("extract#ShopifyOrders", "orders-auth-error", window())
         assertTrue(bulkCalls.isEmpty())
         assertSnapshot("extract-orders-auth-error", result, "orders-auth-error")
-    }
-
-    @Test
-    void ordersInvalidSourceFilterFailsBeforeBulk() {
-        Map result = call("extract#ShopifyOrders", "orders-filter-error", window() + [
-                sourceFilters: [[sequenceNum: 1, fieldExpression: "name", operator: "BOGUS", filterValues: "x"]]])
-        assertTrue(bulkCalls.isEmpty())
-        assertSnapshot("extract-orders-filter-error", result, "orders-filter-error")
     }
 
     @Test

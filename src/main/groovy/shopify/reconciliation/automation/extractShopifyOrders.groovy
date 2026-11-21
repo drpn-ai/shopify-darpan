@@ -1,7 +1,5 @@
 import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
-import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
-import darpan.reconciliation.source.SourceFilterSupport
 import shopify.graphql.ShopifyBulkOperationClient
 import shopify.graphql.ShopifyCallTally
 import shopify.graphql.ShopifySourceCatalog
@@ -56,19 +54,6 @@ if (outputErrors) {
     return
 }
 
-// DAR-BE-063: tenant source filters run CLIENT-side per order (Shopify search syntax knows nothing of
-// them). Parsed BEFORE the bulk operation is submitted, so a malformed rule fails in seconds.
-List<Map<String, Object>> parsedSourceFilters
-try {
-    parsedSourceFilters = SourceFilterSupport.parseRules(sourceFilters)
-} catch (Exception e) {
-    errors = [normalize(e.message) ?: "Configured exclusion rules are invalid."]
-    warnings = outputWarnings
-    dataAvailable = false
-    recordCount = 0
-    return
-}
-
 Map<String, Object> window = ShopifyExtractSupport.resolveSourceWindow(ec, authConfig,
         (Timestamp) resolved.windowStartValue, (Timestamp) resolved.windowEndValue, preserveWindowInstants)
 Timestamp sourceWindowStart = (Timestamp) window.start
@@ -103,17 +88,13 @@ String outputBaseLocation = ShopifyExtractSupport.resolveOutputBaseLocation(ec, 
         automationExecutionId, automationId, configIdValue)
 File outputDirectory = ShopifyExtractSupport.outputDirectory(ec, outputBaseLocation)
 
-// DAR-BE-162: each bulk result downloads to a file and is read one order at a time: normalized, filtered a batch at a
-// time, and written straight to the extract. Holding the result as text and then as maps OOMed a 2 GB JVM on a month.
+// DAR-BE-162: each bulk result downloads to a file and is read one order at a time: normalized and written straight to
+// the extract. DAR-BE-318: no filter runs here. The extract holds every order; Spark Keep sets aside what the tenant's
+// rules say (this service no longer declares sourceFilters, so the Keep gate places the side in Spark).
+// Holding the result as text and then as maps OOMed a 2 GB JVM on a month.
 Map<String, Integer> paymentSummary = [paymentTransactionYCount: 0, paymentTransactionNCount: 0]
 ShopifyExtractSupport.ExtractFileWriter extractWriter = new ShopifyExtractSupport.ExtractFileWriter(outputDirectory)
-ShopifyExtractSupport.BatchedSourceFilter sourceFilter = new ShopifyExtractSupport.BatchedSourceFilter(parsedSourceFilters,
-        { Map kept ->
-            ShopifyOrderPaymentSignal.tally(paymentSummary, kept)
-            extractWriter.add(kept)
-        })
 Map<String, Object> bulkOperationResult = null
-Map filteredOrders = null
 int extractedRecordCount = 0
 try {
     for (Map<String, Object> builtBulkQuery : builtBulkQueries) {
@@ -127,10 +108,11 @@ try {
         }
         ShopifyBulkOperationClient.eachJsonlRecord((File) bulkOperationResult.jsonlFile) { Map<String, Object> record ->
             extractedRecordCount++
-            sourceFilter.add(normalizeShopifyOrderRecord.call(record))
+            Map<String, Object> order = normalizeShopifyOrderRecord.call(record)
+            ShopifyOrderPaymentSignal.tally(paymentSummary, order)
+            extractWriter.add(order)
         }
     }
-    filteredOrders = sourceFilter.finish()
     if (outputErrors) {
         errors = outputErrors
         warnings = outputWarnings
@@ -148,8 +130,6 @@ try {
     fileName = outputFileName
     fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
     fileTypeEnumId = "DftJson"
-    ShopifyExtractSupport.writeExcludedSidecar(ec, (Map) filteredOrders.excludedCollector, outputBaseLocation,
-            outputFileName, outputWarnings)
     // DAR-BE-064 canary: the presence OPP rule (<=) cannot see a missing signal, so report it here.
     String paymentCanary = ShopifyOrderPaymentSignal.canaryWarning(paymentSummary)
     if (paymentCanary) outputWarnings.add(paymentCanary)
@@ -162,9 +142,6 @@ try {
             keptRecordCount         : extractWriter.recordCount,
             paymentTransactionYCount: paymentSummary.paymentTransactionYCount,
             paymentTransactionNCount: paymentSummary.paymentTransactionNCount,
-            // Absent (not an empty block) when no rules are configured, matching the line-units extract.
-            filters                 : filteredOrders.configuredExclusions != null ?
-                    [configuredExclusions: filteredOrders.configuredExclusions] : null,
     ])
     metadata.shopifyCalls = ShopifyCallTally.stop()
     requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>
@@ -174,6 +151,4 @@ try {
 } finally {
     extractWriter.abort()
     ShopifyExtractSupport.discardBulkResult(bulkOperationResult)
-    // The excluded-records spill holds customer records: gone whether the sidecar was written, not wanted, or failed.
-    ExcludedRecordsSidecar.discard(sourceFilter.excludedCollector)
 }
