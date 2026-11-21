@@ -44,14 +44,6 @@
                 "pageSize": 25,
                 "connectionPageSize": 10,
                 "lookbackHours": 6,
-                "sourceFilters": [
-                    {
-                        "sequenceNum": 1,
-                        "fieldExpression": "orderReturnStatus",
-                        "operator": "EXCLUDE_IN",
-                        "filterValues": "IN_PROGRESS"
-                    }
-                ],
                 "connectTimeoutMillis": 1111,
                 "readTimeoutMillis": 2222,
                 "maxAttempts": 3

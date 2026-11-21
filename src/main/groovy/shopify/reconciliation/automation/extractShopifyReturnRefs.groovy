@@ -69,9 +69,7 @@ Map extraction = completedReturns ? ShopifyCompletedReturnsSupport.extract(Shopi
         // event created just before it is still available for the OMS-side forward match (OMS lags
         // Shopify by ~38min, RQ-23). See ShopifyReturnRefsSupport's class doc.
         lookbackHours       : ValueSupport.normalizeInt(lookbackHours, ShopifyReturnRefsSupport.DEFAULT_LOOKBACK_HOURS),
-        // Configured exclusions run CLIENT-side: Shopify's search syntax has no knowledge of tenant
-        // rules, so matching happens in the support class before output. Null when unconfigured.
-        sourceFilters       : sourceFilters,
+        // DAR-BE-318: no sourceFilters. Every event is written; Spark Keep sets aside what a run's rules reject.
         connectTimeoutMillis: connectTimeoutMillis,
         readTimeoutMillis   : readTimeoutMillis,
         maxAttempts         : maxAttempts,

@@ -223,9 +223,20 @@
             connection comes back empty gets its own RETURN row; any non-empty result means it is
             skipped. See ShopifyReturnRefsSupport.toRecords for the full rationale and evidence.
 
+            NO SOURCE FILTERS (DAR-BE-318): this service declares no sourceFilters parameter, so every
+            event is written and Spark Keep (darpan core) sets aside what a run's rules reject. The field
+            a rule is written against is orderReturnStatus, holding Shopify's own Order.returnStatus
+            (IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN, RETURN_FAILED, RETURN_REQUESTED, RETURNED)
+            on EVERY row, refunds included; excluding IN_PROGRESS therefore sets aside an in-progress
+            order's REFUND rows too, and if OMS holds such a refund it will then report missing-in-Shopify.
+            TWO DROPS STAY IN THE EXTRACTOR, ahead of any rule: a return that HAS a refund emits no RETURN
+            row (2026-08-18), and a CLOSED return with NO refund emits none either (DAR-BE-027, counted in
+            requestMetadata.filters.closedUnrefundedReturnsSuppressed, always present, zero included). The
+            window floor is also widened by lookbackHours. None of these is a rule over a record field.
+
             RETURN WORKFLOW STATUS (2026-08-27): RETURN rows also carry returnWorkflowStatus, the
             Shopify ReturnStatus of that return. It exists so operators can exclude in-progress
-            returns (REQUESTED, OPEN) via the standard sourceFilters mechanism — a return the customer
+            returns (REQUESTED, OPEN) through the run's Keep rules (Spark Keep, DAR-BE-318) — a return the customer
             has merely opened has no OMS counterpart yet and would otherwise report as missing-in-OMS
             on every run until it completes. This is NOT a reversal of the narrowing above:
             Return.refunds remains the refunded/unrefunded discriminator, and this field is never read
@@ -284,7 +295,7 @@
                     checked against NetSuite (Dolls Kill, RAILS). Rows carry orderId, orderName (no leading #),
                     returnIds, returnCount, closedAt and originalUnfulfilledQuantity (the order's own lines Shopify has not
                     fulfilled, leaving out the lines an exchange added: an exchange reaches NetSuite only once its original
-                    order is fulfilled); lookbackHours and sourceFilters do not apply.</description>
+                    order is fulfilled); lookbackHours does not apply.</description>
             </parameter>
             <parameter name="lookbackHours" type="Integer" default-value="3">
                 <description>Hours the fetch/emit floor is widened BEFORE windowStart, so a Shopify
@@ -292,43 +303,6 @@
                     match (OMS lags Shopify by ~38min, RQ-23). Does not change the reporting window
                     itself — matches ReturnPresenceVerificationSupport.DEFAULT_GRACE_HOURS in the
                     darpan component by default.</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules, same semantics as the OMS extractors.
-                    Each rule names a top-level record field and a comma-separated list of exact
-                    values; matching records are dropped before the extract file is written and
-                    counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
-                    means no configured exclusions (backward compatible).
-
-                    The field this connector exists to offer is orderReturnStatus, holding Shopify's
-                    own Order.returnStatus (IN_PROGRESS, INSPECTION_COMPLETE, NO_RETURN, RETURN_FAILED,
-                    RETURN_REQUESTED, RETURNED) — the values Shopify's own admin and order search show,
-                    so a rule works as typed. Corrected 2026-09-01: this paragraph named
-                    returnWorkflowStatus, a per-return field WITHDRAWN by DAR-BE-026 earlier the same
-                    day. Do not write a rule against that name or the older returnStatus; both are
-                    retired and a rule naming either matches nothing, silently, forever.
-
-                    orderReturnStatus is an ORDER-WIDE aggregate written on EVERY row, refunds
-                    included. That is deliberate — the withdrawn per-return field could never reach a
-                    refund row at all — but it widens the blast radius: excluding IN_PROGRESS drops an
-                    in-progress order's REFUND rows too, and if OMS holds such a refund it will then
-                    report missing-in-Shopify.
-
-                    TWO SUPPRESSIONS ARE ALWAYS ON, ahead of any rule you configure, and they explain
-                    RETURN rows you may expect to see and do not. A return that HAS a refund emits no
-                    RETURN row (2026-08-18) — its refund's own row is the OMS counterpart. A CLOSED
-                    return with NO refund emits no row either (DAR-BE-027, 2026-09-01) — OMS books a
-                    return keyed on the refund, so an unrefunded one never synced and reporting it
-                    missing-in-OMS is a permanent false positive. The second is counted in
-                    requestMetadata.filters.closedUnrefundedReturnsSuppressed, always present, zero
-                    included. Between them, a surviving RETURN row is always an unrefunded return that
-                    has not finished: OPEN, REQUESTED, DECLINED or CANCELED.</description>
             </parameter>
             <parameter name="reconciliationRunResultId"/>
             <parameter name="progressStageCode"/>

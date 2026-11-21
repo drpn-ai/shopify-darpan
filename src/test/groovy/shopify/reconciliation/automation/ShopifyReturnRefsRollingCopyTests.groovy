@@ -7,6 +7,7 @@ import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.RunExtractSupport
 import darpan.reconciliation.automation.SourceSystemConnectorSupport
+import darpan.reconciliation.source.KeepPlanSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
@@ -210,7 +211,9 @@ class ShopifyReturnRefsRollingCopyTests {
         Map artifact = [location: DataManagerSupport.resolveReconciliationRunLocation(ec, "rr-${token}-${++seq}", STAMP), runToken: "parity"]
         ec.message.clearAll()
         Map result = RunExtractSupport.extractApiSource(ec, source, "FILE_1", "File 1", artifact,
-                [windowStartDate: START, windowEndDate: END, timeZone: "UTC"], null, liveExtractor(calls))
+                [windowStartDate: START, windowEndDate: END, timeZone: "UTC"], null, liveExtractor(calls), null,
+                // DAR-BE-318: the caller owns the side's Keep plan; this test is about the live read, so it is the plain one.
+                KeepPlanSupport.todaysRead([]))
         List<String> errors = ec.message.errors.collect { it.toString() }
         ec.message.clearAll()
         return [result: result, errors: errors]

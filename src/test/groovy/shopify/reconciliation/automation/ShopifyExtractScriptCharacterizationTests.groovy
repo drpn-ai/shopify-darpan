@@ -453,14 +453,27 @@ class ShopifyExtractScriptCharacterizationTests {
                 connectionPageSize: 10,
                 lookbackHours     : 6,
                 fileName          : "../escape",
-                sourceFilters     : [[sequenceNum: 1, fieldExpression: "orderReturnStatus", operator: "EXCLUDE_IN",
-                                      filterValues: "IN_PROGRESS"]],
                 connectTimeoutMillis: 1111,
                 readTimeoutMillis : 2222,
                 maxAttempts       : 3,
         ])
         assertFalse(result.dataAvailable as boolean)
         assertSnapshot("extract-return-refs-overrides", result, "return-refs-overrides")
+    }
+
+    @Test
+    void returnRefsDeclaresNoSourceFiltersAndPassesNoneToTheExtract() {
+        // DAR-BE-318 (Task 23): the return-refs extract no longer declares sourceFilters, so the Keep gate places the side in Spark.
+        // Asserted on Moqui's live merged definition, which is what the gate reads.
+        assertFalse(ec.service.getServiceDefinition("${SERVICES}.extract#ShopifyOrderReturnRefs").inParameterNameList.contains("sourceFilters"),
+                "extract#ShopifyOrderReturnRefs must not declare sourceFilters, or the Keep gate keeps the read-time filter")
+        returnRefsResponder = { -> returnRefsResult() }
+        Map result = call("extract#ShopifyOrderReturnRefs", "return-refs-no-filters", window() + [
+                sourceFilters: [[sequenceNum: 1, fieldExpression: "orderReturnStatus", operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"]]])
+        assertEquals([], result.errors)
+        assertEquals(1, returnRefsCalls.size())
+        assertFalse(returnRefsCalls[0].options.containsKey("sourceFilters"), "the extract must hand the support class no filters: ${returnRefsCalls[0].options}")
+        assertEquals([], runtimeFile("${OUTPUT_ROOT}/return-refs-no-filters").list().findAll { it.endsWith(".excluded.json") || it.endsWith(".keep.json") } as List)
     }
 
     @Test

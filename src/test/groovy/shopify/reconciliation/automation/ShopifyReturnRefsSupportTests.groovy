@@ -1,5 +1,8 @@
 package shopify.reconciliation.automation
 
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
+import darpan.reconciliation.source.KeepRules
+import darpan.reconciliation.source.SourceFilterSupport
 import groovy.json.JsonSlurper
 import org.junit.jupiter.api.Test
 
@@ -823,202 +826,76 @@ class ShopifyReturnRefsSupportTests {
         assertNull(record.orderReturnStatus)
     }
 
-    @Test
-    void anOrderReturnStatusExclusionDropsEveryRowOfAMatchingOrderIncludingItsRefunds() {
-        // The feature, restated for the order-level field (DAR-BE-026): an operator excludes
-        // IN_PROGRESS and every row belonging to an order whose return has not finished is dropped.
-        //
-        // This is a DELIBERATE widening over the per-return field it replaces. orderReturnStatus is an
-        // order-wide aggregate, so it lands on refund rows too — which is the point: a refund row
-        // carries no per-return status, so under the old field it was unreachable by any rule. The
-        // trade is real and was accepted knowingly: a refund on an in-progress order is dropped along
-        // with the return, so if OMS holds that refund it will now report missing-in-Shopify.
-        //
-        // Both nodes are the live shapes probed on gorjana 2026-09-01: an IN_PROGRESS order carrying a
-        // refund plus an unrefunded OPEN return, and a RETURNED order that must survive untouched.
+    private static final List<Map<String, Object>> KEEP_FILTERS = [
+            [sequenceNum: 1, fieldExpression: "orderReturnStatus", operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"],
+            [sequenceNum: 2, fieldExpression: "orderId", operator: "EXCLUDE_IN", filterValues: "8103"]]
+
+    /** Three orders: one in progress (refund + open return), one returned (refund + closed unrefunded return), one with no returnStatus. */
+    private static Closure statusOrdersExecutor() {
         Map inProgress = [
-                id              : "gid://shopify/Order/8001",
-                legacyResourceId: "8001",
-                name            : "#8001",
-                createdAt       : "2026-05-01T08:00:00Z",
-                returnStatus    : "IN_PROGRESS",
-                refunds         : [[id: "gid://shopify/Refund/801", createdAt: "2026-05-01T09:00:00Z"]],
-                returns         : [nodes: [
-                        [id: "gid://shopify/Return/802", status: "OPEN", createdAt: "2026-05-01T09:10:00Z", refunds: []],
-                ]],
-        ]
+                id: "gid://shopify/Order/8001", legacyResourceId: "8001", name: "#8001", createdAt: "2026-05-01T08:00:00Z",
+                returnStatus: "IN_PROGRESS",
+                refunds: [[id: "gid://shopify/Refund/801", createdAt: "2026-05-01T09:00:00Z"]],
+                returns: [nodes: [[id: "gid://shopify/Return/802", status: "OPEN", createdAt: "2026-05-01T09:10:00Z", refunds: []]]]]
         Map finished = [
-                id              : "gid://shopify/Order/8010",
-                legacyResourceId: "8010",
-                name            : "#8010",
-                createdAt       : "2026-05-01T08:00:00Z",
-                returnStatus    : "RETURNED",
-                refunds         : [[id: "gid://shopify/Refund/811", createdAt: "2026-05-01T09:00:00Z"]],
-                returns         : [nodes: [
-                        [id: "gid://shopify/Return/812", status: "CLOSED", createdAt: "2026-05-01T09:10:00Z", refunds: []],
-                ]],
-        ]
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+                id: "gid://shopify/Order/8010", legacyResourceId: "8010", name: "#8010", createdAt: "2026-05-01T08:00:00Z",
+                returnStatus: "RETURNED",
+                refunds: [[id: "gid://shopify/Refund/811", createdAt: "2026-05-01T09:00:00Z"]],
+                returns: [nodes: [[id: "gid://shopify/Return/812", status: "CLOSED", createdAt: "2026-05-01T09:10:00Z", refunds: []]]]]
+        Map noStatus = [
+                id: "gid://shopify/Order/8103", legacyResourceId: "8103", name: "#8103", createdAt: "2026-05-01T08:00:00Z",
+                refunds: [[id: "gid://shopify/Refund/9103", createdAt: "2026-05-01T09:20:00Z"]],
+                returns: [nodes: [[id: "gid://shopify/Return/8103", status: "CLOSED", createdAt: "2026-05-01T09:30:00Z", refunds: []]]]]
+        return { Map cfg, String doc, Map vars, Map opts ->
             return adapt(doc, [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: inProgress], [cursor: "c2", node: finished]],
-                    pageInfo: [hasNextPage: false, endCursor: "c2"],
-            ]]])
-        }
-        // fieldExpression is the BARE record field, not the stored JSONPath: callers reduce it via
-        // SourceFilterSupport.toRecordFieldRules before dispatch (AutomationRuntimeSupport,
-        // ReconciliationSavedRunSupport). The getter must never reduce it a second time.
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
-                                              operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"]]
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [sourceFilters: filters], executor)
-
-        List records = (List) result.records
-        // TWO RULES ARE RUNNING HERE and the counts are what tell them apart — read this before
-        // "fixing" the number below back to 2. The control order 8010 is RETURNED with a CLOSED,
-        // unrefunded return, which is a realistic Shopify shape and also exactly the one DAR-BE-027
-        // suppresses, so its return row (812) is gone for a reason that has nothing to do with the
-        // exclusion under test. The exclusion's own excludedCount still says 2, proving it took the
-        // in-progress order's two rows and nothing else.
-        assertEquals(1, result.recordCount, "the RETURNED order's refund is the only survivor: ${records}")
-        assertTrue(records.any { ((Map) it).refundOrReturnId == "811" }, "its refund must survive: ${records}")
-        assertTrue(records.every { ((Map) it).refundOrReturnId != "801" },
-                "the in-progress order's REFUND row must be excluded too — the widening this field exists for: ${records}")
-        assertTrue(records.every { ((Map) it).refundOrReturnId != "802" },
-                "the in-progress order's return must be excluded: ${records}")
-
-        Map metadataFilters = (Map) ((Map) result.requestMetadata).filters
-        List configured = (List) metadataFilters.configuredExclusions
-        assertEquals(1, configured.size())
-        assertEquals(2, ((Map) configured[0]).excludedCount,
-                "both rows of the in-progress order count against the RULE, and only those: ${configured}")
-        assertEquals(1, metadataFilters.get("closedUnrefundedReturnsSuppressed"),
-                "812 was dropped by the closed-unrefunded rule, not by the exclusion: ${metadataFilters}")
-    }
-
-    @Test
-    void aRuleThatMatchesNothingStillAppearsInTheMetadataWithAZeroCount() {
-        // A missing entry would read as "the rule was never applied", which is exactly the silent
-        // no-op this feature exists to remove. Mirrors OmsReturnsSourceSupport.buildMetadata.
-        Map node = [
-                id              : "gid://shopify/Order/8002",
-                legacyResourceId: "8002",
-                name            : "#8002",
-                createdAt       : "2026-05-01T08:00:00Z",
-                returnStatus    : "RETURNED",
-                // The refund is what makes this order emit a row at all since DAR-BE-027: its CLOSED
-                // unrefunded return is suppressed. Left CLOSED deliberately rather than flipped to
-                // OPEN — a RETURNED order whose return is still OPEN is not a shape Shopify produces,
-                // and this test has no reason to invent one.
-                refunds         : [[id: "gid://shopify/Refund/804", createdAt: "2026-05-01T09:20:00Z"]],
-                returns         : [nodes: [[id: "gid://shopify/Return/805", status: "CLOSED",
-                                             createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
-        ]
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return adapt(doc, [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: node]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]])
-        }
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
-                                              operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"]]
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [sourceFilters: filters], executor)
-
-        assertEquals(1, result.recordCount)
-        List configured = (List) ((Map) ((Map) result.requestMetadata).filters).configuredExclusions
-        assertEquals(1, configured.size(), "a rule that matched nothing must still be reported: ${configured}")
-        assertEquals(0, ((Map) configured[0]).excludedCount)
-    }
-
-    @Test
-    void anIncludeRuleKeepsOnlyListedStatusesAndCountsAbsentSeparately() {
-        // DAR-BE-054. orderReturnStatus is stamped on every row by toRecords, so a FIELD_ABSENT drop
-        // here means Shopify itself returned no returnStatus for the order — worth counting apart
-        // from a value the rule simply does not allow, because the two call for different fixes.
-        Closure orderNode = { String id, Object returnStatus ->
-            Map node = [
-                    id              : "gid://shopify/Order/${id}".toString(),
-                    legacyResourceId: id,
-                    name            : "#${id}".toString(),
-                    createdAt       : "2026-05-01T08:00:00Z",
-                    refunds         : [[id: "gid://shopify/Refund/9${id}".toString(),
-                                        createdAt: "2026-05-01T09:20:00Z"]],
-                    returns         : [nodes: [[id: "gid://shopify/Return/8${id}".toString(), status: "CLOSED",
-                                                 createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
-            ]
-            if (returnStatus != null) node.put("returnStatus", returnStatus)
-            return node
-        }
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return adapt(doc, [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: orderNode("8101", "RETURNED")],
-                               [cursor: "c2", node: orderNode("8102", "IN_PROGRESS")],
-                               [cursor: "c3", node: orderNode("8103", null)]],
+                    edges   : [[cursor: "c1", node: inProgress], [cursor: "c2", node: finished], [cursor: "c3", node: noStatus]],
                     pageInfo: [hasNextPage: false, endCursor: "c3"],
             ]]])
         }
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
-                                              operator: "INCLUDE_IN", filterValues: "RETURNED"]]
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [sourceFilters: filters], executor)
-
-        assertEquals(1, result.recordCount, "only the RETURNED order qualifies")
-        Map entry = (Map) ((List) ((Map) ((Map) result.requestMetadata).filters).configuredExclusions)[0]
-        assertEquals("INCLUDE_IN", entry.operator)
-        assertEquals(1, entry.excludedCount, "IN_PROGRESS, dropped on its value")
-        assertEquals(1, entry.fieldAbsentCount, "no returnStatus from Shopify at all")
     }
 
     @Test
-    void noConfiguredRulesLeavesConfiguredExclusionsAbsentEntirely() {
-        Map node = [
-                id              : "gid://shopify/Order/8003",
-                legacyResourceId: "8003",
-                name            : "#8003",
-                createdAt       : "2026-05-01T08:00:00Z",
-                refunds         : [],
-                returns         : [nodes: [[id: "gid://shopify/Return/806", status: "OPEN",
-                                             createdAt: "2026-05-01T09:30:00Z", refunds: []]]],
-        ]
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            return adapt(doc, [ok: true, data: [orders: [
-                    edges   : [[cursor: "c1", node: node]],
-                    pageInfo: [hasNextPage: false, endCursor: "c1"],
-            ]]])
+    void everyEventIsWrittenWhateverTheFilters() {
+        // DAR-BE-318 (Task 23): the extract no longer filters, whatever sourceFilters it is handed (null, empty, valid, malformed).
+        // Spark Keep (darpan core) sets records aside. The CLOSED-unrefunded suppression is a built-in and stays: 812 and 8103's
+        // closed return are never rows, and are counted.
+        List<List<Map<String, Object>>> variants = [null, [], KEEP_FILTERS,
+                [[sequenceNum: 1, fieldExpression: "orderReturnStatus", operator: "INCLUDE_ONLY", filterValues: "IN_PROGRESS"]]]
+        variants.eachWithIndex { List<Map<String, Object>> filters, int i ->
+            Map options = filters == null ? [:] : [sourceFilters: filters]
+            Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                    "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", options, statusOrdersExecutor())
+            assertEquals([], result.errors, "variant ${i}")
+            assertEquals(["801", "802", "811", "9103"], ((List<Map>) result.records)*.refundOrReturnId, "variant ${i}")
+            assertEquals(4, result.recordCount)
+            Map metadataFilters = (Map) ((Map) result.requestMetadata).filters
+            assertFalse(metadataFilters.containsKey("configuredExclusions"), "no read-time exclusion block: ${metadataFilters}")
+            assertEquals(2, metadataFilters.get("closedUnrefundedReturnsSuppressed"), "built-in suppression unchanged: ${metadataFilters}")
+            // orderReturnStatus still rides on every row, for Keep to read.
+            assertEquals(["IN_PROGRESS", "IN_PROGRESS", "RETURNED", null], ((List<Map>) result.records)*.orderReturnStatus)
         }
-
-        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
-
-        assertEquals(1, result.recordCount, "nothing is excluded when no rules are configured")
-        Map filters = (Map) ((Map) result.requestMetadata).filters
-        assertFalse(filters.containsKey("configuredExclusions"),
-                "no rules configured means the key is absent, not an empty list: ${filters}")
     }
 
     @Test
-    void aMalformedRuleFailsBeforeAnyRequestIsMade() {
-        // Parsed pre-flight so a bad rule is one clean error, not N identical mid-window failures on
-        // fetch-pool threads. The executor asserts it was never called.
-        List<String> executorCalls = []
-        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
-            executorCalls.add("called")
-            return adapt(doc, [ok: true, data: [orders: [edges: [], pageInfo: [hasNextPage: false]]]])
-        }
-        // EXCLUDE_IN is the only supported operator; anything else must be rejected, not ignored.
-        List<Map<String, Object>> filters = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
-                                              operator: "INCLUDE_ONLY", filterValues: "IN_PROGRESS"]]
-
+    void theUnfilteredEventsAreExactlyWhatTheReadTimeFilterWasHandedAndItsOutcomeIsPinned() {
         Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [sourceFilters: filters], executor)
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], statusOrdersExecutor())
+        List<Map> events = (List<Map>) result.records
+        List<Map<String, Object>> parsed = SourceFilterSupport.parseRules(KEEP_FILTERS)
+        // applyToRecords does not mutate its input: what Keep is handed is what the old filter was handed.
+        String before = groovy.json.JsonOutput.toJson(events)
+        Map old = SourceFilterSupport.applyToRecords(events, parsed)
+        assertEquals(before, groovy.json.JsonOutput.toJson(events))
+        ExcludedRecordsSidecar.discard((Map) old.excludedCollector)
 
-        assertTrue(executorCalls.isEmpty(), "no Shopify request may be made when a rule is malformed")
-        assertFalse(((List) result.errors).isEmpty(), "a malformed rule must surface as an error")
-        assertEquals(0, result.recordCount)
-        assertFalse((Boolean) result.dataAvailable)
+        // 801 and 802 (IN_PROGRESS: rule 1), 9103 (order 8103: rule 2), 811 kept.
+        assertEquals(["811"], ((List<Map>) old.records)*.refundOrReturnId)
+        assertEquals([[1, 2, 0], [2, 1, 0]], ((List<Map>) old.configuredExclusions).collect {
+            [it.sequenceNum, it.excludedCount, it.fieldAbsentCount]
+        })
+        List<Map> keepRules = SourceFilterSupport.toKeepRules(parsed)
+        KeepRules.validate(keepRules)
+        assertEquals(["A:1", "A:2"], keepRules*.id)
     }
 
     private static Map authConfig() {
@@ -1331,30 +1208,27 @@ class ShopifyReturnRefsSupportTests {
                 "2026-10-29T00:00:00Z", "2026-10-30T00:00:00Z", options, executor)
     }
 
-    private static final List<Map<String, Object>> EXCLUDE_IN_PROGRESS = [[sequenceNum: 1, fieldExpression: "orderReturnStatus",
-                                                                          operator: "EXCLUDE_IN", filterValues: "IN_PROGRESS"]]
-
     @Test
-    void anOpenRebuiltReturnIsInProgressSoTheInProgressExclusionTakesIt() {
-        // Dolls Kill RS_RETURNS_2 2026-10-31: 7327623053569's return was still open, the tenant excludes
-        // IN_PROGRESS, and the row was reported only because it carried no orderReturnStatus at all.
+    void anOpenRebuiltReturnIsInProgressAndIsWrittenWhateverTheFilters() {
+        // Dolls Kill RS_RETURNS_2 2026-10-31: 7327623053569's return was still open. The row carries orderReturnStatus
+        // IN_PROGRESS so Keep can set it aside; the extract itself no longer excludes it.
         Map result = rebuild(
                 [event("170389095383297", "return_created", "7327623053569", "2026-10-29T07:36:05Z", ["49829642371"])],
-                [], [], [], false, [sourceFilters: EXCLUDE_IN_PROGRESS])
+                [], [], [], false, [sourceFilters: KEEP_FILTERS])
 
-        assertEquals(0, result.recordCount, "${result.records}")
+        assertEquals(1, result.recordCount, "${result.records}")
+        assertEquals("IN_PROGRESS", ((Map) ((List) result.records)[0]).orderReturnStatus)
         Map filters = (Map) ((Map) result.requestMetadata).filters
-        assertEquals(1, ((Map) ((List) filters.configuredExclusions)[0]).excludedCount)
+        assertFalse(filters.containsKey("configuredExclusions"), "${filters}")
     }
 
     @Test
     void aRebuiltRowCarriesTheOrderStatusShopifyWouldShowAndSaysWhereItCameFrom() {
         Map result = rebuild(
                 [event("1", "return_created", "6872256348291", "2026-10-29T23:34:50Z", ["49143316611"], "#GOR196861210-R1")],
-                [event("2", "return_closed", "6872256348291", "2026-10-29T23:36:07Z", [], "#GOR196861210-R1")],
-                [], [], false, [sourceFilters: EXCLUDE_IN_PROGRESS])
+                [event("2", "return_closed", "6872256348291", "2026-10-29T23:36:07Z", [], "#GOR196861210-R1")])
 
-        assertEquals(1, result.recordCount, "RETURNED is not excluded by the IN_PROGRESS rule")
+        assertEquals(1, result.recordCount)
         Map row = (Map) ((List) result.records)[0]
         assertEquals("RETURNED", row.orderReturnStatus)
         assertEquals("events", row.orderReturnStatusSource, "derived, not Shopify's own Order.returnStatus")

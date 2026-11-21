@@ -41,7 +41,6 @@
                 "pageSize": 100,
                 "connectionPageSize": 50,
                 "lookbackHours": 3,
-                "sourceFilters": null,
                 "connectTimeoutMillis": 30000,
                 "readTimeoutMillis": 60000,
                 "maxAttempts": 2
