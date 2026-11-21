@@ -3,11 +3,15 @@
   DAR-BE-318 plan 3b-1 (ruling P3b1-9). What the Shopify endpoints do that darpan core must know without naming Shopify: set
   here, on the core connector rows by primary key (the other fields stay core's), never in core.
 
-  excludedRecordsSidecar: whether the extract writes the records its source filters set aside beside its file
-  (ExcludedRecordsSidecar.writeBeside). A kept-copy slice writes that side file exactly when this says Y.
-    SHOPIFY Y, SHOPIFY_ORDER_LINE_UNITS Y: the orders and line-unit extracts collect what their filters drop
-      (ShopifyExcludedSidecarTests, ShopifyOrderLineUnitSupportTests).
-    SHOPIFY_RETURN_REFS N: the return-refs extract filters client-side and keeps none of what it drops.
+  excludedRecordsSidecar: whether the records Keep sets aside are written beside the extract (the excluded-records side
+  file). No Shopify extract filters at the read since DAR-BE-318 plan 3b-2b (Tasks 21-23): darpan's Spark Keep writes it
+  when this says Y, and a kept-copy slice exactly when this says Y.
+    SHOPIFY Y, SHOPIFY_ORDER_LINE_UNITS Y: Spark Keep writes the side file for the orders and line-unit extracts.
+    SHOPIFY_RETURN_REFS N: its read never wrote one, so a run that sets events aside reads them as unknown, as before.
+
+  keepLinesJson []: Shopify declares no built-in Keep line; the extracts drop nothing of their own that a rule could name
+    (zero-quantity and orphan lines, a return that has a refund, a closed unrefunded return stay in the extractor). A
+    Spark-placed connector row carries an explicit value, so a row that lost its line is never taken for one that has none.
 
   servingProjectionServiceName: SHOPIFY_RETURN_REFS names project#ShopifyReturnRefsKeptRecords, which refuses every side (the
     live read adds a 3 h lookback a slice cannot), so even a connector flag flipped to keep instants never serves a copy.
@@ -20,9 +24,9 @@
       rounded, widened one) and reads live; see ShopifyReturnRefsRollingCopyTests.
 -->
 <entity-facade-xml type="darpan-seed">
-    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY" excludedRecordsSidecar="Y"/>
-    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_ORDER_LINE_UNITS" excludedRecordsSidecar="Y"/>
-    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_RETURN_REFS" excludedRecordsSidecar="N"
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY" excludedRecordsSidecar="Y" keepLinesJson="[]"/>
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_ORDER_LINE_UNITS" excludedRecordsSidecar="Y" keepLinesJson="[]"/>
+    <darpan.reconciliation.SourceSystemConnector systemEnumId="SHOPIFY_RETURN_REFS" excludedRecordsSidecar="N" keepLinesJson="[]"
             servingProjectionServiceName="reconciliation.ShopifyOrderExtractionServices.project#ShopifyReturnRefsKeptRecords"
             datasetReadParametersJson='{"preserveWindowInstants":true,"lookbackHours":0}'/>
 </entity-facade-xml>

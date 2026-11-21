@@ -20,9 +20,9 @@
 
     <service verb="extract" noun="ShopifyBulkWindowExtract" type="interface">
         <description>In-parameters of the Bulk Operations window extracts (extract#ShopifyOrders,
-            extract#ShopifyOrderLineUnits), which share submit, poll, download and file writing. Each
-            implementing service that still filters at the read (the line units, the return refs) declares its
-            own sourceFilters. extract#ShopifyOrders declares none: Spark Keep filters its orders (DAR-BE-318).</description>
+            extract#ShopifyOrderLineUnits), which share submit, poll, download and file writing. None of
+            them takes sourceFilters or filters at the read (DAR-BE-318): every record is written and Spark Keep
+            (darpan core) sets aside what a run's rules reject.</description>
         <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyExtractOutputs"/>
         <in-parameters>
             <parameter name="shopifyAuthConfigId" required="true">
