@@ -158,31 +158,13 @@
 
             orphanLineItemCount and droppedZeroQuantity are always present in requestMetadata, and
             an orphan also raises a run warning: a unit lost in assembly vanishes from the Shopify
-            side, where the anti-join reports it as a genuine difference.</description>
-        <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyBulkWindowExtract"/>
-        <in-parameters>
-            <parameter name="sourceFilters" type="List">
-                <description>Optional record rules, same semantics as the OMS extractors (EXCLUDE_IN /
-                    INCLUDE_IN). Each rule names a top-level UNIT field and a comma-separated list of
-                    exact values; it is evaluated against every emitted unit, after assembly, and
-                    rejected units are dropped before the extract file is written and counted per rule
-                    in requestMetadata.filters.configuredExclusions (excludedCount, plus
-                    fieldAbsentCount for an INCLUDE_IN rule whose field is missing). Parsed before the
-                    bulk operation is submitted, so a malformed rule fails pre-flight. Absent or empty
-                    means no rules and output identical to an unfiltered extract.
+            side, where the anti-join reports it as a genuine difference.
 
-                    The fields this exists for (spec 2026-09-30 D1, D2): unitState (OPEN, FULFILLED,
-                    REMOVED, or UNKNOWN when Shopify sent no quantities) and orderReturnStatus
-                    (Shopify's Order.returnStatus - NO_RETURN, RETURN_REQUESTED, IN_PROGRESS,
-                    INSPECTION_COMPLETE, RETURNED, RETURN_FAILED), stamped on every unit.</description>
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-            </parameter>
-        </in-parameters>
+            NO SOURCE FILTERS (DAR-BE-318): this service declares no sourceFilters parameter, so every
+            assembled unit is written and Spark Keep (darpan core) sets aside what a run's rules reject
+            (unitState, orderReturnStatus and the rest are ordinary unit fields to it). Dropping zero-quantity
+            lines and orphan line items stays here: that is the shape of the unit grain, not a user rule.</description>
+        <implements service="reconciliation.ShopifyOrderExtractionServices.extract#ShopifyBulkWindowExtract"/>
         <out-parameters>
             <parameter name="recordCount" type="Integer">
                 <description>Number of UNITS written, not orders.</description>

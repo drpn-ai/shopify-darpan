@@ -318,7 +318,7 @@ class ShopifyExtractScriptCharacterizationTests {
     // ---- extract#ShopifyOrderLineUnits ------------------------------------------------------
 
     @Test
-    void lineUnitsHappyPathAssemblesFiltersAndWarns() {
+    void lineUnitsHappyPathAssemblesEveryUnitAndWarns() {
         bulkResponder = { -> lineUnitsBulkResult() }
         Map result = call("extract#ShopifyOrderLineUnits", "line-units-happy", [
                 windowStart           : "2026-08-01T00:00:00Z",
@@ -362,11 +362,25 @@ class ShopifyExtractScriptCharacterizationTests {
     }
 
     @Test
-    void lineUnitsInvalidSourceFilterFailsBeforeBulk() {
-        Map result = call("extract#ShopifyOrderLineUnits", "line-units-filter-error", window() + [
-                sourceFilters: [[sequenceNum: 1, fieldExpression: "unitState", operator: "NOPE", filterValues: "OPEN"]]])
-        assertTrue(bulkCalls.isEmpty())
-        assertSnapshot("extract-line-units-filter-error", result, "line-units-filter-error")
+    void everyUnitIsWrittenWhateverTheFilters() {
+        // DAR-BE-318 (Task 22): the line-units extract no longer declares sourceFilters, so Spark Keep owns the filtering (the gate
+        // reads the declared parameters). Valid, invalid and absent filters all write every unit and report no filter block.
+        assertFalse(ec.service.getServiceDefinition("${SERVICES}.extract#ShopifyOrderLineUnits").inParameterNameList.contains("sourceFilters"),
+                "extract#ShopifyOrderLineUnits must not declare sourceFilters, or the Keep gate keeps the read-time filter")
+        List<List<Map>> variants = [null, [], [[sequenceNum: 1, fieldExpression: "unitState", operator: "EXCLUDE_IN", filterValues: "REMOVED"]],
+                                    [[sequenceNum: 1, fieldExpression: "unitState", operator: "NOPE", filterValues: "OPEN"]]]
+        variants.eachWithIndex { List<Map> filters, int i ->
+            bulkResponder = { -> lineUnitsBulkResult() }
+            Map result = this.call("extract#ShopifyOrderLineUnits", "line-units-all-${i}", window() + (filters == null ? [:] : [sourceFilters: filters]))
+            assertEquals([], result.errors, "variant ${i}")
+            assertEquals(5, result.recordCount, "variant ${i}")
+            assertEquals(["OPEN", "FULFILLED", "REMOVED", "UNKNOWN", "OPEN"], records(result)*.unitState, "variant ${i}")
+            assertFalse(((Map) result.requestMetadata).containsKey("filters"))
+            // The grain's own drops stay at flattening and stay counted.
+            assertEquals([1, 1], [((Map) result.requestMetadata).orphanLineItemCount, ((Map) result.requestMetadata).droppedZeroQuantity])
+            assertEquals([], runtimeFile("${OUTPUT_ROOT}/line-units-all-${i}").list().findAll { it.endsWith(".excluded.json") } as List)
+        }
+        assertEquals(4, bulkCalls.size(), "a malformed rule no longer fails pre-flight: it never reaches the extract")
     }
 
     @Test

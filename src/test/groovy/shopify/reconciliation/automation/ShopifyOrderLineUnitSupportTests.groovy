@@ -1,12 +1,13 @@
 package shopify.reconciliation.automation
 
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
+import darpan.reconciliation.source.KeepRules
+import darpan.reconciliation.source.SourceFilterSupport
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNull
-import static org.junit.jupiter.api.Assertions.assertThrows
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -240,103 +241,51 @@ class ShopifyOrderLineUnitSupportTests {
         assertEquals(1, result.clampedStateLineCount)
     }
 
-    // ---- Source filters on unit rows ----------------------------------------------------------
+    // ---- Keep parity (DAR-BE-318 Task 22) -----------------------------------------------------
+    // The extract no longer filters. Spark Keep (darpan core) sets aside by the same rules; Spark is not on this repo's test
+    // classpath, so parity is pinned as: the unfiltered units are exactly what the old read-time filter was handed, the old
+    // filter's outcome on them is pinned, and the same rules translate to valid Keep rules.
 
-    private static List<Map<String, Object>> rules(String field, String operator, String values) {
-        return ShopifyOrderLineUnitSupport.parseSourceFilters([[
-                sequenceNum: 1, fieldExpression: field, operator: operator, filterValues: values]])
-    }
-
-    @Test
-    void anIncludeRuleOnUnitStateKeepsOnlyOpenUnits() {
-        List units = (List) ShopifyOrderLineUnitSupport.assembleUnits(liveShapedJsonl()).units
-        Map filtered = ShopifyOrderLineUnitSupport.applySourceFilters(units, rules("unitState", "INCLUDE_IN", "OPEN"))
-
-        List kept = (List) filtered.units
-        assertEquals(2, kept.size())
-        assertTrue(kept.every { ((Map) it).unitState == "OPEN" })
-        Map entry = (Map) ((List) filtered.configuredExclusions)[0]
-        assertEquals(3, entry.excludedCount)
-        assertEquals(0, entry.fieldAbsentCount)
-        assertEquals("INCLUDE_IN", entry.operator)
-        assertEquals(["OPEN"], entry.values)
-    }
+    private static final List<Map> KEEP_FILTERS = [
+            [sequenceNum: 1, fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "OPEN,FULFILLED"],
+            [sequenceNum: 2, fieldExpression: "orderReturnStatus", operator: "EXCLUDE_IN", filterValues: "RETURNED"],
+            [sequenceNum: 3, fieldExpression: "orderSourceName", operator: "EXCLUDE_IN", filterValues: "pos"],
+    ]
 
     @Test
-    void anExcludeRuleOnOrderReturnStatusDropsThatOrdersUnits() {
-        List units = (List) ShopifyOrderLineUnitSupport.assembleUnits(liveShapedJsonl()).units
-        Map filtered = ShopifyOrderLineUnitSupport.applySourceFilters(units,
-                rules("orderReturnStatus", "EXCLUDE_IN", "RETURNED"))
+    void theUnfilteredUnitsAreExactlyWhatTheReadTimeFilterWasHandedAndItsOutcomeIsPinned() {
+        List jsonl = liveShapedJsonl() + [
+                stateOrder("7170000000001", "#GOR1", "NO_RETURN", "pos"),
+                stateLine("17000000000001", "7170000000001", "SKU-P", 2, 2, 1),
+                stateOrder("7170000000002", "#GOR2", null),
+                stateLine("17000000000002", "7170000000002", "SKU-N", 1, 1, 1),
+                stateLine("17000000000003", "7170000000002", "SKU-Z", 0, 0, 0),   // zero quantity: grain shape
+                stateLine("17000000000004", "7179999999999", "SKU-O", 1, 1, 1)]   // orphan: grain shape
+        Map assembled = ShopifyOrderLineUnitSupport.assembleUnits(jsonl)
+        List<Map> units = (List<Map>) assembled.units
+        // The grain's own drops stay at flattening, counted; they are not user rules and Keep never sees them.
+        assertEquals(1, assembled.droppedZeroQuantity)
+        assertEquals(1, assembled.orphanLineItemCount)
+        assertEquals(8, units.size())
+        assertFalse(units.any { it.shopifyLineId in ["17000000000003", "17000000000004"] })
 
-        List kept = (List) filtered.units
-        assertEquals(4, kept.size())
-        assertFalse(kept.any { ((Map) it).shopifyOrderId == "7163614199939" })
-        assertEquals(1, ((Map) ((List) filtered.configuredExclusions)[0]).excludedCount)
-    }
-
-    @Test
-    void anIncludeRuleAgainstAnAbsentFieldCountsFieldAbsentApart() {
-        List units = (List) ShopifyOrderLineUnitSupport.assembleUnits([
-                stateOrder("7157143306371", "#GOR197201510", null),
-                stateLine("16445243916419", "7157143306371", "SKU-1", 1, 1, 0)]).units
-        Map filtered = ShopifyOrderLineUnitSupport.applySourceFilters(units,
-                rules("orderReturnStatus", "INCLUDE_IN", "NO_RETURN"))
-
-        assertTrue(((List) filtered.units).isEmpty())
-        Map entry = (Map) ((List) filtered.configuredExclusions)[0]
-        assertEquals(0, entry.excludedCount)
-        assertEquals(1, entry.fieldAbsentCount)
-    }
-
-    @Test
-    void aRuleThatMatchesNothingIsStillReported() {
-        List units = (List) ShopifyOrderLineUnitSupport.assembleUnits(liveShapedJsonl()).units
-        Map filtered = ShopifyOrderLineUnitSupport.applySourceFilters(units,
-                rules("orderReturnStatus", "EXCLUDE_IN", "IN_PROGRESS"))
-
-        assertEquals(units, filtered.units)
-        assertEquals(0, ((Map) ((List) filtered.configuredExclusions)[0]).excludedCount)
-    }
-
-    @Test
-    void noRulesLeavesTheUnitsByteIdenticalAndReportsNoExclusions() {
-        List units = (List) ShopifyOrderLineUnitSupport.assembleUnits(liveShapedJsonl()).units
+        List<Map<String, Object>> parsed = SourceFilterSupport.parseRules(KEEP_FILTERS)
+        // applyToRecords does not mutate its input: what Keep is handed is what the old filter was handed.
         String before = groovy.json.JsonOutput.toJson(units)
+        Map old = SourceFilterSupport.applyToRecords(units, parsed)
+        assertEquals(before, groovy.json.JsonOutput.toJson(units))
+        ExcludedRecordsSidecar.discard((Map) old.excludedCollector)
 
-        for (Object noRules : [null, []]) {
-            Map filtered = ShopifyOrderLineUnitSupport.applySourceFilters(units,
-                    ShopifyOrderLineUnitSupport.parseSourceFilters(noRules))
-            assertEquals(before, groovy.json.JsonOutput.toJson(filtered.units))
-            assertNull(filtered.configuredExclusions, "absent, not empty: an empty list reads as 'applied'")
-        }
-    }
+        List<String> keptKeys = ((List<Map>) old.records).collect { "${it.shopifyLineId}/${it.unitOrdinal}".toString() }
+        // 16445243916419 FULFILLED (kept), 16448517505155 REMOVED (set aside), 16457549676675 REMOVED + RETURNED (set aside),
+        // 16451984851075 two OPEN (kept), 17000000000001 pos (both set aside), 17000000000002 OPEN, absent returnStatus (kept: EXCLUDE_IN).
+        assertEquals(["16445243916419/1", "16451984851075/1", "16451984851075/2", "17000000000002/1"], keptKeys)
+        assertEquals([[1, 2, 0], [2, 0, 0], [3, 2, 0]], ((List<Map>) old.configuredExclusions).collect {
+            [it.sequenceNum, it.excludedCount, it.fieldAbsentCount]
+        })
 
-    @Test
-    void aMalformedRuleFailsAtParseTimeBeforeAnyBulkCall() {
-        assertThrows(IllegalArgumentException) {
-            ShopifyOrderLineUnitSupport.parseSourceFilters([[
-                    sequenceNum: 1, fieldExpression: "unitState", operator: "MATCHES", filterValues: "OPEN"]])
-        }
-    }
-
-    // DAR-UI-044: what a rule drops is kept for the conclude pass, whole.
-    @Test
-    void rejectedUnitsAreCollectedForTheConcludePass() {
-        List units = [[shopifyOrderId: "1", shopifyLineId: "9", unitState: "REMOVED", stateOrdinal: 1],
-                      [shopifyOrderId: "1", shopifyLineId: "9", unitState: "OPEN", stateOrdinal: 1]]
-        Map r = ShopifyOrderLineUnitSupport.applySourceFilters(units,
-                ShopifyOrderLineUnitSupport.parseSourceFilters([[sequenceNum: 1, fieldExpression: "unitState",
-                                                                 operator: "INCLUDE_IN", filterValues: "OPEN"]]))
-        Map c = (Map) r.excludedCollector
-        assertEquals(1, c.total)
-        // A collector spills to disk; there is no in-heap records list to read.
-        assertEquals("REMOVED", ExcludedRecordsSidecar.records(c)[0].unitState)
-        ExcludedRecordsSidecar.discard(c)
-    }
-
-    @Test
-    void noRulesCollectNothing() {
-        Map r = ShopifyOrderLineUnitSupport.applySourceFilters([[shopifyOrderId: "1"]], [])
-        assertEquals(null, r.excludedCollector)
+        List<Map> keepRules = SourceFilterSupport.toKeepRules(parsed)
+        KeepRules.validate(keepRules)
+        assertEquals(["A:1", "A:2", "A:3"], keepRules*.id)
     }
 }

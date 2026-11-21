@@ -1,7 +1,5 @@
 package shopify.reconciliation.automation
 
-import darpan.reconciliation.source.SourceFilterSupport
-
 /**
  * DAR-BE-050. Assembles bulk-operation JSONL lines into one record per ORDER LINE UNIT.
  *
@@ -9,6 +7,9 @@ import darpan.reconciliation.source.SourceFilterSupport
  * arrives as its own line whose __parentId points at that Order. The ORDERS extractor treats every
  * line as an order, which is why connection fields are rejected for that source; for this source
  * the child lines ARE the records (ShopifyGraphqlQueryBuilder's allowsBulkConnections opt-in).
+ *
+ * Filtering is not done here (DAR-BE-318): the zero-quantity and orphan drops below are the shape of the grain and stay
+ * (counted in requestMetadata); every user rule is Spark Keep's, in darpan core.
  *
  * Pure: no transport, no ExecutionContext. Takes the already-parsed lines from
  * ShopifyBulkOperationClient.eachJsonlRecord, which needs no change - it is grain-agnostic.
@@ -126,34 +127,6 @@ class ShopifyOrderLineUnitSupport {
                 droppedZeroQuantity  : droppedZeroQuantity,
                 unknownStateLineCount: unknownStateLineCount,
                 clampedStateLineCount: clampedStateLineCount]
-    }
-
-    /**
-     * Parsed ONCE, before the bulk operation is submitted, so a malformed rule fails pre-flight
-     * rather than after a multi-minute bulk run. Throws IllegalArgumentException on a bad rule.
-     *
-     * fieldExpression arrives ALREADY reduced to a bare top-level record field: the dispatchers
-     * (AutomationRuntimeSupport, ReconciliationSavedRunSupport) run stored JSONPath expressions
-     * through SourceFilterSupport.toRecordFieldRules. Do NOT reduce it again here.
-     */
-    static List<Map<String, Object>> parseSourceFilters(Object sourceFilters) {
-        return SourceFilterSupport.parseRules(sourceFilters)
-    }
-
-    /**
-     * Applies configured source filters to each UNIT row - so a rule may name a unit field
-     * (unitState) as well as an order field stamped on every unit (orderReturnStatus). Same verdict
-     * handling and per-rule reporting as ShopifyReturnRefsSupport and the OMS getters.
-     *
-     * @return [units: kept units (the SAME list when there are no rules),
-     *          configuredExclusions: one entry per rule, or null when no rules are configured]
-     */
-    static Map applySourceFilters(List units, List<Map<String, Object>> parsedFilters) {
-        // DAR-BE-063: one filter-and-sidecar loop for every extractor lives in core.
-        Map applied = SourceFilterSupport.applyToRecords(units, parsedFilters)
-        if (applied.configuredExclusions == null) return [units: units, configuredExclusions: null]
-        return [units: applied.records, configuredExclusions: applied.configuredExclusions,
-                excludedCollector: applied.excludedCollector]
     }
 
     /** gid://shopify/LineItem/15210699161731 -> 15210699161731; already-numeric passes through. */

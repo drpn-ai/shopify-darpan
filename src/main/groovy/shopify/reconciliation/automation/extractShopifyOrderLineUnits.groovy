@@ -10,7 +10,6 @@ import shopify.graphql.ShopifySourceCatalog
 // class reference compiles fine (Groovy treats it as a dynamic property) and fails only at RUNTIME.
 // A green build proves nothing about it. extractShopifyReturnRefs imports its support class for
 // the same reason.
-import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import shopify.reconciliation.automation.ShopifyExtractSupport
 import shopify.reconciliation.automation.ShopifyOrderLineUnitSupport
 
@@ -50,20 +49,8 @@ try {
     recordCount = 0
     return
 }
-// Configured source filters run CLIENT-side on each emitted UNIT: Shopify's search syntax knows
-// nothing of tenant rules, and unitState does not exist until assembly derives it. Parsed here,
-// BEFORE the bulk operation is submitted, so a malformed rule fails in seconds rather than after a
-// multi-minute bulk run. Empty when unconfigured.
-List<Map<String, Object>> parsedSourceFilters
-try {
-    parsedSourceFilters = ShopifyOrderLineUnitSupport.parseSourceFilters(sourceFilters)
-} catch (Exception e) {
-    errors = [normalize(e.message) ?: "Configured exclusion rules are invalid."]
-    warnings = outputWarnings
-    dataAvailable = false
-    recordCount = 0
-    return
-}
+// DAR-BE-318: no source filters are read or applied here. The extract writes every unit and Spark Keep (darpan core) sets aside
+// what a run's rules reject, so this service declares no sourceFilters parameter (the Keep gate reads that declaration).
 String searchQuery = (String) builtBulkQuery.searchQuery
 String outputBaseLocation = ShopifyExtractSupport.resolveOutputBaseLocation(ec, outputLocation,
         automationExecutionId, automationId, configIdValue)
@@ -74,7 +61,6 @@ Map<String, Object> bulkOperationResult = ShopifyExtractSupport.runBulkQuery(aut
 List<Map<String, Object>> records = []
 Map assembledUnits = [units: [], orphanLineItemCount: 0, droppedZeroQuantity: 0,
                       unknownStateLineCount: 0, clampedStateLineCount: 0]
-Map filteredUnits = [units: [], configuredExclusions: null]
 ShopifyExtractSupport.ExtractFileWriter extractWriter = new ShopifyExtractSupport.ExtractFileWriter(outputDirectory)
 try {
     if (bulkOperationResult.ok == false) {
@@ -90,13 +76,9 @@ try {
         }
         assembledUnits = ShopifyOrderLineUnitSupport.assembleUnits(jsonlRecords)
         jsonlRecords = null
-        // Tested against the assembled UNIT, never the raw JSONL line: a rule may name unitState,
-        // which exists only after assembly, or orderReturnStatus, which assembly stamps on every unit.
-        filteredUnits = ShopifyOrderLineUnitSupport.applySourceFilters((List) assembledUnits.units, parsedSourceFilters)
-        records = (List<Map<String, Object>>) filteredUnits.units
+        records = (List<Map<String, Object>>) assembledUnits.units
     }
     if (outputErrors) {
-        ExcludedRecordsSidecar.discard((Map) filteredUnits?.excludedCollector)
         errors = outputErrors
         warnings = outputWarnings
         dataAvailable = false
@@ -113,8 +95,6 @@ try {
     fileName = outputFileName
     fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
     fileTypeEnumId = "DftJson"
-    ShopifyExtractSupport.writeExcludedSidecar(ec, (Map) filteredUnits?.excludedCollector, outputBaseLocation,
-            outputFileName, outputWarnings)
     recordCount = records.size()
     dataAvailable = records.size() > 0
     Map<String, Object> metadata = ShopifyExtractSupport.bulkRequestMetadata("SHOPIFY_GRAPHQL_ORDER_LINE_UNITS",
@@ -130,11 +110,6 @@ try {
             // and an include rule on a state drops them. Always present for the same reason as above.
             unknownStateLineCount: assembledUnits.unknownStateLineCount,
             clampedStateLineCount: assembledUnits.clampedStateLineCount,
-            // Absent (not an empty block) when no rules are configured, matching the OMS getters: a
-            // block on every extract would read as "a filter always applies". Every configured rule
-            // is listed, a zero-count one included.
-            filters              : filteredUnits.configuredExclusions != null ?
-                    [configuredExclusions: filteredUnits.configuredExclusions] : null,
     ])
     metadata.shopifyCalls = ShopifyCallTally.stop()
     requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>
