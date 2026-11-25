@@ -7,6 +7,7 @@ import shopify.graphql.ShopifySourceCatalog
 // fine (Groovy treats it as a dynamic property) and fails only at RUNTIME. Import every support class.
 import shopify.reconciliation.automation.ShopifyExtractSupport
 import shopify.reconciliation.automation.ShopifyOrderPaymentSignal
+import shopify.reconciliation.automation.ShopifyOrderLinesNesting
 
 import java.sql.Timestamp
 
@@ -67,13 +68,16 @@ if (idKeys && !(normalize(lookupKeyField) in [null, "id", "legacyResourceId"])) 
     recordCount = 0
     return
 }
+// DAR-BE-368: a read asked for its lines (withLineItems) selects them and puts each back under its order.
+boolean readLines = withLineItems == true
+String ordersSource = readLines ? ShopifySourceCatalog.SHOPIFY_ORDERS_WITH_LINES : ShopifySourceCatalog.SHOPIFY_ORDERS
 List<Map<String, Object>> builtBulkQueries = []
 try {
     builtBulkQueries = idKeys ?
             idKeys.collate(ShopifyExtractSupport.LOOKUP_IDS_PER_BULK).collect { List<String> chunk ->
-                ShopifyExtractSupport.buildIdsBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS, "DarpanShopifyOrdersByIds", chunk)
+                ShopifyExtractSupport.buildIdsBulkQuery(ordersSource, "DarpanShopifyOrdersByIds", chunk)
             } :
-            [ShopifyExtractSupport.buildOrdersWindowBulkQuery(ShopifySourceCatalog.SHOPIFY_ORDERS,
+            [ShopifyExtractSupport.buildOrdersWindowBulkQuery(ordersSource,
                     "DarpanShopifyOrdersByDateWindow", (String) window.startText, (String) window.endText,
                     normalize(windowFieldName))]
 } catch (Exception e) {
@@ -96,6 +100,13 @@ Map<String, Integer> paymentSummary = [paymentTransactionYCount: 0, paymentTrans
 ShopifyExtractSupport.ExtractFileWriter extractWriter = new ShopifyExtractSupport.ExtractFileWriter(outputDirectory)
 Map<String, Object> bulkOperationResult = null
 int extractedRecordCount = 0
+Closure<Void> writeOrder = { Map<String, Object> record ->
+    extractedRecordCount++
+    Map<String, Object> order = normalizeShopifyOrderRecord.call(record)
+    ShopifyOrderPaymentSignal.tally(paymentSummary, order)
+    extractWriter.add(order)
+}
+int orphanLines = 0
 try {
     for (Map<String, Object> builtBulkQuery : builtBulkQueries) {
         // A read by key runs one bulk query per chunk; only the last chunk's raw JSONL is kept beside the extract.
@@ -106,11 +117,13 @@ try {
             outputErrors.addAll(ShopifyExtractSupport.bulkErrors(bulkOperationResult))
             break
         }
-        ShopifyBulkOperationClient.eachJsonlRecord((File) bulkOperationResult.jsonlFile) { Map<String, Object> record ->
-            extractedRecordCount++
-            Map<String, Object> order = normalizeShopifyOrderRecord.call(record)
-            ShopifyOrderPaymentSignal.tally(paymentSummary, order)
-            extractWriter.add(order)
+        if (readLines) {
+            ShopifyOrderLinesNesting nesting = new ShopifyOrderLinesNesting(writeOrder)
+            ShopifyBulkOperationClient.eachJsonlRecord((File) bulkOperationResult.jsonlFile) { Map<String, Object> record -> nesting.add(record) }
+            nesting.finish()
+            orphanLines += nesting.orphanLines
+        } else {
+            ShopifyBulkOperationClient.eachJsonlRecord((File) bulkOperationResult.jsonlFile, writeOrder)
         }
     }
     if (outputErrors) {
@@ -133,6 +146,7 @@ try {
     // DAR-BE-064 canary: the presence OPP rule (<=) cannot see a missing signal, so report it here.
     String paymentCanary = ShopifyOrderPaymentSignal.canaryWarning(paymentSummary)
     if (paymentCanary) outputWarnings.add(paymentCanary)
+    if (orphanLines) outputWarnings.add("${orphanLines} Shopify order line(s) arrived away from their order and were left off it.".toString())
     recordCount = extractWriter.recordCount
     dataAvailable = extractWriter.recordCount > 0
     Map<String, Object> metadata = ShopifyExtractSupport.bulkRequestMetadata("SHOPIFY_GRAPHQL_ORDERS", configIdValue,
@@ -142,6 +156,8 @@ try {
             keptRecordCount         : extractWriter.recordCount,
             paymentTransactionYCount: paymentSummary.paymentTransactionYCount,
             paymentTransactionNCount: paymentSummary.paymentTransactionNCount,
+            withLineItems           : readLines ? true : null,
+            orphanLines             : readLines ? orphanLines : null,
     ])
     metadata.shopifyCalls = ShopifyCallTally.stop()
     requestMetadata = metadata.findAll { it.value != null } as Map<String, Object>

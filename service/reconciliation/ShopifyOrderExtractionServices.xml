@@ -118,6 +118,11 @@
                 <description>The record field lookupKeys name. Only the order id (id or legacyResourceId) is
                     supported; any other field is refused.</description>
             </parameter>
+            <parameter name="withLineItems" type="Boolean" default-value="false">
+                <description>DAR-BE-368. Also read each order's lines (id, SKU, name, quantity, current and unfulfilled
+                    quantity) as lineItems on the order, for an audit finding to show. Asked per check, through the
+                    automation source's parameters; off, the read is unchanged.</description>
+            </parameter>
         </in-parameters>
     </service>
 

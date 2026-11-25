@@ -131,6 +131,34 @@ class ShopifyExtractScriptCharacterizationTests {
     }
 
     @Test
+    void ordersWithLineItemsSelectTheLinesAndPutEachUnderItsOrder() {
+        // DAR-BE-368: asked withLineItems, the bulk query selects the lines and each order carries its own; off, it selects none.
+        bulkResponder = { -> [ok: true, bulkOperation: [id: "gid://shopify/BulkOperation/8", status: "COMPLETED"], records: [
+                [id: "gid://shopify/Order/2001", name: "#2001", displayFulfillmentStatus: "UNFULFILLED", transactions: []],
+                [id: "gid://shopify/LineItem/71", sku: "SKU-A", name: "Anorak", quantity: 2, currentQuantity: 2,
+                 unfulfilledQuantity: 2, __parentId: "gid://shopify/Order/2001"],
+                [id: "gid://shopify/LineItem/72", sku: "SKU-B", name: "Cap", quantity: 1, currentQuantity: 0,
+                 unfulfilledQuantity: 0, __parentId: "gid://shopify/Order/2001"],
+                [id: "gid://shopify/Order/2002", name: "#2002", displayFulfillmentStatus: "FULFILLED", transactions: []],
+        ]] }
+        Map result = call("extract#ShopifyOrders", "orders-with-lines", window() + [withLineItems: true])
+        assertEquals([], result.errors)
+        assertTrue(bulkCalls[-1].queryDocument.toString().contains("lineItems"), "the lines are selected")
+        List<Map> written = records(result)
+        assertEquals(["2001", "2002"], written*.id)
+        assertEquals([[id: "71", sku: "SKU-A", name: "Anorak", quantity: 2, currentQuantity: 2, unfulfilledQuantity: 2],
+                      [id: "72", sku: "SKU-B", name: "Cap", quantity: 1, currentQuantity: 0, unfulfilledQuantity: 0]],
+                written[0].lineItems)
+        assertEquals([], written[1].lineItems)
+        assertEquals(2, result.recordCount)
+        assertEquals(0, ((Map) result.requestMetadata).orphanLines)
+
+        bulkResponder = { -> ordersBulkResult() }
+        call("extract#ShopifyOrders", "orders-without-lines", window())
+        assertFalse(bulkCalls[-1].queryDocument.toString().contains("lineItems"), "off, the read is unchanged")
+    }
+
+    @Test
     void ordersStreamEveryOrderInOrderWhateverTheFilters() {
         // DAR-BE-162 / DAR-BE-318: more orders than the old filter batch held (500), each written in the order read, none dropped.
         int total = 500 * 2 + 37

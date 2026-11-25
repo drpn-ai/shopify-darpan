@@ -6,6 +6,8 @@ class ShopifySourceCatalog {
     static final String SHOPIFY_ORDERS = "SHOPIFY_ORDERS"
     static final String SHOPIFY_ORDER_RETURN_REFS = "SHOPIFY_ORDER_RETURN_REFS"
     static final String SHOPIFY_ORDER_LINE_UNITS = "SHOPIFY_ORDER_LINE_UNITS"
+    /** DAR-BE-368: the orders read with each order's lines; bulk only, never offered in the field picker. */
+    static final String SHOPIFY_ORDERS_WITH_LINES = "SHOPIFY_ORDERS_WITH_LINES"
     static final List<String> SUPPORTED_API_VERSIONS = [
         "2025-07",
         "2025-10",
@@ -383,6 +385,36 @@ class ShopifySourceCatalog {
         ]).asImmutable(),
     ].asImmutable()
 
+    /**
+     * DAR-BE-368 (Aditi: "include the line item details, expecially the SKU"). The orders bulk read plus each order's lines
+     * (id, SKU, name, quantity, current and unfulfilled quantity), asked only by an extract given withLineItems. It may
+     * select a connection because its extractor expects the __parentId child lines and puts them back under their order
+     * (ShopifyOrderLinesNesting); SHOPIFY_ORDERS keeps refusing them, so no other read changes.
+     */
+    private static final Map<String, Object> ORDER_WITH_LINES_SOURCE = (ORDER_SOURCE + [
+        sourceDefinitionId          : SHOPIFY_ORDERS_WITH_LINES,
+        label                       : "Shopify orders with lines",
+        description                 : "Shopify orders, each with its line items, for an audit finding to show.",
+        allowsBulkConnections       : true,
+        defaultBulkSelectedFieldPaths: ((ORDER_SOURCE.defaultBulkSelectedFieldPaths as List) + [
+            "lineItems.id",
+            "lineItems.sku",
+            "lineItems.name",
+            "lineItems.quantity",
+            "lineItems.currentQuantity",
+            "lineItems.unfulfilledQuantity",
+        ]).asImmutable(),
+        fields                      : ((ORDER_SOURCE.fields as List) + [
+            [fieldPath: "lineItems.currentQuantity", label: "Line Item Current Quantity", type: "Integer", selectionPath: "lineItems.edges.node.currentQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            [fieldPath: "lineItems.unfulfilledQuantity", label: "Line Item Unfulfilled Quantity", type: "Integer", selectionPath: "lineItems.edges.node.unfulfilledQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+        ]).asImmutable(),
+    ]).asImmutable()
+
+    /** Sources an extract reads by id but the field picker never lists (listSources). */
+    private static final Map<String, Map<String, Object>> EXTRACT_ONLY_SOURCES = [
+        (SHOPIFY_ORDERS_WITH_LINES): ORDER_WITH_LINES_SOURCE,
+    ].asImmutable()
+
     private static final Map<String, Map<String, Object>> SOURCES_BY_ID = [
         (SHOPIFY_ORDERS)            : ORDER_SOURCE,
         (SHOPIFY_ORDER_RETURN_REFS): ORDER_RETURN_REFS_SOURCE,
@@ -399,7 +431,7 @@ class ShopifySourceCatalog {
 
     static Map<String, Object> getSource(Object sourceDefinitionId, Object apiVersion = null) {
         String sourceId = normalizeSourceDefinitionId(sourceDefinitionId)
-        Map<String, Object> source = SOURCES_BY_ID[sourceId]
+        Map<String, Object> source = SOURCES_BY_ID[sourceId] ?: EXTRACT_ONLY_SOURCES[sourceId]
         if (!source) return null
         String normalizedApiVersion = normalizeApiVersion(apiVersion)
         if (normalizedApiVersion && !supportsApiVersion(source, normalizedApiVersion)) return null
