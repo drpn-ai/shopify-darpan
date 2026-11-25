@@ -47,6 +47,11 @@ class ShopifyCompletedReturnsSupport {
     nodes {
       legacyResourceId
       name
+      createdAt
+      displayFinancialStatus
+      displayFulfillmentStatus
+      totalPriceSet { shopMoney { amount currencyCode } }
+      totalRefundedSet { shopMoney { amount currencyCode } }
       lineItems(first: $linesFirst) { nodes { id unfulfilledQuantity } }
       returns(first: $returnsFirst) {
         nodes {
@@ -143,8 +148,17 @@ class ShopifyCompletedReturnsSupport {
             return hasNode(ret.get(kind == REFUNDED ? "refunds" : "exchangeLineItems"))
         } as List<Map>
         if (!matched) return null
+        // DAR-BE-359 (Aditi: "why is it mostly dashes"): what a finding needs to say what happened, from this same read,
+        // under the names the audit's record facts already know (orderDate, displayFinancialStatus, totalPrice).
+        Map total = shopMoney(order.get("totalPriceSet"))
         return [orderId                    : orderId,
                 orderName                  : normalize(order.get("name"))?.replaceFirst(/^#/, ""),
+                orderDate                  : normalize(order.get("createdAt")),
+                displayFinancialStatus     : normalize(order.get("displayFinancialStatus")),
+                displayFulfillmentStatus   : normalize(order.get("displayFulfillmentStatus")),
+                totalPrice                 : total?.amount,
+                currencyCode               : total?.currencyCode,
+                totalRefunded              : shopMoney(order.get("totalRefundedSet"))?.amount,
                 returnIds                  : matched.collect { bareId(it.get("id")) }.join(","),
                 returnCount                : matched.size(),
                 closedAt                   : matched.collect { normalize(it.get("closedAt")) }.max(),
@@ -175,6 +189,13 @@ class ShopifyCompletedReturnsSupport {
             Long at = millis(((Map) refund).get("createdAt"))
             at != null && (returnCreatedMillis == null || at >= returnCreatedMillis)
         }
+    }
+
+    /** A MoneyBag's shop-currency amount and code; null when the read gave none. */
+    private static Map shopMoney(Object bag) {
+        Object money = bag instanceof Map ? ((Map) bag).get("shopMoney") : null
+        String amount = money instanceof Map ? normalize(((Map) money).get("amount")) : null
+        return amount ? [amount: amount, currencyCode: normalize(((Map) money).get("currencyCode"))] : null
     }
 
     private static boolean hasNode(Object connection) {

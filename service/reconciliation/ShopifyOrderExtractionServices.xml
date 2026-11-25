@@ -295,7 +295,8 @@
                     checked against NetSuite (Dolls Kill, RAILS). Rows carry orderId, orderName (no leading #),
                     returnIds, returnCount, closedAt and originalUnfulfilledQuantity (the order's own lines Shopify has not
                     fulfilled, leaving out the lines an exchange added: an exchange reaches NetSuite only once its original
-                    order is fulfilled); lookbackHours does not apply.</description>
+                    order is fulfilled), and (DAR-BE-359) the order's orderDate, displayFinancialStatus,
+                    displayFulfillmentStatus, totalPrice, currencyCode and totalRefunded; lookbackHours does not apply.</description>
             </parameter>
             <parameter name="lookbackHours" type="Integer" default-value="3">
                 <description>Hours the fetch/emit floor is widened BEFORE windowStart, so a Shopify

@@ -155,6 +155,29 @@ class ShopifyCompletedReturnsSupportTests {
                 "refunded keeps its meaning: a Loop return with no linked refund is not refunded there")
     }
 
+    // DAR-BE-359 (Aditi: "why is it mostly dashes"): the finding says the order's status, total and date from this read.
+    @Test
+    void aRowCarriesTheOrdersStatusTotalsAndDate() {
+        Map paid = order("18932332134710", "#8683CAN", [ret("37716066614", "CLOSED", "2026-10-20T10:00:00Z", true, false)]) +
+                [createdAt: "2026-10-18T17:05:00Z", displayFinancialStatus: "REFUNDED", displayFulfillmentStatus: "FULFILLED",
+                 totalPriceSet: [shopMoney: [amount: "182.3", currencyCode: "CAD"]], totalRefundedSet: [shopMoney: [amount: "182.3", currencyCode: "CAD"]]]
+        Map record = ShopifyCompletedReturnsSupport.toRecord(paid, "refunded", WINDOW_START, WINDOW_END, [])
+        assertEquals(["2026-10-18T17:05:00Z", "REFUNDED", "FULFILLED", "182.3", "CAD", "182.3"],
+                [record.orderDate, record.displayFinancialStatus, record.displayFulfillmentStatus, record.totalPrice, record.currencyCode, record.totalRefunded])
+
+        Map bare = ShopifyCompletedReturnsSupport.toRecord(order("1", "#DK1", [ret("11", "CLOSED", "2026-10-20T10:00:00Z", true, false)]),
+                "refunded", WINDOW_START, WINDOW_END, [])
+        assertEquals([null, null, null], [bare.orderDate, bare.totalPrice, bare.totalRefunded], "a read that gave none says none")
+
+        ["refunded", "orderRefunded"].each { String kind ->
+            String query = null
+            ShopifyCompletedReturnsSupport.extract(CONFIG, kind, WINDOW_START, WINDOW_END, [:],
+                    { Map cfg, String q, Map vars, Map opts -> query = q; page([], false) })
+            ["createdAt", "displayFinancialStatus", "displayFulfillmentStatus", "totalPriceSet { shopMoney { amount currencyCode } }",
+             "totalRefundedSet { shopMoney { amount currencyCode } }"].each { assertTrue(query.contains(it), "${kind} asks for ${it}".toString()) }
+        }
+    }
+
     @Test
     void anOrderAtTheReturnsLimitIsWarnedAbout() {
         List returns = (1..ShopifyCompletedReturnsSupport.RETURNS_PER_ORDER).collect {
