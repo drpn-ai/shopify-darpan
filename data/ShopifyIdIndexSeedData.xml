@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DAR-BE-374: the ids the ID index takes from what Darpan already reads from Shopify (run extracts and kept copies; the index
+  never calls Shopify itself). Paths are the extracts' normalised record fields: orders (id = legacyResourceId, name =
+  "#GOR123"), return refs (refundOrReturnId with its type, and the order it belongs to). Product rows: a tenant adds,
+  overrides or hides fields in TenantIdIndexField.
+-->
+<entity-facade-xml type="darpan-seed">
+    <darpan.idindex.IdIndexSource systemEnumId="SHOPIFY" systemCode="SHOPIFY" recordKind="ORDER" idField="id" isActive="Y"
+            description="Shopify orders"/>
+    <darpan.idindex.IdIndexField systemEnumId="SHOPIFY" fieldId="SHOPIFY_ORDER_ID" fieldPath="id" role="OWN"
+            description="The order's numeric id (legacyResourceId)"/>
+    <darpan.idindex.IdIndexField systemEnumId="SHOPIFY" fieldId="SHOPIFY_ORDER_NAME" fieldPath="name" role="OWN"
+            description="The order name (#GOR123)"/>
+
+    <darpan.idindex.IdIndexSource systemEnumId="SHOPIFY_RETURN_REFS" systemCode="SHOPIFY" recordKindField="refundOrReturnType"
+            recordKindMapJson="{&quot;REFUND&quot;:&quot;REFUND&quot;,&quot;RETURN&quot;:&quot;RETURN&quot;}" idField="refundOrReturnId"
+            isActive="Y" description="Shopify refunds and returns"/>
+    <darpan.idindex.IdIndexField systemEnumId="SHOPIFY_RETURN_REFS" fieldId="SHOPIFY_RR_ID" fieldPath="refundOrReturnId" role="OWN"
+            description="The refund's or return's id"/>
+    <darpan.idindex.IdIndexField systemEnumId="SHOPIFY_RETURN_REFS" fieldId="SHOPIFY_RR_ORDER" fieldPath="orderId" role="REF" refRecordKind="ORDER"
+            description="The Shopify order it belongs to"/>
+</entity-facade-xml>
