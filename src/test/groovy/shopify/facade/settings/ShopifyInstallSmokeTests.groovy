@@ -95,7 +95,9 @@ class ShopifyInstallSmokeTests {
         assertEquals("shpat_new_c1", installed.accessToken)
         assertEquals("shprt_new", installed.refreshToken)
         assertNotNull(installed.accessTokenExpiresDate)
-        assertEquals("N", installed.canReadOrders, "a new connection is enabled for nothing until someone switches a run")
+        // OC93, on by default (Aditi 2026-11-28): no endpoint row means every endpoint is enabled, and the legacy flag is 'Y'
+        // so a not-yet-run ENDPOINT_ACCESS migration (which turns 'N' into every endpoint off) keeps it on too.
+        assertEquals("Y", installed.canReadOrders, "a fresh install is on by default in every environment")
 
         def pasted = ec.entity.find("darpan.shopify.ShopifyAuthConfig").condition("shopifyAuthConfigId", "PASTED_TOKEN_CONFIG").useCache(false).one()
         assertEquals("shpat_pasted", pasted.accessToken)

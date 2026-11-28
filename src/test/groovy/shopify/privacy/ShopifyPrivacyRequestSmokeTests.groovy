@@ -12,6 +12,7 @@ import org.moqui.context.ExecutionContext
 import java.nio.file.Path
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNotNull
 import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
@@ -34,7 +35,7 @@ class ShopifyPrivacyRequestSmokeTests {
         Path backendRoot = ReconciliationSmokeTestSupport.resolveBackendRoot()
         ec = ReconciliationSmokeTestSupport.initMoqui(backendRoot, "shopify-privacy-smoke")
         ReconciliationSmokeTestSupport.loadSeedData(ec, "component://darpan/data/AuditSeedData.xml",
-                "component://darpan/data/DarpanSystemSourceSeedData.xml")
+                "component://darpan/data/DarpanSystemSourceSeedData.xml", "component://darpan/data/DatasetSeedData.xml")
         ReconciliationSmokeTestSupport.seedCompanyScope(ec)
         ec.artifactExecution.disableAuthz()
     }
@@ -48,6 +49,9 @@ class ShopifyPrivacyRequestSmokeTests {
             ec.entity.find(it).condition("companyUserGroupId", "in", [A, B]).deleteAll()
         }
         ec.entity.find("darpan.shopify.ShopifyAuthConfig").condition("companyUserGroupId", "in", [A, B]).deleteAll()
+        ["darpan.idindex.RecordIdIndex", "darpan.idindex.RecordIdIndexCursor", "darpan.dataset.DatasetRead", "darpan.dataset.Dataset"].each {
+            ec.entity.find(it).condition("companyUserGroupId", "in", [A, B]).deleteAll()
+        }
         [A, B].each { String t ->
             upsert("moqui.security.UserGroup", [userGroupId: t, description: t, groupTypeEnumId: TenantAccessSupport.DARPAN_COMPANY_GROUP_TYPE_ENUM_ID])
             upsert("darpan.audit.Audit", [auditId: "${t}_MC".toString(), companyUserGroupId: t, auditCode: "month-close", auditName: "Month close", periodEnumId: "AUDP_MONTH"])
@@ -125,6 +129,19 @@ class ShopifyPrivacyRequestSmokeTests {
     }
 
     @Test
+    void shopRedactAlsoDropsTheStoreConnectionsKeptCopiesAndIdIndexRows() {
+        // OC92: kept copies and the ID index hold the store's order ids, names and amounts and no retention clears them.
+        keptCopy(A, "PRIV_DS_A", "${A}_CFG".toString())
+        keptCopy(B, "PRIV_DS_B", "${B}_CFG".toString())
+        keptCopy(B, "PRIV_DS_B2", "${B}_CFG2".toString())
+        Map result = (Map) call("redact#Shop", [shopDomain: SHOP]).result
+        assertEquals([(A): 1, (B): 1], result.keptCopiesDropped)
+        assertFalse(keptDataLeft(A, "PRIV_DS_A", "${A}_CFG".toString()), "A's copy of this store is gone")
+        assertFalse(keptDataLeft(B, "PRIV_DS_B", "${B}_CFG".toString()), "B's copy of this store is gone")
+        assertTrue(keptDataLeft(B, "PRIV_DS_B2", "${B}_CFG2".toString()), "B's other store keeps its copy and index")
+    }
+
+    @Test
     void idFormsCoverNumericAndGlobalIds() {
         assertEquals(["1001", "gid://shopify/Order/1001"] as Set, ShopifyPrivacySupport.orderIdForms(["gid://shopify/Order/1001"]))
         assertTrue(ShopifyPrivacySupport.orderIdForms(null).isEmpty())
@@ -148,6 +165,31 @@ class ShopifyPrivacyRequestSmokeTests {
                     systemEnumId: r[0], recordType: "order", recordId: r[1], internalId: r[2], sourceConfigId: sourceConfigId,
                     recordData: r[0] == "SHOPIFY" ? "{\"email\":\"shopper@example.com\"}" : "{}"])
         }
+    }
+
+    private void keptCopy(String t, String datasetId, String connection) {
+        java.sql.Timestamp now = ec.user.nowTimestamp
+        upsert("darpan.dataset.Dataset", [datasetId: datasetId, companyUserGroupId: t, systemEnumId: "SHOPIFY", sourceConfigId: connection,
+                optionsHash: "h-${datasetId}".toString(), statusId: "DST_ACTIVE", readRuleEnumId: "DRR_CHANGED_SINCE", idField: "id",
+                stampField: "updatedAt", windowField: "createdAt"])
+        upsert("darpan.dataset.DatasetRead", [datasetId: datasetId, readSeqId: "000001", companyUserGroupId: t, readKindEnumId: "DRK_FULL",
+                statusId: "DRS_DONE", readAt: now])
+        upsert("darpan.idindex.RecordIdIndexCursor", [companyUserGroupId: t, datasetId: datasetId, systemEnumId: "SHOPIFY",
+                connectionId: connection, lastIndexedAt: now])
+        upsert("darpan.idindex.RecordIdIndex", [rowKey: "rk-${datasetId}".toString(), companyUserGroupId: t, idNorm: "1001", idRaw: "1001",
+                systemCode: "SHOPIFY", systemEnumId: "SHOPIFY", connectionId: connection, recordKind: "ORDER", recordKey: "1001",
+                fieldPath: "id", role: "OWN", lastSeenAt: now])
+        File dir = darpan.dataset.DatasetRefreshSupport.datasetDir(ec, t, datasetId)
+        dir.mkdirs()
+        new File(dir, "current.json").text = '{"version":"v1"}'
+    }
+
+    private boolean keptDataLeft(String t, String datasetId, String connection) {
+        return ec.entity.find("darpan.dataset.Dataset").condition([companyUserGroupId: t, datasetId: datasetId]).useCache(false).count() > 0 ||
+                ec.entity.find("darpan.dataset.DatasetRead").condition([companyUserGroupId: t, datasetId: datasetId]).useCache(false).count() > 0 ||
+                ec.entity.find("darpan.idindex.RecordIdIndex").condition([companyUserGroupId: t, connectionId: connection]).useCache(false).count() > 0 ||
+                ec.entity.find("darpan.idindex.RecordIdIndexCursor").condition([companyUserGroupId: t, connectionId: connection]).useCache(false).count() > 0 ||
+                darpan.dataset.DatasetRefreshSupport.datasetDir(ec, t, datasetId).exists()
     }
 
     private List records(String t) {

@@ -1,6 +1,7 @@
 package shopify.privacy
 
 import darpan.facade.common.TenantScopedFinder
+import darpan.ops.ErrorChatSupport
 import groovy.json.JsonSlurper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -11,6 +12,9 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.sql.Timestamp
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 import static darpan.common.ValueSupport.normalize
 
@@ -37,6 +41,8 @@ class ShopifyWebhookSupport {
     static final String TOPIC_DATA_REQUEST = "customers/data_request"
     static final String TOPIC_CUSTOMER_REDACT = "customers/redact"
     static final String TOPIC_SHOP_REDACT = "shop/redact"
+    /** Shopify's deadline for handing a customer's data to the store. */
+    static final int DATA_REQUEST_DAYS = 30
 
     /** {@code [status, message]}. headers: topic, hmac, shopDomain, webhookId (already read from the request). */
     static Map<String, Object> handle(def ec, Map<String, String> headers, String body) {
@@ -85,10 +91,14 @@ class ShopifyWebhookSupport {
                     break
                 case TOPIC_DATA_REQUEST:
                     Map report = (Map) call(ec, "report#CustomerData", [shopDomain: shop, orderIds: payload.orders_requested]).report
-                    Map tenants = (Map) (report?.tenants ?: [:])
-                    // Shopify expects the store to receive this data from the app; the operator sends it. Log counts only.
-                    logger.warn("Shopify customer data request for {} (webhook {}): records held per tenant {} — an operator must send them to the store",
-                            shop, webhookId, tenants.collectEntries { k, v -> [k, (v as List).size()] })
+                    // OC91: the store is owed this data within 30 days and an operator sends it, so someone has to be told.
+                    // Darpan's alerts room only (never a client room), ids and counts only: never recordData, email or phone.
+                    LocalDate due = ((Timestamp) ec.user.nowTimestamp).toInstant().atZone(ZoneOffset.UTC).toLocalDate().plusDays(DATA_REQUEST_DAYS)
+                    String alert = dataRequestAlert(shop, webhookId, payload, report, due)
+                    if (!ErrorChatSupport.postAlertText(ec, alert)) {
+                        // Not posted (no alerts room set, or delivery failed): an ERROR line reaches the daily error digest.
+                        logger.error("Shopify customer data request not posted to the alerts room: {}", alert)
+                    }
                     break
                 case TOPIC_CUSTOMER_REDACT:
                     Map redacted = (Map) call(ec, "redact#Customer", [shopDomain: shop, orderIds: payload.orders_to_redact]).result
@@ -98,8 +108,8 @@ class ShopifyWebhookSupport {
                     // Only tenants connected through THIS app: a pasted-token connection to the same store is not the
                     // app's to break (the store uninstalled the app, not Darpan).
                     Map result = (Map) call(ec, "redact#Shop", [shopDomain: shop, shopifyAppId: normalize(app.shopifyAppId)]).result
-                    logger.info("Shopify shop redact for {} (webhook {}): cleared {}, deleted {}, needs review {}", shop, webhookId,
-                            result?.connectionsCleared, result?.deletedByTenant, result?.needsReview)
+                    logger.info("Shopify shop redact for {} (webhook {}): cleared {}, deleted {}, kept copies dropped {}, needs review {}", shop,
+                            webhookId, result?.connectionsCleared, result?.deletedByTenant, result?.keptCopiesDropped, result?.needsReview)
                     break
                 default:
                     logger.info("Shopify webhook topic {} for {} ignored", topic, shop)
@@ -109,6 +119,25 @@ class ShopifyWebhookSupport {
             return [status: 500, message: "error"]
         }
         return [status: 200, message: "ok"]
+    }
+
+    /**
+     * OC91: the alerts-room line for a customers/data_request. Names the store, the webhook, Shopify's customer id, the orders
+     * asked about, and per tenant how many records Darpan holds (their finding and record ids), with the date the store must
+     * have them by. Built from ids only: a record's data, and the payload's email and phone, never go to chat.
+     */
+    static String dataRequestAlert(String shop, String webhookId, Map payload, Map report, LocalDate due) {
+        Object customerId = payload?.customer instanceof Map ? ((Map) payload.customer).id : null
+        List orders = (payload?.orders_requested instanceof Collection ? payload.orders_requested : [payload?.orders_requested]).findAll { it != null } as List
+        Map<String, List<Map>> tenants = (Map<String, List<Map>>) (report?.tenants ?: [:])
+        List<String> held = tenants.findAll { k, v -> v }.collect { String tenantId, List<Map> records ->
+            "${tenantId}: ${records.size()} record${records.size() == 1 ? '' : 's'} (findings ${records*.findingId.unique().join(', ')}; records ${records*.recordId.unique().join(', ')})".toString()
+        }
+        return ("Shopify customer data request for ${shop} (webhook ${webhookId ?: 'n/a'}, customer ${customerId ?: 'n/a'}, " +
+                "orders ${orders ? orders.join(', ') : 'none listed'}). " +
+                (held ? "Darpan holds: ${held.join('; ')}. Send them to the store by ${due} (Shopify allows ${DATA_REQUEST_DAYS} days); " +
+                        "read them with privacy.ShopifyPrivacyRequestServices.report#CustomerData." :
+                        "Darpan holds no records for these orders; tell the store by ${due} that none are held.")).toString()
     }
 
     /** Shopify's payload for each topic, so an unsigned topic header cannot turn one request into another. */

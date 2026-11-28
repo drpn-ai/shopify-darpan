@@ -1,6 +1,8 @@
 package shopify.privacy
 
+import darpan.config.DarpanSettings
 import darpan.facade.common.TenantAccessSupport
+import darpan.ops.ErrorChatSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
 import org.junit.jupiter.api.AfterAll
@@ -13,7 +15,9 @@ import org.moqui.context.ExecutionContext
 import java.nio.file.Path
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNull
+import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
  * DAR-BE-273 — the webhook receiver, run as it runs in production: no user, authz on. What could bite: a forged or
@@ -162,6 +166,49 @@ class ShopifyWebhookSmokeTests {
         assertEquals(200, post("orders/create", shopBody, ShopifyWebhookSupport.signature(SECRET, shopBody)).status, "ignored topic")
         assertEquals(["2001", "2002"], shopifyRecordIds(), "neither deletes anything")
         assertEquals(400, post("shop/redact", "not json", ShopifyWebhookSupport.signature(SECRET, "not json")).status)
+    }
+
+    @Test
+    void aDataRequestReachesTheAlertsRoomWithIdsAndADeadlineButNoPersonalData() {
+        // OC91: the data request is owed to the store within 30 days. A WARN line reached no one; an alert does.
+        List<String> alerts = []
+        DarpanSettings.rowLoader = { -> [(ErrorChatSupport.WEBHOOK_SETTING): [settingValue: "https://chat.example/alerts"]] }
+        DarpanSettings.expire()
+        ErrorChatSupport.postHook = { String url, Map payload -> alerts << (payload.text as String); return [ok: true] }
+        try {
+            String body = JsonOutput.toJson([shop_domain: SHOP, customer: [id: 9, email: "zoe@example.com", phone: "+15550100"],
+                    orders_requested: [2002], data_request: [id: 5]])
+            assertEquals(200, post("customers/data_request", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
+            assertEquals(1, alerts.size(), "one alert per data request")
+            String text = alerts[0]
+            String due = java.time.LocalDate.now(java.time.ZoneOffset.UTC).plusDays(30).toString()
+            [SHOP, "wh-1", "customer 9", "2002", "${T}: 1 record".toString(), "${T}_F2002".toString(), due].each {
+                assertTrue(text.contains(it), "alert names ${it}: ${text}")
+            }
+            ["zoe@example.com", "+15550100"].each { assertFalse(text.contains(it), "alert never carries ${it}") }
+        } finally {
+            ErrorChatSupport.resetForTests()
+            DarpanSettings.resetForTests()
+            DarpanSettings.expire()
+        }
+    }
+
+    @Test
+    void aDataRequestWhoseAlertCannotBePostedStillAnswers200() {
+        // The fallback is an ERROR line (the daily error digest); the webhook itself never fails on it.
+        int tries = 0
+        DarpanSettings.rowLoader = { -> [(ErrorChatSupport.WEBHOOK_SETTING): [settingValue: "https://chat.example/alerts"]] }
+        DarpanSettings.expire()
+        ErrorChatSupport.postHook = { String url, Map payload -> tries++; return [ok: false, statusCode: 500] }
+        try {
+            String body = JsonOutput.toJson([shop_domain: SHOP, customer: [id: 9], orders_requested: [2002], data_request: [id: 5]])
+            assertEquals(200, post("customers/data_request", body, ShopifyWebhookSupport.signature(SECRET, body)).status)
+            assertEquals(1, tries)
+        } finally {
+            ErrorChatSupport.resetForTests()
+            DarpanSettings.resetForTests()
+            DarpanSettings.expire()
+        }
     }
 
     // ---- helpers -------------------------------------------------------------------------------

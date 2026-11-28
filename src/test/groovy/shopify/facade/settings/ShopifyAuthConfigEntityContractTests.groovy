@@ -114,6 +114,19 @@ class ShopifyAuthConfigEntityContractTests {
      * (never re-enabled), so no runtime test here can ever observe DARPAN_ACTIVE_COMPANY_SCOPE
      * filtering regardless of which read shape {@code requireUsableAuthConfig} uses.
      */
+    /**
+     * DAR-OPS-029 S42c (OC64 follow-through): SharedConfigAccessSupport.activeGrants now THROWS when the grant table can't be
+     * read (it returned [], which let an owner delete a config its peers still run on). That only holds if deleteAuthConfig
+     * lets the throw out: a catch here would turn a failed read back into "no grants, delete it". No runtime seam can make
+     * the grant read fail, so the method body is pinned instead.
+     */
+    @Test
+    void deleteAuthConfigChecksGrantsAndCatchesNothingSoAFailedGrantReadFailsTheDelete() {
+        String methodBody = methodSource(supportSource(), "static Map<String, Object> deleteAuthConfig(")
+        assertTrue(methodBody.contains("SharedConfigGrantSupport.hasActiveGrants("), "deleteAuthConfig must check active grants")
+        assertFalse(methodBody.contains("catch"), "deleteAuthConfig must not catch: a failed grant read has to fail the delete")
+    }
+
     @Test
     void requireUsableAuthConfigResolvesThroughFindGlobalUnscopedNotABareEntityFind() {
         String methodBody = methodSource(supportSource(), "static def requireUsableAuthConfig(")
