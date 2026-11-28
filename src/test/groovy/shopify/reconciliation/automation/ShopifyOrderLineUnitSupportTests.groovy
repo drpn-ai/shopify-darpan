@@ -288,4 +288,34 @@ class ShopifyOrderLineUnitSupportTests {
         KeepRules.validate(keepRules)
         assertEquals(["A:1", "A:2", "A:3"], keepRules*.id)
     }
+
+    /**
+     * DAR-OPS-029 S42a (I2 conservation, no OOM). Streamed, the units are the ones the list path makes, in the same order,
+     * and a line that arrives before its order or far from it still becomes its units (the file is read twice).
+     */
+    @Test
+    void streamedUnitsMatchTheListPathEvenWhenLinesArriveAwayFromTheirOrder() {
+        List lines = [
+                [id: "gid://shopify/LineItem/12", __parentId: "gid://shopify/Order/2", quantity: 1, sku: "B"],   // before its order
+                [id: "gid://shopify/Order/1", legacyResourceId: "1", name: "#1", returnStatus: "NO_RETURN", sourceName: "web"],
+                [id: "gid://shopify/LineItem/11", __parentId: "gid://shopify/Order/1", quantity: 2, sku: "A",
+                 currentQuantity: 2, unfulfilledQuantity: 1],
+                [id: "gid://shopify/Order/2", legacyResourceId: "2", name: "#2"],
+                [id: "gid://shopify/LineItem/13", __parentId: "gid://shopify/Order/1", quantity: 0, sku: "Z"],  // zero: dropped
+                [id: "gid://shopify/LineItem/14", __parentId: "gid://shopify/Order/9", quantity: 1, sku: "Q"],  // no order: orphan
+        ]
+        List<Map> streamed = []
+        Map counts = ShopifyOrderLineUnitSupport.streamUnits({ Closure visit -> lines.each { visit.call(it) } }, { Map u -> streamed.add(u) })
+
+        // Literal expectations, not the list path (which now calls streamUnits): the unit a line before its order makes.
+        assertEquals([shopifyOrderId: "2", shopifyLineId: "12", unitOrdinal: 1, shopifyOrderName: "#2", sku: "B", lineItemName: null,
+                      unitState: "UNKNOWN", stateOrdinal: 1, orderReturnStatus: null, orderSourceName: null], streamed[0])
+        assertEquals(["web", "web"], streamed.findAll { it.shopifyOrderId == "1" }*.orderSourceName)
+        assertEquals(["2/12/1", "1/11/1", "1/11/2"], streamed.collect { "${it.shopifyOrderId}/${it.shopifyLineId}/${it.unitOrdinal}".toString() })
+        assertEquals(["OPEN", "FULFILLED"], streamed.findAll { it.shopifyLineId == "11" }*.unitState)
+        assertEquals(1, counts.orphanLineItemCount)
+        assertEquals(1, counts.droppedZeroQuantity)
+        // Conservation: every line is its quantity in units, or counted.
+        assertEquals(3, streamed.size())
+    }
 }

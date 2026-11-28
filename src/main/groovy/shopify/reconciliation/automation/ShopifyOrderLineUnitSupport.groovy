@@ -30,30 +30,42 @@ class ShopifyOrderLineUnitSupport {
     static final String STATE_UNKNOWN = "UNKNOWN"
 
     /**
+     * The units as a list, for a caller that holds its lines already (tests, small reads); see {@link #streamUnits}.
+     *
      * @return [units: List&lt;Map&gt;, orphanLineItemCount: int, droppedZeroQuantity: int,
      *          unknownStateLineCount: int, clampedStateLineCount: int]
      */
     static Map assembleUnits(List jsonlRecords) {
-        Map<String, Map> ordersByGid = [:]
-        List<Map> lineItems = []
+        List<Map> units = []
+        Map counts = streamUnits({ Closure visit -> (jsonlRecords ?: []).each { visit.call(it) } }, { Map unit -> units.add(unit) })
+        return [units: units] + counts
+    }
 
-        // Two passes rather than one. JSONL does put a parent before its children, but relying on
-        // that would turn a truncated or reordered download into silently missing units instead of
-        // a reported orphan count - and a unit missing from the Shopify side is reported by the
-        // anti-join as a real difference, so a parse bug would masquerade as a finding.
-        for (Object raw : (jsonlRecords ?: [])) {
-            if (!(raw instanceof Map)) continue
+    /**
+     * DAR-OPS-029 S42a: the units, each handed to {@code emit} as it is made, so neither the lines nor the units of a long
+     * window are ever held together (the month OOM the orders extract had). {@code eachLine} replays every JSONL line
+     * and is called twice: the first pass keeps each order's few fields a unit carries, the second makes the units, line
+     * items in file order, so the output is the one a single in-memory pass made.
+     *
+     * Two passes rather than one. JSONL does put a parent before its children, but relying on that would turn a
+     * truncated or reordered download into silently missing units instead of a reported orphan count - and a unit
+     * missing from the Shopify side is reported by the anti-join as a real difference, so a parse bug would masquerade
+     * as a finding.
+     *
+     * @return [orphanLineItemCount: int, droppedZeroQuantity: int, unknownStateLineCount: int, clampedStateLineCount: int]
+     */
+    static Map streamUnits(Closure eachLine, Closure emit) {
+        Map<String, Map> ordersByGid = [:]
+        eachLine.call { Object raw ->
+            if (!(raw instanceof Map)) return
             Map record = (Map) raw
-            String parentId = normalize(record.get("__parentId"))
-            if (parentId) {
-                lineItems.add(record)
-            } else {
-                String gid = normalize(record.get("id"))
-                if (gid) ordersByGid.put(gid, record)
-            }
+            if (normalize(record.get("__parentId"))) return
+            String gid = normalize(record.get("id"))
+            if (gid) ordersByGid.put(gid, [id: record.get("id"), legacyResourceId: record.get("legacyResourceId"),
+                                           name: record.get("name"), returnStatus: record.get("returnStatus"),
+                                           sourceName: record.get("sourceName")])
         }
 
-        List<Map> units = []
         int orphanLineItemCount = 0
         int droppedZeroQuantity = 0
         int unknownStateLineCount = 0
@@ -61,24 +73,28 @@ class ShopifyOrderLineUnitSupport {
         Map<String, Integer> ordinalByLine = [:]
         Map<String, Integer> ordinalByLineState = [:]
 
-        for (Map lineItem : lineItems) {
-            Map order = ordersByGid.get(normalize(lineItem.get("__parentId")))
+        eachLine.call { Object raw ->
+            if (!(raw instanceof Map)) return
+            Map lineItem = (Map) raw
+            String parentId = normalize(lineItem.get("__parentId"))
+            if (!parentId) return
+            Map order = ordersByGid.get(parentId)
             if (order == null) {
                 orphanLineItemCount++
-                continue
+                return
             }
 
             String shopifyOrderId = normalize(order.get("legacyResourceId")) ?: legacyId(order.get("id"))
             String shopifyLineId = legacyId(lineItem.get("id"))
             if (!shopifyOrderId || !shopifyLineId) {
                 orphanLineItemCount++
-                continue
+                return
             }
 
             int quantity = toNonNegativeInt(lineItem.get("quantity"))
             if (quantity <= 0) {
                 droppedZeroQuantity++
-                continue
+                return
             }
 
             Integer currentQuantity = toNullableInt(lineItem.get("currentQuantity"))
@@ -108,7 +124,7 @@ class ShopifyOrderLineUnitSupport {
                 ordinalByLineState.put(stateKey, stateOrdinal)
                 // The first six keys are DAR-BE-050's record, in its order; the state fields are
                 // appended after them so that pair's output is unchanged field for field.
-                units.add([
+                emit.call([
                         shopifyOrderId   : shopifyOrderId,
                         shopifyLineId    : shopifyLineId,
                         unitOrdinal      : ordinal,
@@ -122,8 +138,7 @@ class ShopifyOrderLineUnitSupport {
                 ])
             }
         }
-        return [units                : units,
-                orphanLineItemCount  : orphanLineItemCount,
+        return [orphanLineItemCount  : orphanLineItemCount,
                 droppedZeroQuantity  : droppedZeroQuantity,
                 unknownStateLineCount: unknownStateLineCount,
                 clampedStateLineCount: clampedStateLineCount]

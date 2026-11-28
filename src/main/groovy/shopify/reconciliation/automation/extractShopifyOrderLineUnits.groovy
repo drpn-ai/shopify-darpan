@@ -58,9 +58,7 @@ File outputDirectory = ShopifyExtractSupport.outputDirectory(ec, outputBaseLocat
 Map<String, Object> bulkOperationResult = ShopifyExtractSupport.runBulkQuery(authConfig,
         (String) builtBulkQuery.queryDocument, context, outputDirectory)
 
-List<Map<String, Object>> records = []
-Map assembledUnits = [units: [], orphanLineItemCount: 0, droppedZeroQuantity: 0,
-                      unknownStateLineCount: 0, clampedStateLineCount: 0]
+Map assembledUnits = [orphanLineItemCount: 0, droppedZeroQuantity: 0, unknownStateLineCount: 0, clampedStateLineCount: 0]
 ShopifyExtractSupport.ExtractFileWriter extractWriter = new ShopifyExtractSupport.ExtractFileWriter(outputDirectory)
 try {
     if (bulkOperationResult.ok == false) {
@@ -68,21 +66,19 @@ try {
     } else {
         // extractShopifyOrders maps each JSONL line straight to a record, because every line there IS
         // an order. Here the LineItem child lines are the records, so the flat JSONL is assembled into
-        // one entry per UNIT. A child line need not sit next to its order, so assembly still reads every
-        // line into one list (DAR-BE-162 streamed the download and the write around it, not this).
-        List<Map<String, Object>> jsonlRecords = []
-        ShopifyBulkOperationClient.eachJsonlRecord((File) bulkOperationResult.jsonlFile) { Map<String, Object> line ->
-            jsonlRecords.add(line)
-        }
-        assembledUnits = ShopifyOrderLineUnitSupport.assembleUnits(jsonlRecords)
-        jsonlRecords = null
-        records = (List<Map<String, Object>>) assembledUnits.units
+        // one entry per UNIT. A child line need not sit next to its order, so the file is read twice
+        // (orders, then lines) and each unit goes straight to the extract file: neither the lines nor
+        // the units of a long window are held (DAR-OPS-029 S42a; the month OOM in DAR-BE-162).
+        File jsonlFile = (File) bulkOperationResult.jsonlFile
+        assembledUnits = ShopifyOrderLineUnitSupport.streamUnits(
+                { Closure visit -> ShopifyBulkOperationClient.eachJsonlRecord(jsonlFile, visit) },
+                { Map unit -> extractWriter.add(unit) })
     }
     if (outputErrors) {
         errors = outputErrors
         warnings = outputWarnings
         dataAvailable = false
-        recordCount = records.size()
+        recordCount = extractWriter.recordCount
         return
     }
 
@@ -95,12 +91,12 @@ try {
     fileName = outputFileName
     fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
     fileTypeEnumId = "DftJson"
-    recordCount = records.size()
-    dataAvailable = records.size() > 0
+    recordCount = extractWriter.recordCount
+    dataAvailable = extractWriter.recordCount > 0
     Map<String, Object> metadata = ShopifyExtractSupport.bulkRequestMetadata("SHOPIFY_GRAPHQL_ORDER_LINE_UNITS",
             configIdValue, context, window, searchQuery, bulkOperationResult, rawJsonl)
     metadata.putAll([
-            extractedRecordCount : records.size(),
+            extractedRecordCount : extractWriter.recordCount,
             // Reported ALWAYS, not only when non-zero: a unit dropped here vanishes from the Shopify
             // side, and the anti-join then reports it as a genuine difference. An operator reading a
             // run must be able to tell a real finding from a parse loss without opening the JSONL.
@@ -121,7 +117,6 @@ try {
     if (unknownStateLineCount > 0) {
         outputWarnings.add("${unknownStateLineCount} line item(s) had no current or unfulfilled quantity; their units carry unitState UNKNOWN.".toString())
     }
-    records.each { Map<String, Object> unit -> extractWriter.add(unit) }
     extractWriter.finish(ec, fileLocation as String, requestMetadata)
     warnings = outputWarnings
     errors = []
