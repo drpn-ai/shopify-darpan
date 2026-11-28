@@ -42,7 +42,7 @@ class ShopifyTokenSupport {
         return config != null && normalize(config.shopifyAppId) != null && config.accessTokenExpiresDate != null
     }
 
-    static boolean needsRefresh(def config, Timestamp now) {
+    private static boolean needsRefresh(def config, Timestamp now) {
         if (!isAppIssued(config)) return false
         return ((Timestamp) config.accessTokenExpiresDate).time - REFRESH_MARGIN_MILLIS <= now.time
     }

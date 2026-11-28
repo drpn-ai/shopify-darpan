@@ -86,7 +86,7 @@ class ShopifyInstallSupport {
      * read unscoped with an explicit tenant condition. The PUBLIC app is never installed from here: a public
      * install starts in Shopify and needs its own way to tie the store to a tenant (DAR-BE-197 Phase 2).
      */
-    static def findAppForShop(def ec, String shopDomain, String tenantId) {
+    private static def findAppForShop(def ec, String shopDomain, String tenantId) {
         if (!shopDomain || !tenantId) return null
         return TenantScopedFinder.findGlobalUnscoped(ec, APP_ENTITY,
                         "platform-owned Darpan Shopify app chosen by store domain, pinned to the requesting tenant")
@@ -109,7 +109,7 @@ class ShopifyInstallSupport {
     // ---- begin ---------------------------------------------------------------------------------
 
     /** The callback URL registered in the app. Explicit setting first, else the app base URL. */
-    static String resolveRedirectUri(def ec) {
+    private static String resolveRedirectUri(def ec) {
         String explicit = System.getenv(REDIRECT_URI_ENV)?.trim() ?:
                 ec?.resource?.properties?.get(REDIRECT_URI_PROPERTY)?.toString()?.trim() ?:
                 System.getProperty(REDIRECT_URI_PROPERTY)?.trim()
@@ -143,7 +143,7 @@ class ShopifyInstallSupport {
         return buildAuthorizeUrl(shopDomain, normalize(app.clientId), normalize(app.scopes), redirectUri, stateToken)
     }
 
-    static String mintState(def ec, String tenantId, String userId, String appId, String shopDomain) {
+    private static String mintState(def ec, String tenantId, String userId, String appId, String shopDomain) {
         byte[] entropy = new byte[32]
         RANDOM.nextBytes(entropy)
         String stateToken = Base64.urlEncoder.withoutPadding().encodeToString(entropy)
@@ -168,7 +168,7 @@ class ShopifyInstallSupport {
     // ---- state ---------------------------------------------------------------------------------
 
     /** Reads a state without consuming it. {@code [ok, reason, companyUserGroupId, initiatedByUserId, shopifyAppId, shopDomain]} */
-    static Map<String, Object> peekState(def ec, Object rawStateToken) {
+    private static Map<String, Object> peekState(def ec, Object rawStateToken) {
         String stateToken = normalize(rawStateToken)
         if (!stateToken) return [ok: false, reason: "MISSING_STATE"]
         def row = TenantScopedFinder.findGlobalUnscoped(ec, STATE_ENTITY,
@@ -188,7 +188,7 @@ class ShopifyInstallSupport {
     }
 
     /** Atomic single-use claim (WHERE consumedDate IS NULL): of two racing callbacks, only one wins. */
-    static boolean consumeState(def ec, String stateToken) {
+    private static boolean consumeState(def ec, String stateToken) {
         long claimed = TenantScopedFinder.findGlobalUnscoped(ec, STATE_ENTITY,
                         "atomic single-use install state claim — conditional update where consumedDate is null")
                 ?.condition("stateToken", stateToken)
@@ -223,7 +223,7 @@ class ShopifyInstallSupport {
     }
 
     /** A request parameter as one string: servlet maps hold String[]; tests pass plain strings. */
-    static String firstValue(Object value) {
+    private static String firstValue(Object value) {
         if (value instanceof String[]) return ((String[]) value).length ? ((String[]) value)[0] : null
         if (value instanceof Collection) return ((Collection) value) ? ((Collection) value).first()?.toString() : null
         return value?.toString()
@@ -246,7 +246,7 @@ class ShopifyInstallSupport {
     // ---- store the connection ------------------------------------------------------------------
 
     /** The newest dated API version Darpan supports (never "unstable"). */
-    static String defaultApiVersion() {
+    private static String defaultApiVersion() {
         return ShopifySourceCatalog.SUPPORTED_API_VERSIONS.findAll { it ==~ /\d{4}-\d{2}/ }.max()
     }
 
@@ -254,7 +254,7 @@ class ShopifyInstallSupport {
      * Creates the install's own ShopifyAuthConfig row, or updates it on a re-install of the same app on
      * the same store for the same tenant. Never touches a row without this app id (a pasted token).
      */
-    static String storeInstall(def ec, Map<String, Object> state, Map<String, Object> tokens) {
+    private static String storeInstall(def ec, Map<String, Object> state, Map<String, Object> tokens) {
         String tenantId = (String) state.companyUserGroupId
         String appId = (String) state.shopifyAppId
         String shopApiUrl = "https://${state.shopDomain}".toString()
@@ -384,7 +384,7 @@ class ShopifyInstallSupport {
         return "${appBaseUrl}/settings?shopify=error&reason=${URLEncoder.encode(slug, StandardCharsets.UTF_8.name())}".toString()
     }
 
-    static String formEncode(Map<String, ?> params) {
+    private static String formEncode(Map<String, ?> params) {
         return params.findAll { it.value != null }.collect { key, value ->
             "${URLEncoder.encode(key, StandardCharsets.UTF_8.name())}=${URLEncoder.encode(value.toString(), StandardCharsets.UTF_8.name())}"
         }.join("&")

@@ -141,7 +141,7 @@ class ShopifyWebhookSupport {
     }
 
     /** Shopify's payload for each topic, so an unsigned topic header cannot turn one request into another. */
-    static boolean shapeMatches(String topic, Map payload) {
+    private static boolean shapeMatches(String topic, Map payload) {
         switch (topic) {
             case TOPIC_UNINSTALLED: return payload.myshopify_domain != null && payload.id != null
             case TOPIC_DATA_REQUEST: return payload.data_request instanceof Map && payload.customer instanceof Map
@@ -152,7 +152,7 @@ class ShopifyWebhookSupport {
     }
 
     /** The Darpan app whose secret signed this body, or null. Only apps that can be installed on this store are tried. */
-    static def verifiedApp(def ec, String shop, String givenHmac, String body) {
+    private static def verifiedApp(def ec, String shop, String givenHmac, String body) {
         if (!givenHmac) return null
         List apps = (TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.APP_ENTITY,
                         "webhook signature check: platform-owned Darpan apps that can be installed on this store")
@@ -182,7 +182,7 @@ class ShopifyWebhookSupport {
      * calling Shopify with a dead token. Pasted-token connections and other apps' connections are not touched.
      * Kept (not deleted): the store may install again, and shop/redact 48 hours later erases what must go.
      */
-    static int clearAppConnections(def ec, String shop, String appId) {
+    private static int clearAppConnections(def ec, String shop, String appId) {
         List configs = (TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.CONFIG_ENTITY,
                         "app/uninstalled: connections made by the signing app; the store and app are verified by the signature")
                 ?.condition("shopifyAppId", appId)?.useCache(false)?.list() ?: []) as List

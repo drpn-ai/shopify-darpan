@@ -45,7 +45,7 @@ class ShopifyOAuthClient {
      * or {@code [ok: false, reason, invalidGrant]}. invalidGrant means Shopify refused the refresh token
      * itself (401/400 invalid_request), so the store has to be installed again.
      */
-    static Map<String, Object> requestTokens(def ec, String shopDomain, Map<String, String> form) {
+    private static Map<String, Object> requestTokens(def ec, String shopDomain, Map<String, String> form) {
         if (!ShopifyInstallSupport.isValidShopDomain(shopDomain)) return [ok: false, reason: "INVALID_SHOP"]
         if (!form.client_id || !form.client_secret) return [ok: false, reason: "APP_NOT_CONFIGURED"]
         String url = "https://${shopDomain}/admin/oauth/access_token".toString()

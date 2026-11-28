@@ -19,7 +19,7 @@ class ShopifyAuthConfigSupport {
         return ValueSupport.normalize(value)
     }
 
-    static String normalizeShopApiUrl(Object value) {
+    private static String normalizeShopApiUrl(Object value) {
         String raw = normalize(value)
         if (!raw) return raw
         return raw.endsWith("/") ? raw.replaceAll(/\/+$/, "") : raw
@@ -29,11 +29,11 @@ class ShopifyAuthConfigSupport {
         return normalize(value)?.toLowerCase()
     }
 
-    static String normalizeTimeZone(Object value) {
+    private static String normalizeTimeZone(Object value) {
         return normalize(value) ?: DEFAULT_TIME_ZONE
     }
 
-    static String normalizeIndicator(Object value, boolean defaultValue) {
+    private static String normalizeIndicator(Object value, boolean defaultValue) {
         return ValueSupport.normalizeBool(value, defaultValue) ? "Y" : "N"
     }
 
@@ -43,17 +43,17 @@ class ShopifyAuthConfigSupport {
     private static final List<String> SHOP_API_URL_HOST_SUFFIXES = [".myshopify.com"]
 
     /** Returns null if the URL is acceptable, else a human-readable error suitable for ec.message.addError. */
-    static String describeShopApiUrlError(String shopApiUrl) {
+    private static String describeShopApiUrlError(String shopApiUrl) {
         if (!shopApiUrl) return "Shop API URL is required."
         def result = darpan.facade.common.OutboundHttpPolicy.validate(shopApiUrl, SHOP_API_URL_HOST_SUFFIXES)
         return result.ok ? null : result.error
     }
 
-    static boolean isValidApiVersion(String apiVersion) {
+    private static boolean isValidApiVersion(String apiVersion) {
         return apiVersion == "unstable" || apiVersion ==~ /\d{4}-\d{2}/
     }
 
-    static Map<String, Object> safeConfig(def ec, def config, String companyLabel = null) {
+    private static Map<String, Object> safeConfig(def ec, def config, String companyLabel = null) {
         if (config == null) return null
         String companyUserGroupId = readString(config, "companyUserGroupId")
         return [
