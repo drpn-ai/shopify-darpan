@@ -140,7 +140,7 @@ class ShopifyAgentQuerySupport {
     private static Map copyOf(Map m) { (Map) new JsonSlurper().parseText(JsonOutput.toJson(m)) }
 
     /** Everything about the connection that must never reach the agent or the log. */
-    static List<String> secretsOf(Map config) {
+    private static List<String> secretsOf(Map config) {
         List<String> out = []
         String token = config.accessToken?.toString()?.trim()
         if (token) out.add(token)

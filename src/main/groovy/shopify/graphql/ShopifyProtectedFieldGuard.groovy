@@ -87,7 +87,7 @@ class ShopifyProtectedFieldGuard {
         return "Darpan reads Shopify customer data at Level 1 only (no customer email, phone, name or address), so this query was not sent. It asks for: ${refused.join(', ')}"
     }
 
-    static boolean isRefused(List<String> path) {
+    private static boolean isRefused(List<String> path) {
         if (!path) return false
         String last = path[-1]
         if (!last.startsWith("on:") && last in REFUSED_FIELDS) return true
@@ -106,7 +106,7 @@ class ShopifyProtectedFieldGuard {
      * matched against names and emails, so it is refused) on a key that names no person. AND, OR, NOT, a leading '-'
      * and parentheses are allowed; a quoted value is taken whole, so a key inside quotes is never read as a key.
      */
-    static String refusedSearchTerm(String search) {
+    private static String refusedSearchTerm(String search) {
         String unquoted = search.replaceAll(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/, "Q")
         for (String raw : unquoted.replace("(", " ").replace(")", " ").trim().split(/\s+/)) {
             String term = raw.startsWith("-") ? raw.substring(1) : raw

@@ -139,9 +139,8 @@ class ShopifyBulkOperationClient {
             if (!ValueSupport.normalize(operation.id)) operation.id = operationId
             statusHistory.add(safeOperationMetadata(operation))
         }
-
-        return safeFailure("Shopify bulk operation ${operationId} did not complete.",
-                [bulkOperation: safeOperationMetadata(operation), pollCount: Math.max(0, statusHistory.size() - 1), statusHistory: statusHistory] + retryMetadata(startRetryHistory))
+        // Unreachable: the loop's last pass (pollAttempt == maxPollAttempts) always returns.
+        throw new IllegalStateException("Shopify bulk operation ${operationId} polling ended without an answer.")
     }
 
     /**

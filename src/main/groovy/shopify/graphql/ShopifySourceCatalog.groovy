@@ -16,6 +16,18 @@ class ShopifySourceCatalog {
         "unstable",
     ].asImmutable()
 
+    /** One field of an order's lineItems connection: read at lineItems.edges.node.<leaf>, 50 a page by default, at most 100. */
+    private static Map<String, Object> lineItemField(String leaf, String label, String type) {
+        return [fieldPath: "lineItems.${leaf}".toString(), label: label, type: type, selectionPath: "lineItems.edges.node.${leaf}".toString(),
+                connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100]
+    }
+
+    /** A line's current and unfulfilled quantity: added to the ORDERS fields by the two sources that read line state. */
+    private static final List<Map<String, Object>> LINE_ITEM_STATE_FIELDS = [
+        lineItemField("currentQuantity", "Line Item Current Quantity", "Integer"),
+        lineItemField("unfulfilledQuantity", "Line Item Unfulfilled Quantity", "Integer"),
+    ].asImmutable()
+
     private static final Map<String, Object> ORDER_SOURCE = [
         sourceDefinitionId       : SHOPIFY_ORDERS,
         label                    : "Shopify Orders",
@@ -114,12 +126,12 @@ class ShopifySourceCatalog {
             [fieldPath: "transactions.id", label: "Transaction ID", type: "ID", selectionPath: "transactions.id"],
             [fieldPath: "transactions.parentTransaction.id", label: "Parent Transaction ID", type: "ID", selectionPath: "transactions.parentTransaction.id"],
             [fieldPath: "customer.id", label: "Customer ID", type: "ID", selectionPath: "customer.id"],
-            [fieldPath: "lineItems.id", label: "Line Item ID", type: "ID", selectionPath: "lineItems.edges.node.id", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.name", label: "Line Item Name", type: "String", selectionPath: "lineItems.edges.node.name", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.quantity", label: "Line Item Quantity", type: "Integer", selectionPath: "lineItems.edges.node.quantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.sku", label: "Line Item SKU", type: "String", selectionPath: "lineItems.edges.node.sku", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.variant.id", label: "Variant ID", type: "ID", selectionPath: "lineItems.edges.node.variant.id", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.variant.title", label: "Variant Title", type: "String", selectionPath: "lineItems.edges.node.variant.title", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
+            lineItemField("id", "Line Item ID", "ID"),
+            lineItemField("name", "Line Item Name", "String"),
+            lineItemField("quantity", "Line Item Quantity", "Integer"),
+            lineItemField("sku", "Line Item SKU", "String"),
+            lineItemField("variant.id", "Variant ID", "ID"),
+            lineItemField("variant.title", "Variant Title", "String"),
         ],
     ].asImmutable()
 
@@ -380,9 +392,7 @@ class ShopifySourceCatalog {
         fields                      : (ORDER_SOURCE.fields + [
             [fieldPath: "returnStatus", label: "Order Return Status", type: "String", selectionPath: "returnStatus"],
             [fieldPath: "sourceName", label: "Order Source Name", type: "String", selectionPath: "sourceName"],
-            [fieldPath: "lineItems.currentQuantity", label: "Line Item Current Quantity", type: "Integer", selectionPath: "lineItems.edges.node.currentQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.unfulfilledQuantity", label: "Line Item Unfulfilled Quantity", type: "Integer", selectionPath: "lineItems.edges.node.unfulfilledQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-        ]).asImmutable(),
+        ] + LINE_ITEM_STATE_FIELDS).asImmutable(),
     ].asImmutable()
 
     /**
@@ -404,10 +414,7 @@ class ShopifySourceCatalog {
             "lineItems.currentQuantity",
             "lineItems.unfulfilledQuantity",
         ]).asImmutable(),
-        fields                      : ((ORDER_SOURCE.fields as List) + [
-            [fieldPath: "lineItems.currentQuantity", label: "Line Item Current Quantity", type: "Integer", selectionPath: "lineItems.edges.node.currentQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            [fieldPath: "lineItems.unfulfilledQuantity", label: "Line Item Unfulfilled Quantity", type: "Integer", selectionPath: "lineItems.edges.node.unfulfilledQuantity", connectionRoot: "lineItems", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-        ]).asImmutable(),
+        fields                      : ((ORDER_SOURCE.fields as List) + LINE_ITEM_STATE_FIELDS).asImmutable(),
     ]).asImmutable()
 
     /** Sources an extract reads by id but the field picker never lists (listSources). */
@@ -469,7 +476,7 @@ class ShopifySourceCatalog {
         return normalize(apiVersion)?.toLowerCase()
     }
 
-    static boolean supportsApiVersion(Map<String, Object> source, String apiVersion) {
+    private static boolean supportsApiVersion(Map<String, Object> source, String apiVersion) {
         if (!apiVersion) return true
         return ((List<String>) (source.supportedApiVersions ?: [])).contains(apiVersion)
     }
