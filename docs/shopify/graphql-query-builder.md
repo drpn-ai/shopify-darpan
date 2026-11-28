@@ -128,7 +128,7 @@ The JSON wrapper remains the source file consumed by Darpan reconciliation, so s
 `reconciliation.ShopifyOrderExtractionServices.extract#ShopifyOrderLineUnits` (DAR-BE-050) writes one record per order-line UNIT for the Shopify-to-OMS unit presence pair. It shares submit, poll, download, and file writing with `extract#ShopifyOrders` (both implement `extract#ShopifyBulkWindowExtract`); only record assembly differs.
 
 - It runs the `SHOPIFY_ORDER_LINE_UNITS` source, whose `allowsBulkConnections` lets `lineItems` into the bulk query. `ShopifyOrderLineUnitSupport` re-nests the `__parentId` child lines under their orders.
-- A line of quantity N becomes N records with a `unitOrdinal`. The compare key is `(shopifyOrderId, shopifyLineId, unitOrdinal)`, matching `extract#HotWaxOmsOrderLineUnits`. Units, not lines, because OMS explodes a line into single-unit items and the compare is a set anti-join: at line grain a short import still matches.
+- A line of quantity N becomes N records with a `unitOrdinal`. The compare key is `(shopifyOrderId, shopifyLineId, unitOrdinal)`, matching the OMS side's unit records (darpan-hotwax `extract#HotWaxOmsGqlOrderItems`). Units, not lines, because OMS explodes a line into single-unit items and the compare is a set anti-join: at line grain a short import still matches.
 - Each unit carries `unitState` (`OPEN`, `FULFILLED`, `REMOVED`, or `UNKNOWN` when Shopify sent no quantities), derived from `currentQuantity` and `unfulfilledQuantity`, plus the order-wide `orderReturnStatus` and `orderSourceName`.
 - It windows on `created_at`, matching the OMS side's `orderDate`. Windowing one side differently produces structural false positives.
 - `recordCount` counts units, not orders. `requestMetadata` always carries `orphanLineItemCount` and `droppedZeroQuantity`; an orphan also raises a run warning.
@@ -148,13 +148,12 @@ The bulk `orders { lineItems }` read is used rather than `fulfillmentOrders` bec
 
 ## Verification and Exchange Lookups
 
-The saved-run verification pass and the exchange checks call point lookups through `nodes(ids:)`, which reads the primary datastore rather than the search index that backs `orders(query:)`. All four lookups resolve the config through the `SHOPIFY` endpoint gate. A failed lookup returns `ok=false` and never classifies an id as missing.
+The saved-run verification pass and the exchange checks call point lookups through `nodes(ids:)`, which reads the primary datastore rather than the search index that backs `orders(query:)`. All three lookups resolve the config through the `SHOPIFY` endpoint gate. A failed lookup returns `ok=false` and never classifies an id as missing.
 
 | Service | Registered on | Purpose |
 |---|---|---|
 | `lookup#ShopifyOrderIds` | `SHOPIFY` connector `lookupServiceName` | Confirm or refute "missing in Shopify" order differences |
 | `lookup#ShopifyRefundOrReturnIds` | `SHOPIFY_RETURN_REFS` connector `lookupServiceName` | Same for the returns pair; each bare id is checked as both a Refund and a Return GID; returns `unresolvedIds` |
-| `lookup#ShopifyOrderExchangeState` | `SHOPIFY` connector `exchangeStateLookupServiceName` | Per order, the returns holding exchange lines plus current totals; needs `read_returns` |
 | `lookup#ShopifyExchangeSweep` | `SHOPIFY` connector `exchangeSweepServiceName` | Exchanges whose return date falls in the run window; needs `read_returns` |
 
 ## Automation Integration
