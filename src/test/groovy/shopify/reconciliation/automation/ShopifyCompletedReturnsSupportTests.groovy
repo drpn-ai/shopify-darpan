@@ -82,6 +82,37 @@ class ShopifyCompletedReturnsSupportTests {
         assertEquals(["1", "6"], ((List) result.records)*.orderId)
     }
 
+    /** DAR-OPS-029 S42a (I4). A read too big to finish fails in words; it never passes a partial set as the whole. */
+    /** OC127: an order whose refunds list is full says so; the other per-order caps already did. */
+    @Test
+    void anOrderAtTheRefundsCapIsNamedNotSilentlyTruncated() {
+        Map full = order("8", "#DK8", [ret("81", "CLOSED", "2026-10-20T10:00:00Z", false, false)]) +
+                [refunds: (1..ShopifyCompletedReturnsSupport.ORDER_REFUNDS_PER_ORDER).collect { [createdAt: "2026-09-01T00:00:00Z"] }]
+        List<String> warnings = []
+        ShopifyCompletedReturnsSupport.toRecord(full, ShopifyCompletedReturnsSupport.ORDER_REFUNDED, WINDOW_START, WINDOW_END, warnings)
+        assertEquals(1, warnings.count { it.contains("Order 8 has ${ShopifyCompletedReturnsSupport.ORDER_REFUNDS_PER_ORDER} refunds") }, warnings.toString())
+
+        List<String> short1 = []
+        ShopifyCompletedReturnsSupport.toRecord(full + [refunds: [[createdAt: "2026-09-01T00:00:00Z"]]],
+                ShopifyCompletedReturnsSupport.ORDER_REFUNDED, WINDOW_START, WINDOW_END, short1)
+        assertEquals([], short1.findAll { it.contains("refunds") })
+        // Only the kind that reads the order's refunds warns about them.
+        List<String> otherKind = []
+        ShopifyCompletedReturnsSupport.toRecord(full, "refunded", WINDOW_START, WINDOW_END, otherKind)
+        assertEquals([], otherKind.findAll { it.contains("refunds") })
+    }
+
+    @Test
+    void aReadThatHitsThePageCapFailsInsteadOfPassingPartial() {
+        int calls = 0
+        Map result = ShopifyCompletedReturnsSupport.extract(CONFIG, "refunded", WINDOW_START, WINDOW_END, [:],
+                { Map cfg, String query, Map vars, Map opts -> calls++; page([ORDERS[0]], true, "c${calls}".toString()) })
+        assertEquals(ShopifyCompletedReturnsSupport.MAX_PAGES, calls)
+        assertEquals([], result.records, "a partial read handed on records")
+        assertTrue(((List) result.errors).any { it.toString().contains("${ShopifyCompletedReturnsSupport.MAX_PAGES} pages") },
+                "expected an error naming the page cap, got errors ${result.errors}, warnings ${result.warnings}")
+    }
+
     @Test
     void aFailedReadReturnsItsErrorsAndNoRecords() {
         Map result = ShopifyCompletedReturnsSupport.extract(CONFIG, "exchanged", WINDOW_START, WINDOW_END, [:],

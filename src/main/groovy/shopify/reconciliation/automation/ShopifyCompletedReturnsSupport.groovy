@@ -92,9 +92,11 @@ class ShopifyCompletedReturnsSupport {
         int pages = 0
         int pageSize = PAGE_SIZE
         while (true) {
+            // DAR-OPS-029 S42a: a read too big to finish fails in words; a partial set must never pass as the whole.
             if (pages++ >= MAX_PAGES) {
-                warnings.add("Stopped after ${MAX_PAGES} pages of orders; completed returns past that are not read.".toString())
-                break
+                return [records: [], warnings: warnings, requestMetadata: [:],
+                        errors : [("Stopped after ${MAX_PAGES} pages of orders (${pageSize} a page) without reading every " +
+                                "order updated since the window start, so completed returns were not checked. Read a shorter window.").toString()]]
             }
             Map variables = [first: pageSize, after: after, query: search, returnsFirst: RETURNS_PER_ORDER,
                              linesFirst: LINES_PER_ORDER, exchangeItemsFirst: EXCHANGE_ITEMS_PER_RETURN]
@@ -125,7 +127,7 @@ class ShopifyCompletedReturnsSupport {
     }
 
     /** Shopify's single-query cost refusal: "Query cost is N, which exceeds the single query max cost limit (M)." */
-    static boolean overCostLimit(Map result) {
+    private static boolean overCostLimit(Map result) {
         List<String> messages = ((List) (result?.graphqlErrors ?: result?.errors ?: [])).collect { it.toString().toLowerCase() }
         return messages.any { it.contains("max cost") || it.contains("max_cost_exceeded") }
     }
@@ -137,6 +139,11 @@ class ShopifyCompletedReturnsSupport {
         List returns = (List) (((Map) (order.get("returns") ?: [:])).get("nodes") ?: [])
         if (returns.size() >= RETURNS_PER_ORDER) {
             warnings.add("Order ${orderId} has ${returns.size()} returns, the most read; later ones are not checked.".toString())
+        }
+        // DAR-OPS-029 S42a (OC127): the order-level refunds list is read to a cap too; past it a later refund is unseen.
+        if (kind == ORDER_REFUNDED && ((List) (order.get("refunds") ?: [])).size() >= ORDER_REFUNDS_PER_ORDER) {
+            warnings.add(("Order ${orderId} has ${ORDER_REFUNDS_PER_ORDER} refunds, the most read; a return refunded " +
+                    "after those is not seen as refunded.").toString())
         }
         List<Map> matched = returns.findAll { Object raw ->
             Map ret = (Map) raw
@@ -184,7 +191,7 @@ class ShopifyCompletedReturnsSupport {
     }
 
     /** True when the order carries a refund made on or after the return was created (any refund when that is unknown). */
-    static boolean orderRefundedSince(Map order, Long returnCreatedMillis) {
+    private static boolean orderRefundedSince(Map order, Long returnCreatedMillis) {
         return ((List) (order?.get("refunds") ?: [])).any { Object refund ->
             Long at = millis(((Map) refund).get("createdAt"))
             at != null && (returnCreatedMillis == null || at >= returnCreatedMillis)
