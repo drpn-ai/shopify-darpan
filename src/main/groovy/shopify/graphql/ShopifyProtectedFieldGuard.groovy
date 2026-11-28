@@ -46,8 +46,11 @@ class ShopifyProtectedFieldGuard {
     static final List<String> REFUSED_SEARCH_KEY_PREFIXES = ["shipping_", "billing_", "address", "default_address"].asImmutable() as List<String>
 
     /** Null when the document may be sent; otherwise the reason it may not. */
+    /** OC231: the longest search string a document may send. */
+    static final int MAX_SEARCH_LENGTH = 4096
+
     static String refusal(String document, Map variables = [:]) {
-        return checkDocument(document, variables ?: [:], true, [0] as int[], new HashSet<String>())
+        return checkDocument(document, variables ?: [:], true, [0] as int[], new HashSet<String>(), new HashMap<String, String>())
     }
 
     /**
@@ -56,7 +59,8 @@ class ShopifyProtectedFieldGuard {
      * inside a bulk job is refused. Before, each inner query got a fresh budget and nested without limit, so a few KB of
      * fragment doubling made billions of checks and pinned an agent query slot.
      */
-    private static String checkDocument(String document, Map variables, boolean bulkRunAllowed, int[] spent, Set<String> checkedInner) {
+    private static String checkDocument(String document, Map variables, boolean bulkRunAllowed, int[] spent, Set<String> checkedInner,
+                                        Map<String, String> searchVerdicts) {
         Map report = GraphQlDocumentCheck.fieldPaths(document, spent)
         if (report.errors) return couldNotCheck(report.errors[0] as String)
         List<String> operations = (List<String>) report.operations
@@ -82,12 +86,29 @@ class ShopifyProtectedFieldGuard {
                 def inner = stringArgument(arguments?.get("query"), variables)
                 if (!(inner instanceof String) || !inner) return couldNotCheck("a bulk job's query is missing or not a plain string.")
                 if (!checkedInner.add((String) inner)) continue
-                String innerRefusal = checkDocument((String) inner, [:], false, spent, checkedInner)
+                String innerRefusal = checkDocument((String) inner, [:], false, spent, checkedInner, searchVerdicts)
                 if (innerRefusal) return innerRefusal
             } else if (arguments?.containsKey("query")) {
                 def search = stringArgument(arguments.get("query"), variables)
                 if (search.is(NOT_A_STRING)) return couldNotCheck("the search on ${label(path)} is not a plain string.")
-                String bad = search ? refusedSearchTerm((String) search) : null
+                // OC231: a search is checked once per distinct string, its length is charged to the call's one budget the first
+                // time, and it is capped. It was checked once per field path, so fragment doubling re-scanned a long search
+                // thousands of times and held an agent query slot.
+                if (search && ((String) search).length() > MAX_SEARCH_LENGTH) {
+                    return couldNotCheck("the search on ${label(path)} is over ${MAX_SEARCH_LENGTH} characters.")
+                }
+                String bad = null
+                if (search) {
+                    String text = (String) search
+                    if (!searchVerdicts.containsKey(text)) {
+                        spent[0] += text.length()
+                        if (spent[0] > GraphQlDocumentCheck.MAX_FIELD_PATHS) {
+                            return couldNotCheck("it expands to more than ${GraphQlDocumentCheck.MAX_FIELD_PATHS} selections and search characters.")
+                        }
+                        searchVerdicts.put(text, refusedSearchTerm(text))
+                    }
+                    bad = searchVerdicts.get(text)
+                }
                 if (bad) return "Darpan reads Shopify customer data at Level 1 only, so a search on ${label(path)} by \"${bad}\" was not sent; searches use key:value terms on keys that name no person."
             }
         }

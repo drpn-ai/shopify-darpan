@@ -161,13 +161,43 @@ class ShopifyProtectedFieldGuardTests {
 
     @Test
     @org.junit.jupiter.api.Timeout(value = 10, threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
-    void aFewKilobytesOfRepeatedAndNestedBulkJobsAreCheckedQuickly() {
-        // The attack: a variable's default holds the inner query, and fragment doubling repeats the bulk field thousands of
-        // times; each repeat was checked afresh with a new budget. Now the inner query is checked once, within one budget.
-        StringBuilder doc = new StringBuilder('mutation run($q: String = "' + wideQuery("w", 500) + '") { ...F1 }\n')
-        for (int i = 1; i < 14; i++) doc.append("fragment F${i} on Mutation { ...F${i + 1} ...F${i + 1} }\n")
-        doc.append('fragment F14 on Mutation { bulkOperationRunQuery(query: $q) { bulkOperation { id } } }\n')
-        String refusal = ShopifyProtectedFieldGuard.refusal(doc.toString())
+    void aRepeatedBulkQueryIsCheckedOnceSoItFitsTheBudget() {
+        // F1..F11 doubling: 1,024 repeats of one bulk job (about 5,100 steps). Its query is 2,000 fields: checked once the
+        // document is about 7,100 steps; checked per repeat it would pass the 10,000-step budget at the third repeat. (This
+        // replaces a test whose document the field cap alone already refused, so it never proved OC210.)
+        StringBuilder doc = new StringBuilder('mutation run($q: String = "' + wideQuery("w", 2000) + '") { ...F1 }\n')
+        for (int i = 1; i < 11; i++) doc.append("fragment F${i} on Mutation { ...F${i + 1} ...F${i + 1} }\n")
+        doc.append('fragment F11 on Mutation { bulkOperationRunQuery(query: $q) { bulkOperation { id } } }\n')
+        assertNull(ShopifyProtectedFieldGuard.refusal(doc.toString()))
+    }
+
+    // ---- OC231 (DAR-OPS-029 S15a, security): a search string is checked once, its length spends the budget, and it is capped
+
+    /** A passing search of about `chars` characters: key:value terms on a key that names no person. */
+    static String search(String tag, int chars) {
+        StringBuilder s = new StringBuilder()
+        int n = 0
+        while (s.length() < chars) s.append(s ? " AND " : "").append("tag:${tag}${n++}")
+        return s.toString()
+    }
+
+    @Test
+    void aSearchStringOverFourKilobytesIsRefused() {
+        String refusal = ShopifyProtectedFieldGuard.refusal("{ orders(first: 1, query: \"${search('t', 5000)}\") { edges { node { id } } } }".toString())
+        assertTrue(refusal != null && refusal.contains("4096"), String.valueOf(refusal))
+        assertNull(ShopifyProtectedFieldGuard.refusal("{ orders(first: 1, query: \"${search('t', 4000)}\") { edges { node { id } } } }".toString()),
+                "a search under the cap still passes")
+    }
+
+    @Test
+    void searchesSpendTheBudgetByTheirLengthAndARepeatedOneSpendsItOnce() {
+        // Three distinct 3,500-character searches: 10,500 characters, past the 10,000-step budget, so the document is refused.
+        String three = (1..3).collect { "o${it}: orders(first: 1, query: \"${search("s${it}x", 3500)}\") { edges { node { id } } }" }.join(" ")
+        String refusal = ShopifyProtectedFieldGuard.refusal("{ ${three} }".toString())
         assertTrue(refusal != null && refusal.contains("more than"), String.valueOf(refusal))
+        // The same search three times is checked, and charged, once.
+        String once = search("same", 3500)
+        String repeated = (1..3).collect { "o${it}: orders(first: 1, query: \"${once}\") { edges { node { id } } }" }.join(" ")
+        assertNull(ShopifyProtectedFieldGuard.refusal("{ ${repeated} }".toString()))
     }
 }
