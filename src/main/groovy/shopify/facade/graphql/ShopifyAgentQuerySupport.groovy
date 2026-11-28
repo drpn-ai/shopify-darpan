@@ -1,15 +1,9 @@
 package shopify.facade.graphql
 
 import darpan.agent.AgentQuerySupport
-import darpan.agent.GraphqlSchemaTrim
-import darpan.datasource.GraphQlDocumentCheck
 import darpan.facade.common.TenantAccessSupport
-import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyGraphqlTransport
-
-import java.nio.charset.StandardCharsets
 
 /**
  * DAR-CLI-003. A tenant user's agent sends one fresh, read-only GraphQL query through a Shopify connection the tenant
@@ -21,15 +15,16 @@ import java.nio.charset.StandardCharsets
 class ShopifyAgentQuerySupport {
 
     static final String SYSTEM_ENUM_ID = "SHOPIFY"
-    static final String CACHE_NAME = "darpan.agent.schema"
-    static final long SCHEMA_TTL_MILLIS = 24L * 60 * 60 * 1000
     static final int CONNECT_TIMEOUT_MILLIS = 15000
     static final int READ_TIMEOUT_MILLIS = 45000
 
     /** Test seam, passed to the transport's own httpExecutor option: request map -> [statusCode, body] (null = real HTTP). */
     static Closure httpExecutorOverride = null
 
-    /** The AgentQuerySupport.run answer, or null with an error on ec when the caller may not read through this config. */
+    /**
+     * The AgentQuerySupport.graphqlQuery answer, or null with an error on ec when the caller may not read through this config.
+     * S99-073: the query, schema, cap and unwrap flow is darpan's (AgentQuerySupport); the Shopify gate, transport and secrets are here.
+     */
     static Map runAgentQuery(def ec, Map context) {
         String configId = context.get("shopifyAuthConfigId")?.toString()?.trim()
         String document = context.get("document")?.toString()
@@ -39,56 +34,20 @@ class ShopifyAgentQuerySupport {
             return null
         }
         Map variables = context.get("variables") instanceof Map ? new LinkedHashMap((Map) context.get("variables")) : null
-        Map gate = gateConfig(ec, configId, meta)
-        if (gate == null) return null
-        if (gate.refused) return (Map) gate.refused
-        // The document check is last so a refusal is logged with the secrets already set on meta.
-        String problem = AgentQuerySupport.checkGraphqlQuery(document)
-        if (problem) return AgentQuerySupport.refuse(ec, meta, problem)
-
-        final Map transportConfig = (Map) gate.transportConfig
-        final String doc = document
-        Map answer = AgentQuerySupport.run(ec, meta, {
-            Map data = singleAnswer(transportConfig, doc, variables)
-            return [rows: [data], hasMore: false, offset: 0] as Map
-        } as Closure<Map>)
-        return unwrap(answer)
+        return AgentQuerySupport.graphqlQuery(ec, meta, document, variables, { Map m -> gateConfig(ec, configId, m) })
     }
 
-    /** The trimmed schema for the config: from the 24 h cache, else one introspection. Null with an error on ec when refused. */
+    /** The trimmed schema for the config (AgentQuerySupport.graphqlSchema). Null with an error on ec when refused. */
     static Map getSchema(def ec, Map context) {
         String configId = context.get("shopifyAuthConfigId")?.toString()?.trim()
         Map meta = [systemEnumId: SYSTEM_ENUM_ID, connectionId: configId, queryText: "introspection (schema)"]
-        Map gate = gateConfig(ec, configId, meta)
-        if (gate == null) return null
-        if (gate.refused) return (Map) gate.refused
-
-        // The gate ran above, so a cache hit is never served to a caller who failed it. The config's last-updated stamp
-        // is in the key: an edited connection (new shop, new version) does not serve the old schema.
-        def cache = ec.cache.getCache(CACHE_NAME)
-        String key = "SHOPIFY:${configId}:${gate.stamp}".toString()
-        Map cached = (Map) cache.get(key)
-        if (cached != null && System.currentTimeMillis() - (cached.at as long) < SCHEMA_TTL_MILLIS) {
-            return unwrap([rows: [copyOf((Map) cached.schema)], rowCount: 1, hasMore: false, truncated: false, durationMs: 0L])
-        }
-        // Introspection is allowed only here: the document check tells the only caller that wants it.
-        List errors = (List) GraphQlDocumentCheck.check(GraphqlSchemaTrim.INTROSPECTION_QUERY, true).errors
-        if (errors) return AgentQuerySupport.refuse(ec, meta, errors.join(" "))
-
-        final Map transportConfig = (Map) gate.transportConfig
-        Map answer = AgentQuerySupport.run(ec, meta, {
-            Map data = singleAnswer(transportConfig, GraphqlSchemaTrim.INTROSPECTION_QUERY, null, false)
-            return [rows: [GraphqlSchemaTrim.trimWithinCap(data)], hasMore: false, offset: 0] as Map
-        } as Closure<Map>)
-        Map out = unwrap(answer)
-        if (out.rows) cache.put(key, [at: System.currentTimeMillis(), schema: copyOf((Map) ((List) out.rows)[0])])
-        return out
+        return AgentQuerySupport.graphqlSchema(ec, meta, "SHOPIFY", { Map m -> gateConfig(ec, configId, m) })
     }
 
     // ---- shared plumbing ------------------------------------------------------------------------------------------
 
     /**
-     * [transportConfig, stamp], [refused: the logged REFUSED answer], or null with an error on ec. meta.secrets is set
+     * [send, stamp], [refused: the logged REFUSED answer], or null with an error on ec. meta.secrets is set
      * before anything that can fail with a message.
      */
     private static Map gateConfig(def ec, String configId, Map meta) {
@@ -101,43 +60,18 @@ class ShopifyAgentQuerySupport {
         // Final review R25: fresh queries and schema reads run only on the active tenant's own connection.
         String notOwned = AgentQuerySupport.requireOwnedConnection(ec, config.companyUserGroupId)
         if (notOwned) return [refused: AgentQuerySupport.refuse(ec, meta, notOwned)]
-        return [transportConfig: transportConfig, stamp: config.lastUpdatedStamp?.toString() ?: ""]
+        return [send: { String document, Map variables -> singleAnswer(transportConfig, document, variables) },
+                stamp: config.lastUpdatedStamp?.toString() ?: ""]
     }
 
-    /** One call, no retry (maxAttempts 1) so a retry cannot pass the 60 s wall clock. */
-    private static Map singleAnswer(Map transportConfig, String document, Map variables, boolean capAnswer = true) {
+    /** One call, no retry (maxAttempts 1) so a retry cannot pass the 60 s wall clock. Capped by AgentQuerySupport. */
+    private static Map singleAnswer(Map transportConfig, String document, Map variables) {
         Map options = [connectTimeoutMillis: CONNECT_TIMEOUT_MILLIS, readTimeoutMillis: READ_TIMEOUT_MILLIS, maxAttempts: 1]
         if (httpExecutorOverride != null) options.httpExecutor = httpExecutorOverride
         Map result = ShopifyGraphqlTransport.execute(transportConfig, document, variables ?: [:], options)
         if (result.ok == false) throw new IllegalStateException(((result.errors ?: ["Shopify did not answer."]) as List).join(" "))
-        Map data = result.data instanceof Map ? (Map) result.data : [:]
-        // A single 5 MB body cap; a JSON document cannot be cut partway, so an over-size answer is refused with advice.
-        if (capAnswer && JsonOutput.toJson(data).getBytes(StandardCharsets.UTF_8).length > AgentQuerySupport.MAX_BODY_BYTES - 64) {
-            throw new AgentQuerySupport.AgentQueryRefused("The answer is larger than 5 MB; ask for fewer fields or a smaller 'first'.")
-        }
-        return data
+        return result.data instanceof Map ? (Map) result.data : [:]
     }
-
-    /** rows:[payload] becomes data/schema; rowCount is the edge count of the one top-level connection, else null. */
-    private static Map unwrap(Map answer) {
-        if (answer.error) return answer
-        if (!(answer.rows instanceof List) || ((List) answer.rows).isEmpty()) return [error: "The system returned no usable answer.", code: "ERROR"]
-        Map payload = ((List) answer.rows)[0] as Map
-        Map out = new LinkedHashMap(answer)
-        out.schema = payload
-        out.data = payload
-        out.rowCount = edgeCount(payload)
-        return out
-    }
-
-    static Integer edgeCount(Map data) {
-        if (data == null || data.size() != 1) return null
-        Object only = data.values().first()
-        if (only instanceof Map && ((Map) only).edges instanceof List) return ((List) ((Map) only).edges).size()
-        return null
-    }
-
-    private static Map copyOf(Map m) { (Map) new JsonSlurper().parseText(JsonOutput.toJson(m)) }
 
     /** Everything about the connection that must never reach the agent or the log. */
     private static List<String> secretsOf(Map config) {

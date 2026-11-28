@@ -91,7 +91,7 @@ class ShopifyAgentQuerySmokeTests {
     void reset() {
         ec.message.clearErrors()
         sent.clear()
-        ec.cache.getCache(ShopifyAgentQuerySupport.CACHE_NAME).clear()
+        ec.cache.getCache(darpan.agent.AgentQuerySupport.SCHEMA_CACHE_NAME).clear()
         answer = { Map req -> [statusCode: 200, body: JsonOutput.toJson([data: [orders: [edges: [[node: [id: 1]], [node: [id: 2]]]]]])] }
         AgentQueryLane.reset()
         ShopifyAgentQuerySupport.httpExecutorOverride = { Map req ->
@@ -273,8 +273,8 @@ class ShopifyAgentQuerySmokeTests {
 
     @Test
     void "row count is only for one top-level connection"() {
-        assertNull(ShopifyAgentQuerySupport.edgeCount([a: 1, b: 2]))
-        assertEquals(1, ShopifyAgentQuerySupport.edgeCount([orders: [edges: [[node: [:]]]]]))
+        assertNull(darpan.agent.AgentQuerySupport.edgeCount([a: 1, b: 2]))
+        assertEquals(1, darpan.agent.AgentQuerySupport.edgeCount([orders: [edges: [[node: [:]]]]]))
     }
 
     private Map run(String tenant, String configId, String document) {
