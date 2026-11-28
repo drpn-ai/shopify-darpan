@@ -4,7 +4,6 @@ import darpan.common.ValueSupport
 import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.reconciliation.ReconciliationApiWindowSupport
-import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import groovy.json.JsonOutput
 import shopify.facade.settings.ShopifyAuthConfigSupport
 import shopify.graphql.ShopifyBulkOperationClient
@@ -36,6 +35,10 @@ class ShopifyExtractSupport {
     /**
      * Parses one window bound. On a missing or unparseable value the error is appended to
      * {@code errors} and null is returned, so both bounds are always reported together.
+     *
+     * <p>DAR-OPS-029 S42a: a bound written without a zone (SQL or ISO local text, a LocalDateTime, a LocalDate) is a UTC
+     * instant, never the JVM's default zone: the "UTC midnight, reinterpreted through the config's zone" convention
+     * resolveSourceWindow applies next, so the same window reads the same on every machine.</p>
      */
     static Timestamp toTimestamp(Object rawValue, String label, List<String> errors) {
         if (rawValue == null) {
@@ -47,7 +50,7 @@ class ShopifyExtractSupport {
         if (rawValue instanceof Instant) return Timestamp.from((Instant) rawValue)
         if (rawValue instanceof ZonedDateTime) return Timestamp.from(((ZonedDateTime) rawValue).toInstant())
         if (rawValue instanceof OffsetDateTime) return Timestamp.from(((OffsetDateTime) rawValue).toInstant())
-        if (rawValue instanceof LocalDateTime) return Timestamp.valueOf((LocalDateTime) rawValue)
+        if (rawValue instanceof LocalDateTime) return Timestamp.from(((LocalDateTime) rawValue).toInstant(ZoneOffset.UTC))
         if (rawValue instanceof LocalDate) return Timestamp.from(((LocalDate) rawValue).atStartOfDay().toInstant(ZoneOffset.UTC))
 
         String text = ValueSupport.normalize(rawValue)
@@ -61,8 +64,9 @@ class ShopifyExtractSupport {
                 { String value -> Timestamp.from(Instant.parse(value)) },
                 { String value -> Timestamp.from(OffsetDateTime.parse(value).toInstant()) },
                 { String value -> Timestamp.from(ZonedDateTime.parse(value).toInstant()) },
-                { String value -> Timestamp.valueOf(value) },
-                { String value -> Timestamp.valueOf(LocalDateTime.parse(value)) },
+                // SQL text ("2026-11-01 00:00:00") is read as ISO local text, never through Timestamp.valueOf, which goes
+                // through the JVM's zone and so shifts a wall time that zone skips (a DST gap).
+                { String value -> Timestamp.from(LocalDateTime.parse(value.replaceFirst(' ', 'T')).toInstant(ZoneOffset.UTC)) },
                 { String value -> Timestamp.from(LocalDate.parse(value).atStartOfDay().toInstant(ZoneOffset.UTC)) },
         ]
         for (Closure<Timestamp> parser : parsers) {
@@ -76,7 +80,7 @@ class ShopifyExtractSupport {
         return null
     }
 
-    static String formatWindow(Timestamp timestamp) {
+    private static String formatWindow(Timestamp timestamp) {
         return timestamp?.toInstant()?.toString()
     }
 
@@ -90,7 +94,7 @@ class ShopifyExtractSupport {
         return safeName.toLowerCase(Locale.ROOT).endsWith(".json") ? safeName : "${safeName}.json"
     }
 
-    static String safeJsonlFileName(Object rawName, String fallback) {
+    private static String safeJsonlFileName(Object rawName, String fallback) {
         String safeName = DataManagerSupport.safeToken(rawName, fallback)
         if (safeName.toLowerCase(Locale.ROOT).endsWith(".jsonl")) return safeName
         return safeName.replaceFirst(/(?i)\.json$/, "") + ".jsonl"
@@ -272,32 +276,21 @@ class ShopifyExtractSupport {
     }
 
     /**
-     * DAR-UI-044 / DAR-BE-063: what the source filters dropped, beside the extract, for the conclude
-     * pass. Advisory: a write failure becomes a warning, never a failed extract.
-     */
-    static void writeExcludedSidecar(def ec, Map excludedCollector, String outputBaseLocation,
-                                     String outputFileName, List<String> warnings) {
-        try {
-            ExcludedRecordsSidecar.writeBeside(ec, excludedCollector, outputBaseLocation, outputFileName, null)
-        } catch (Exception sidecarError) {
-            warnings.add("Excluded-records sidecar not written: ${sidecarError.message}".toString())
-        }
-    }
-
-    /**
      * The requestMetadata keys every bulk extract reports, in their reported order. Values may be
      * null; the caller appends its own keys and then drops the null ones, so the order is kept.
      *
      * @param passThrough the raw automationId, fileSide, systemEnumId and sourceTypeEnumId parameters
      * @param window a {@link #resolveSourceWindow} result
      * @param rawJsonl a {@link #moveRawJsonl} result
+     * @param filterField the order field the search matched: created_at, updated_at, or id for a read by key
      */
     static Map<String, Object> bulkRequestMetadata(String sourceType, String configIdValue, Map passThrough,
-                                                   Map window, String searchQuery, Map bulkOperationResult, Map rawJsonl) {
+                                                   Map window, String searchQuery, Map bulkOperationResult, Map rawJsonl,
+                                                   String filterField = "created_at") {
         Map sourceWindow = (Map) window.sourceWindow
         return [
                 sourceType            : sourceType,
-                extractionMode        : "BULK_OPERATION_DATE_FILTER",
+                extractionMode        : filterField == "id" ? "BULK_OPERATION_ID_LOOKUP" : "BULK_OPERATION_DATE_FILTER",
                 graphqlExecutionMode  : "BULK_OPERATION",
                 shopifyAuthConfigId   : configIdValue,
                 automationId          : ValueSupport.normalize(passThrough.automationId),
@@ -307,7 +300,7 @@ class ShopifyExtractSupport {
                 sourceTimeZone        : sourceWindow.timeZone,
                 calendarDateNormalized: sourceWindow.calendarDateNormalized,
                 exactWindowPreserved  : sourceWindow.exactWindowPreserved,
-                filterFields          : ["created_at"],
+                filterFields          : [filterField],
                 searchQueries         : [searchQuery],
                 windowStartUtc        : window.startText,
                 windowEndUtc          : window.endText,

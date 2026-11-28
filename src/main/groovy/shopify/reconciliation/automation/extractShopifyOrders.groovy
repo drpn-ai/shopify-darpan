@@ -149,8 +149,10 @@ try {
     if (orphanLines) outputWarnings.add("${orphanLines} Shopify order line(s) arrived away from their order and were left off it.".toString())
     recordCount = extractWriter.recordCount
     dataAvailable = extractWriter.recordCount > 0
+    // DAR-OPS-029 S42a: the field the search actually matched, so the metadata says what was read.
+    String filterField = idKeys ? "id" : (normalize(windowFieldName) == "updatedAt" ? "updated_at" : "created_at")
     Map<String, Object> metadata = ShopifyExtractSupport.bulkRequestMetadata("SHOPIFY_GRAPHQL_ORDERS", configIdValue,
-            context, window, searchQuery, bulkOperationResult, rawJsonl)
+            context, window, searchQuery, bulkOperationResult, rawJsonl, filterField)
     metadata.putAll([
             extractedRecordCount    : extractedRecordCount,
             keptRecordCount         : extractWriter.recordCount,
