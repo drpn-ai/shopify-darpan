@@ -133,4 +133,41 @@ class ShopifyProtectedFieldGuardTests {
         assertEquals(false, result.ok)
         assertEquals(false, result.retryable)
     }
+
+    // ---- OC210 (DAR-OPS-029 S15a, security): one bounded check per document, however its bulk jobs nest or repeat
+
+    /** A plain query selecting `n` aliased ids of the shop, with `tag` making each such query a distinct string. */
+    static String wideQuery(String tag, int n) {
+        return "{ shop { " + (1..n).collect { "${tag}${it}: id" }.join(" ") + " } }"
+    }
+
+    @Test
+    void aBulkJobInsideABulkJobIsRefused() {
+        // The inner job is a query, so the mutation check never saw it; its own bulk field was walked again, level after level.
+        String nested = 'mutation { bulkOperationRunQuery(query: "{ again: bulkOperationRunQuery(query: \\"{ shop { id } }\\") { bulkOperation { id } } }") { bulkOperation { id } } }'
+        String refusal = ShopifyProtectedFieldGuard.refusal(nested)
+        assertTrue(refusal != null && refusal.contains("bulk job inside a bulk job"), String.valueOf(refusal))
+    }
+
+    @Test
+    void theBulkJobsOfOneDocumentShareOneBudget() {
+        // Three distinct inner queries of 3,600 fields each: every one fit its own fresh budget, together they pass it.
+        String jobs = (1..3).collect { int n ->
+            "j${n}: bulkOperationRunQuery(query: \"${wideQuery("t${n}x", 3600)}\") { bulkOperation { id } }"
+        }.join(" ")
+        String refusal = ShopifyProtectedFieldGuard.refusal("mutation { ${jobs} }".toString())
+        assertTrue(refusal != null && refusal.contains("more than"), String.valueOf(refusal))
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 10, threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
+    void aFewKilobytesOfRepeatedAndNestedBulkJobsAreCheckedQuickly() {
+        // The attack: a variable's default holds the inner query, and fragment doubling repeats the bulk field thousands of
+        // times; each repeat was checked afresh with a new budget. Now the inner query is checked once, within one budget.
+        StringBuilder doc = new StringBuilder('mutation run($q: String = "' + wideQuery("w", 500) + '") { ...F1 }\n')
+        for (int i = 1; i < 14; i++) doc.append("fragment F${i} on Mutation { ...F${i + 1} ...F${i + 1} }\n")
+        doc.append('fragment F14 on Mutation { bulkOperationRunQuery(query: $q) { bulkOperation { id } } }\n')
+        String refusal = ShopifyProtectedFieldGuard.refusal(doc.toString())
+        assertTrue(refusal != null && refusal.contains("more than"), String.valueOf(refusal))
+    }
 }

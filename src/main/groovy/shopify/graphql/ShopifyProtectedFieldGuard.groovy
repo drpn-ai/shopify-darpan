@@ -47,11 +47,17 @@ class ShopifyProtectedFieldGuard {
 
     /** Null when the document may be sent; otherwise the reason it may not. */
     static String refusal(String document, Map variables = [:]) {
-        return checkDocument(document, variables ?: [:], true)
+        return checkDocument(document, variables ?: [:], true, [0] as int[], new HashSet<String>())
     }
 
-    private static String checkDocument(String document, Map variables, boolean bulkRunAllowed) {
-        Map report = GraphQlDocumentCheck.fieldPaths(document)
+    /**
+     * OC210 (DAR-OPS-029 S15a, security). One bounded check per document: every fieldPaths walk of the call spends from one
+     * budget (spent), a bulk job's query is checked at most once however often it repeats (checkedInner), and a bulk job
+     * inside a bulk job is refused. Before, each inner query got a fresh budget and nested without limit, so a few KB of
+     * fragment doubling made billions of checks and pinned an agent query slot.
+     */
+    private static String checkDocument(String document, Map variables, boolean bulkRunAllowed, int[] spent, Set<String> checkedInner) {
+        Map report = GraphQlDocumentCheck.fieldPaths(document, spent)
         if (report.errors) return couldNotCheck(report.errors[0] as String)
         List<String> operations = (List<String>) report.operations
         if (operations.size() != 1) return couldNotCheck("it holds ${operations.size()} operations, and only one may be sent.")
@@ -71,10 +77,12 @@ class ShopifyProtectedFieldGuard {
             Map<String, Map> arguments = (Map<String, Map>) field.arguments
             if (isRefused(path)) refused << label(path)
             if (names(path) == [BULK_RUN_QUERY]) {
+                if (!bulkRunAllowed) return couldNotCheck("it runs a bulk job inside a bulk job.")
                 // Every bulk job, however many are aliased into the document, is checked; one that can't be read is refused.
                 def inner = stringArgument(arguments?.get("query"), variables)
                 if (!(inner instanceof String) || !inner) return couldNotCheck("a bulk job's query is missing or not a plain string.")
-                String innerRefusal = checkDocument(inner, [:], false)
+                if (!checkedInner.add((String) inner)) continue
+                String innerRefusal = checkDocument((String) inner, [:], false, spent, checkedInner)
                 if (innerRefusal) return innerRefusal
             } else if (arguments?.containsKey("query")) {
                 def search = stringArgument(arguments.get("query"), variables)
