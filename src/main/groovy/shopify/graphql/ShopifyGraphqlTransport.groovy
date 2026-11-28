@@ -57,7 +57,9 @@ class ShopifyGraphqlTransport {
             } catch (Exception e) {
                 logger.warn("Shopify GraphQL request attempt ${attempt}/${maxAttempts} failed: ${e.class.simpleName}: ${e.message}")
                 lastResult = safeFailure("Shopify GraphQL request failed before a valid response was received.", attempt < maxAttempts)
-                countCall(lastResult)
+                // The vetted client refuses a host at its DNS step (OutboundHttpPolicy.resolveVetted) before sending anything:
+                // the outbound policy blocking too, so not a call to Shopify.
+                if (!(e instanceof UnknownHostException || e.cause instanceof UnknownHostException)) countCall(lastResult)
             }
 
             if (lastResult.ok || !lastResult.retryable || attempt >= maxAttempts) return lastResult
@@ -98,7 +100,7 @@ class ShopifyGraphqlTransport {
         if (result?.throttled || (result?.statusCode as Integer) == 429) ShopifyCallTally.add("throttled")
     }
 
-    static boolean isMutationDocument(String queryDocument) {
+    private static boolean isMutationDocument(String queryDocument) {
         String stripped = (queryDocument ?: "").replaceAll(/(?m)^\s*#[^\n]*$/, "").trim()
         return stripped.toLowerCase(Locale.ROOT) ==~ /(?s)mutation\b.*/
     }
@@ -120,7 +122,7 @@ class ShopifyGraphqlTransport {
         }
     }
 
-    static Map<String, Object> buildRequest(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
+    private static Map<String, Object> buildRequest(Map authConfig, String queryDocument, Map variables = [:], Map options = [:]) {
         String endpointUrl = buildAdminGraphqlEndpoint(authConfig?.shopApiUrl, authConfig?.apiVersion)
         Integer connectTimeoutMillis = normalizeInt(options.connectTimeoutMillis, DEFAULT_CONNECT_TIMEOUT_MILLIS)
         Integer readTimeoutMillis = normalizeInt(options.readTimeoutMillis, DEFAULT_READ_TIMEOUT_MILLIS)
@@ -140,7 +142,7 @@ class ShopifyGraphqlTransport {
         ]
     }
 
-    static String buildAdminGraphqlEndpoint(Object shopApiUrl, Object apiVersion) {
+    private static String buildAdminGraphqlEndpoint(Object shopApiUrl, Object apiVersion) {
         String baseUrl = normalize(shopApiUrl)
         String version = normalize(apiVersion)
         if (!baseUrl) throw new IllegalArgumentException("Shop/API URL is required.")
@@ -267,7 +269,7 @@ class ShopifyGraphqlTransport {
      * strings or {message} maps) and request id, so a 401/403 can be told apart without a deploy. A body that is not
      * Shopify's JSON (a proxy or CDN page) is never echoed; the message says what kind of answer it was.
      */
-    static String refusalMessage(int statusCode, String bodyText, String contentType, String requestId) {
+    private static String refusalMessage(int statusCode, String bodyText, String contentType, String requestId) {
         String head = "Shopify GraphQL request failed with HTTP ${statusCode}".toString()
         String idPart = requestId ? " (Shopify request id ${clip(requestId, 80)})".toString() : ""
         Object parsed = null

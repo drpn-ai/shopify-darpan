@@ -230,6 +230,23 @@ class ShopifyGraphqlTransportTests {
         assertNull(ShopifyCallTally.stop(), "nothing reached Shopify")
     }
 
+    /**
+     * DAR-OPS-029 S42b. The vetted client refuses a host at its DNS step (OutboundHttpPolicy.resolveVetted) with an
+     * UnknownHostException, before anything is sent: that is the outbound policy blocking too, so it is not a call.
+     */
+    @Test
+    void aConnectTheVettedResolverRefusesIsNotTallied() {
+        ShopifyCallTally.start()
+        Map<String, Object> result = ShopifyGraphqlTransport.execute(authConfig(), "query ShopifyOrders { shop { name } }", [:], [
+            maxAttempts : 1,
+            httpExecutor: { Map<String, Object> request ->
+                throw new UnknownHostException("example.myshopify.com resolves to a non-routable address (169.254.169.254): link-local")
+            },
+        ])
+        assertEquals(false, result.ok)
+        assertNull(ShopifyCallTally.stop(), "nothing reached Shopify")
+    }
+
     @Test
     void throttleDelayIsDerivedFromThrottleStatusCostMetadata() {
         long delay = ShopifyGraphqlTransport.throttleDelayMillis([
