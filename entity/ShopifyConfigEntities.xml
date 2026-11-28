@@ -64,7 +64,7 @@
     </entity>
 
     <!-- DAR-BE-275 -->
-    <entity entity-name="ShopifyInstallState" package="darpan.shopify" use="transactional" cache="never">
+    <entity entity-name="ShopifyInstallState" package="darpan.shopify" short-alias="shopifyInstallState" use="transactional" cache="never">
         <description>A single-use CSRF token for one in-flight Shopify app install. The install
             callback is a public endpoint (Shopify redirects the merchant's browser there with no Darpan
             session), so this row is what binds the returning code to the tenant, user, app and store
