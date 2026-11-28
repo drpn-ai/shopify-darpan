@@ -447,6 +447,53 @@ class ShopifyReturnRefsSupportTests {
                 "the suppression must report its own count: ${metadataFilters}")
     }
 
+    /**
+     * DAR-OPS-029 S42a (I3 conservation). Every in-window return is accounted for: a row of its own, represented by its
+     * refund's row, or suppressed as CLOSED-unrefunded, and each term is counted, so the three add up to the returns read.
+     */
+    @Test
+    void everyInWindowReturnIsAccountedForAndTheCountsAddUp() {
+        Map node = [
+                id              : "gid://shopify/Order/9010",
+                legacyResourceId: "9010",
+                name            : "#9010",
+                createdAt       : "2026-05-01T08:00:00Z",
+                refunds         : [[id: "gid://shopify/Refund/1001", createdAt: "2026-05-01T09:00:00Z"]],
+                returns         : [nodes: [
+                        // refunded: represented by its refund's row
+                        [id: "gid://shopify/Return/9101", status: "CLOSED", createdAt: "2026-05-01T08:30:00Z",
+                         refunds: [nodes: [[id: "gid://shopify/Refund/1001"]]]],
+                        [id: "gid://shopify/Return/9102", status: "OPEN", createdAt: "2026-05-01T08:35:00Z",
+                         refunds: [nodes: [[id: "gid://shopify/Refund/1001"]]]],
+                        // CLOSED, no refund: suppressed
+                        [id: "gid://shopify/Return/9103", status: "CLOSED", createdAt: "2026-05-01T08:40:00Z", refunds: [nodes: []]],
+                        // OPEN, no refund: its own row
+                        [id: "gid://shopify/Return/9104", status: "OPEN", createdAt: "2026-05-01T08:50:00Z", refunds: [nodes: []]],
+                        // outside the window: not read at all
+                        [id: "gid://shopify/Return/9105", status: "OPEN", createdAt: "2026-05-03T08:50:00Z", refunds: [nodes: []]],
+                ]],
+        ]
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            return adapt(doc, [ok: true, data: [orders: [
+                    edges   : [[cursor: "c1", node: node]],
+                    pageInfo: [hasNextPage: false, endCursor: "c1"],
+            ]]])
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        List<Map> records = (List<Map>) result.records
+        int returnRows = records.count { it.refundOrReturnType == ShopifyReturnRefsSupport.ID_TYPE_RETURN } as int
+        Map filters = (Map) ((Map) result.requestMetadata).get("filters")
+        assertEquals(1, records.count { it.refundOrReturnType == ShopifyReturnRefsSupport.ID_TYPE_REFUND }, "one REFUND row: ${records}")
+        assertEquals(1, returnRows, "only the OPEN unrefunded return has its own row: ${records}")
+        assertEquals(2, filters.get("refundedReturnsRepresentedByRefund"), "refunded returns are counted: ${filters}")
+        assertEquals(1, filters.get("closedUnrefundedReturnsSuppressed"), "${filters}")
+        assertEquals(4, returnRows + (filters.get("refundedReturnsRepresentedByRefund") as int) +
+                (filters.get("closedUnrefundedReturnsSuppressed") as int), "the four in-window returns add up")
+    }
+
     @Test
     void theSuppressionCountIsAlwaysPresentEvenWhenNothingWasSuppressed() {
         // Same reasoning as configuredExclusions' zero-count entries just below: an ABSENT key reads
@@ -474,6 +521,8 @@ class ShopifyReturnRefsSupportTests {
         Map metadataFilters = (Map) ((Map) result.requestMetadata).get("filters")
         assertEquals(0, metadataFilters.get("closedUnrefundedReturnsSuppressed"),
                 "a run that suppressed nothing must still say so: ${metadataFilters}")
+        assertEquals(0, metadataFilters.get("refundedReturnsRepresentedByRefund"),
+                "the refunded-return count is always present too: ${metadataFilters}")
     }
 
     @Test
@@ -1431,6 +1480,53 @@ class ShopifyReturnRefsSupportTests {
         assertEquals(1, filters.unreadableOrderReturnRows)
         assertEquals(0, filters.unreadableOrderRefundOnlyCount)
         assertTrue(((List) result.warnings).any { it.toString().contains("60-day order read limit") }, "${result.warnings}")
+    }
+
+    /**
+     * OC128 (I3 conservation): every in-window refund event on an order past the read limit is counted, the ones beside a
+     * rebuilt return too, and an event with no parseable createdAt is kept with the readable path's warning, not dropped.
+     */
+    @Test
+    void everyUncheckedRefundOnAnUnreadableOrderIsCountedAndNoEventIsDroppedSilently() {
+        Closure executor = unreadableOrderExecutor([
+                event("501", "return_created", "6000000000002", "2026-10-16T09:00:00Z", ["49829642371"], "#R1"),
+                event("502", "refund_created", "6000000000002", "2026-10-16T10:00:00Z"),   // beside a rebuilt return
+                event("503", "refund_created", "6000000000003", "2026-10-16T11:00:00Z"),   // refund-only order
+                event("504", "return_created", "6000000000004", "not a time", ["49143316611"], "#R2"),
+        ], ["49829642371": "14872976228483", "49143316611": "15542749593731"])
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z", [:], executor)
+
+        Map filters = (Map) ((Map) result.requestMetadata).filters
+        assertEquals(2, filters.unreadableOrderRefundEventsUnchecked, filters.toString())
+        assertEquals(1, filters.unreadableOrderRefundOnlyCount)
+        assertEquals(["501", "504"], ((List) result.records).collect { ((Map) it).refundOrReturnId }.sort(),
+                "the event with no parseable createdAt is kept, as on the readable path")
+        assertTrue(((List) result.warnings).any { it.toString().contains("Order 6000000000004 event 504 has no parseable createdAt") },
+                result.warnings.toString())
+        assertTrue(((List) result.warnings).any { it.toString().contains("1 refund(s) on them were not checked") },
+                result.warnings.toString())
+    }
+
+    /** OC126 (I4): Shopify saying "more pages" with no cursor fails the read; it never passes as the whole window. */
+    @Test
+    void anEventScanThatCannotContinueFailsInsteadOfPassingPartial() {
+        Closure executor = { Map cfg, String doc, Map vars, Map opts ->
+            if (doc.contains("events(")) {
+                return [ok: true, data: [events: [
+                        nodes   : [[action: "refund_created", subjectType: "Order", subjectId: "gid://shopify/Order/111"]],
+                        pageInfo: [hasNextPage: true, endCursor: null]]]]
+            }
+            return [ok: true, data: [nodes: [orderNode("111", ["gid://shopify/Refund/1"], [])]]]
+        }
+
+        Map result = ShopifyReturnRefsSupport.extractReturnRefs(authConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z", [:], executor)
+
+        assertEquals([], result.records)
+        assertEquals(false, result.dataAvailable)
+        assertTrue(((List) result.errors).any { it.toString().contains("gave no cursor after page 1") }, result.errors.toString())
     }
 
     @Test

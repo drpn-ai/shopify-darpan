@@ -90,6 +90,11 @@ class ShopifyReturnRefsSupport {
     static final String RETURN_STATUS_CLOSED = "CLOSED"
     /** requestMetadata.filters key reporting how many rows the CLOSED-unrefunded rule dropped. */
     static final String CLOSED_UNREFUNDED_SUPPRESSED_KEY = "closedUnrefundedReturnsSuppressed"
+    /**
+     * DAR-OPS-029 S42a (conservation): requestMetadata.filters key counting the in-window returns represented by their
+     * refund's row (the REFUNDED-RETURN NARROWING), so RETURN rows + this + CLOSED-unrefunded = the returns read.
+     */
+    static final String REFUNDED_RETURNS_KEY = "refundedReturnsRepresentedByRefund"
 
     private static final Pattern GID_TAIL = Pattern.compile('gid://shopify/[^/]+/(\\d+)(?:\\?.*)?$')
     private static final Pattern TRAILING_DIGITS = Pattern.compile('(\\d+)$')
@@ -143,6 +148,11 @@ class ShopifyReturnRefsSupport {
     static final String UNREADABLE_ORDER_COUNT_KEY = "unreadableOrderCount"
     static final String UNREADABLE_RETURN_ROWS_KEY = "unreadableOrderReturnRows"
     static final String UNREADABLE_REFUND_ONLY_KEY = "unreadableOrderRefundOnlyCount"
+    /**
+     * DAR-OPS-029 S42a (OC128): in-window refund events on orders past the read limit, every one of them, which Shopify
+     * does not expose and this extract therefore never checks (refund-only orders and orders rebuilt from a return alike).
+     */
+    static final String UNREADABLE_REFUND_EVENTS_UNCHECKED_KEY = "unreadableOrderRefundEventsUnchecked"
 
     /**
      * A REBUILT RETURN'S STATUS (DAR-BE-179). Order and Return are both unreadable past the 60-day limit,
@@ -325,25 +335,17 @@ class ShopifyReturnRefsSupport {
         Map<String, List<Map<String, Object>>> eventsByOrderId =
                 (Map<String, List<Map<String, Object>>>) (discovery.get("eventsByOrderId") ?: [:])
         List<String> unreadableOrderIds = []
-        Map<String, Integer> unreadableCounts = [rows: 0, refundOnly: 0, canceled: 0]
+        Map<String, Integer> unreadableCounts = [rows: 0, refundOnly: 0, canceled: 0, refundEventsUnchecked: 0]
 
         if (!errors) {
             discoveredOrderIds.collate(MAX_IDS_PER_NODES_CALL).each { List<String> idChunk ->
                 if (errors) return
                 Map<String, Object> variables = new LinkedHashMap<>(byIdVariables)
                 variables.put("ids", idChunk.collect { ("gid://shopify/Order/" + it).toString() })
-                Map response = (Map) exec(authConfig, byIdDocument, variables, options ?: [:])
-                if (response?.ok != true) {
-                    errors.addAll(((List) (response?.errors ?: ["Shopify return-refs by-id fetch failed."]))
-                            .collect { normalize(it) }.findAll { it })
-                    return
-                }
-                Object rawNodes = walk(response, ["data", "nodes"])
-                if (!(rawNodes instanceof List)) {
-                    errors.add("Shopify return-refs response had no nodes list.")
-                    return
-                }
-                ((List) rawNodes).eachWithIndex { Object rawNode, int index ->
+                List rawNodes = fetchNodes(authConfig, byIdDocument, variables, exec, options, errors,
+                        "Shopify return-refs by-id fetch failed.", "Shopify return-refs response had no nodes list.")
+                if (rawNodes == null) return
+                rawNodes.eachWithIndex { Object rawNode, int index ->
                     // nodes(ids:) answers null for an order older than Shopify's 60-day read limit (no
                     // read_all_orders) even though its return events were discovered. Recorded, never
                     // skipped silently: see UNREADABLE ORDERS.
@@ -382,11 +384,13 @@ class ShopifyReturnRefsSupport {
                 // the exact ambiguity that made the withdrawn IN_PROGRESS pill undiagnosable.
                 (CLOSED_UNREFUNDED_SUPPRESSED_KEY):
                         normalizeInt(suppressionCounters.get(CLOSED_UNREFUNDED_SUPPRESSED_KEY), 0),
+                (REFUNDED_RETURNS_KEY)            : normalizeInt(suppressionCounters.get(REFUNDED_RETURNS_KEY), 0),
                 // ALWAYS present, zero included, for the same reason: see UNREADABLE ORDERS.
                 (UNREADABLE_ORDER_COUNT_KEY): unreadableOrderIds.size(),
                 (UNREADABLE_RETURN_ROWS_KEY): unreadableCounts.rows,
                 (UNREADABLE_REFUND_ONLY_KEY): unreadableCounts.refundOnly,
                 (UNREADABLE_CANCELED_KEY)   : unreadableCounts.canceled,
+                (UNREADABLE_REFUND_EVENTS_UNCHECKED_KEY): unreadableCounts.refundEventsUnchecked,
         ] as Map<String, Object>
         return [
                 records        : records,
@@ -601,10 +605,11 @@ class ShopifyReturnRefsSupport {
         String cursor = null
         int pageCount = 0
         while (true) {
+            // DAR-OPS-029 S42a (OC126): a scan that cannot finish fails; a partial event list must never read as the
+            // whole window. Discovery turns this into the extract's errors; the lifecycle scan into "status unknown".
             if (pageCount++ >= MAX_PAGE_COUNT) {
-                warnings.add(("Return-event discovery stopped at the " + MAX_PAGE_COUNT +
-                        "-page ceiling; the window may be incomplete.").toString())
-                break
+                return [ok: false, orderIds: [], errors: [("Shopify return events ran past " + MAX_PAGE_COUNT +
+                        " pages without ending, so the window was not read in full. Read a shorter window.").toString()]]
             }
             Map<String, Object> variables = [first: EVENTS_PAGE_SIZE, after: cursor, query: searchQuery]
             Map response = (Map) exec(authConfig, EVENTS_DOCUMENT, variables, options ?: [:])
@@ -636,8 +641,8 @@ class ShopifyReturnRefsSupport {
             if (pageInfo?.get("hasNextPage") != true) break
             cursor = normalize(pageInfo?.get("endCursor"))
             if (!cursor) {
-                warnings.add("Shopify reported another page of return events but returned no cursor; discovery stopped early.")
-                break
+                return [ok: false, orderIds: [], errors: [("Shopify reported another page of return events but gave no " +
+                        "cursor after page " + pageCount + ", so the window was not read in full.").toString()]]
             }
         }
         return [ok: true, orderIds: new ArrayList<String>(orderIds), eventsByOrderId: eventsByOrderId, errors: []]
@@ -681,17 +686,21 @@ class ShopifyReturnRefsSupport {
                                                                            Map<String, Integer> counts) {
         List<Map<String, Object>> rows = []
         List<String> refundOnlyOrderIds = []
+        int refundEventsUnchecked = 0
+        int refundEventsOnRebuiltOrders = 0
         Map<String, Map<String, Object>> eventByKey = [:]
         unreadableOrderIds.each { String orderId ->
-            List<Map<String, Object>> inWindowEvents = ((List<Map<String, Object>>) (eventsByOrderId.get(orderId) ?: [])).findAll { Map e ->
-                Long createdMillis = parseIsoMillis(e.createdAt)
-                createdMillis != null && createdMillis >= floorMillis && createdMillis < windowEndMillis
-            }
+            // The readable path's window filter, so an event with no parseable createdAt is kept with its warning here too.
+            List<Map<String, Object>> inWindowEvents = inWindow((List<Map<String, Object>>) (eventsByOrderId.get(orderId) ?: []),
+                    orderId, "event", floorMillis, windowEndMillis, warnings)
+            int refundEvents = inWindowEvents.count { it.action == ACTION_REFUND_CREATED } as int
+            refundEventsUnchecked += refundEvents
             List<Map<String, Object>> returnEvents = inWindowEvents.findAll { it.action == ACTION_RETURN_CREATED && it.id }
             if (returnEvents.isEmpty()) {
-                if (inWindowEvents.any { it.action == ACTION_REFUND_CREATED }) refundOnlyOrderIds.add(orderId)
+                if (refundEvents) refundOnlyOrderIds.add(orderId)
                 return
             }
+            refundEventsOnRebuiltOrders += refundEvents
             returnEvents.each { Map<String, Object> e -> eventByKey.put("${orderId}|${e.id}".toString(), e + [orderId: orderId]) }
         }
 
@@ -699,19 +708,11 @@ class ShopifyReturnRefsSupport {
         Map<String, String> lineIdByReturnLineItem = [:]
         returnLineItemIds.collate(MAX_IDS_PER_NODES_CALL).each { List<String> chunk ->
             if (errors) return
-            Map response = (Map) exec(authConfig, RETURN_LINE_ITEMS_DOCUMENT,
-                    [ids: chunk.collect { ("gid://shopify/ReturnLineItem/" + it).toString() }], options ?: [:])
-            if (response?.ok != true) {
-                errors.addAll(((List) (response?.errors ?: ["Shopify return line item fetch failed."]))
-                        .collect { normalize(it) }.findAll { it })
-                return
-            }
-            Object rawNodes = walk(response, ["data", "nodes"])
-            if (!(rawNodes instanceof List)) {
-                errors.add("Shopify return line item response had no nodes list.")
-                return
-            }
-            ((List) rawNodes).each { Object rawNode ->
+            List rawNodes = fetchNodes(authConfig, RETURN_LINE_ITEMS_DOCUMENT,
+                    [ids: chunk.collect { ("gid://shopify/ReturnLineItem/" + it).toString() }], exec, options, errors,
+                    "Shopify return line item fetch failed.", "Shopify return line item response had no nodes list.")
+            if (rawNodes == null) return
+            rawNodes.each { Object rawNode ->
                 if (!(rawNode instanceof Map)) return
                 String lineId = bareId(walk(rawNode, ["fulfillmentLineItem", "lineItem", "id"]))
                 String returnLineItemId = bareId(((Map) rawNode).get("id"))
@@ -760,11 +761,14 @@ class ShopifyReturnRefsSupport {
         counts.rows = rows.size()
         counts.refundOnly = refundOnlyOrderIds.size()
         counts.canceled = canceled
+        counts.refundEventsUnchecked = refundEventsUnchecked
 
         warnings.add(("${unreadableOrderIds.size()} order(s) with return or refund activity in this window are older " +
                 "than Shopify's 60-day order read limit. ${rows.size()} return(s) on them were rebuilt from their " +
                 "return events and are checked by order and line" +
-                (canceled ? "; ${canceled} canceled return(s) on them were left out" : "") + ".").toString())
+                (canceled ? "; ${canceled} canceled return(s) on them were left out" : "") +
+                (refundEventsOnRebuiltOrders ? "; ${refundEventsOnRebuiltOrders} refund(s) on them were not checked, " +
+                        "since Shopify does not expose refunds on orders past the read limit" : "") + ".").toString())
         if (refundOnlyOrderIds) {
             warnings.add(("${refundOnlyOrderIds.size()} of those order(s) had only a refund in this window, which " +
                     "Shopify does not expose on orders past the read limit, so they were not checked: " +
@@ -910,7 +914,10 @@ class ShopifyReturnRefsSupport {
             // Return.refunds, read into hasRefund by collectEvents below) is represented by its
             // refund's own REFUND row alone — see the class doc's "REFUNDED-RETURN NARROWING" and
             // "AUTHORITATIVE DISCRIMINATOR" sections above. Only an unrefunded return gets a row here.
-            if (ret.hasRefund == true) return
+            if (ret.hasRefund == true) {
+                counters.put(REFUNDED_RETURNS_KEY, normalizeInt(counters.get(REFUNDED_RETURNS_KEY), 0) + 1)
+                return
+            }
             // CLOSED-unrefunded suppression (2026-09-01, DAR-BE-027) — see the section of this
             // method's doc under that name. A finished return carrying no refund has no OMS
             // counterpart and never had one, so reporting it missing-in-OMS is a permanent false
@@ -1141,6 +1148,22 @@ class ShopifyReturnRefsSupport {
             }
             return createdAtMillis >= floorMillis && createdAtMillis < windowEndMillis
         }
+    }
+
+    /** One nodes(ids:) call: its nodes list, or null with the reason added to errors (Shopify's own words when it gave any). */
+    private static List fetchNodes(Map authConfig, String document, Map variables, Closure exec, Map options,
+                                   List<String> errors, String failedMessage, String noNodesMessage) {
+        Map response = (Map) exec(authConfig, document, variables, options ?: [:])
+        if (response?.ok != true) {
+            errors.addAll(((List) (response?.errors ?: [failedMessage])).collect { normalize(it) }.findAll { it })
+            return null
+        }
+        Object rawNodes = walk(response, ["data", "nodes"])
+        if (!(rawNodes instanceof List)) {
+            errors.add(noNodesMessage)
+            return null
+        }
+        return (List) rawNodes
     }
 
     private static Long parseIsoMillis(Object rawValue) {
