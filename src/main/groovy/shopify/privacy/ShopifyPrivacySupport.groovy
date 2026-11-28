@@ -1,10 +1,15 @@
 package shopify.privacy
 
+import darpan.common.DarpanEntityConstants
+import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.TenantScopedFinder
+import org.moqui.entity.EntityCondition
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import shopify.facade.settings.ShopifyInstallSupport
 import shopify.facade.settings.ShopifyTokenSupport
+
+import java.sql.Timestamp
 
 import static darpan.common.ValueSupport.normalize
 
@@ -20,7 +25,8 @@ import static darpan.common.ValueSupport.normalize
  * systems' data and are not touched.</p>
  *
  * <p><strong>Tenants.</strong> The store is found through ShopifyAuthConfig.shopApiUrl, across every tenant that
- * connects it; each tenant is handled separately and every query carries that tenant's companyUserGroupId
+ * connects it and every tenant ever granted one of those connections (OC204: a peer reads through the owner's config id);
+ * each tenant is handled separately and every query carries that tenant's companyUserGroupId
  * explicitly (findGlobalUnscoped skips the active-tenant filter). An unknown store changes nothing.</p>
  */
 class ShopifyPrivacySupport {
@@ -29,20 +35,52 @@ class ShopifyPrivacySupport {
     static final String RECORD_ENTITY = "darpan.audit.AuditFindingRecord"
     static final String SHOPIFY_SYSTEM = "SHOPIFY"
 
-    /**
-     * The tenants whose Shopify connections point at this store (name.myshopify.com); with an app id, only those connected
-     * through that Darpan app (shop/redact from that app's webhook). Each tenant is then handled with its own condition.
-     */
-    private static Set<String> tenantsForShop(def ec, Object rawShopDomain, String appId = null) {
+    static final String CONFIG_TYPE = SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH
+
+    /** The store's connections (name.myshopify.com; through the signing app when one is named): configId -> owning tenant. */
+    private static Map<String, String> storeConnections(def ec, Object rawShopDomain, String appId = null) {
         String shop = normalize(rawShopDomain)?.toLowerCase(Locale.ROOT)
-        if (!ShopifyInstallSupport.isValidShopDomain(shop)) return [] as Set<String>
+        if (!ShopifyInstallSupport.isValidShopDomain(shop)) return [:]
         def find = TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.CONFIG_ENTITY,
-                "privacy request: find every tenant connecting this store (through the signing app when one is named); each is then handled with its own tenant condition")
-                ?.selectField("companyUserGroupId")?.selectField("shopApiUrl")?.useCache(false)
+                "privacy request: every connection to this store (through the signing app when one is named); each tenant is then handled with its own condition")
+                ?.selectField("shopifyAuthConfigId")?.selectField("companyUserGroupId")?.selectField("shopApiUrl")?.useCache(false)
         if (appId) find = find?.condition("shopifyAppId", appId)
-        List configs = (find?.list() ?: []) as List
-        return configs.findAll { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) == shop }
-                .collect { normalize(it.companyUserGroupId) }.findAll { it } as Set<String>
+        Map<String, String> out = [:]
+        ((find?.list() ?: []) as List).findAll { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) == shop }.each {
+            String id = normalize(it.shopifyAuthConfigId), owner = normalize(it.companyUserGroupId)
+            if (id && owner) out[id] = owner
+        }
+        return out
+    }
+
+    /**
+     * OC204: every tenant that read the store through these connections: their owners, and every tenant ever granted one
+     * (ConfigTenantAccess), a revoked grant too, since a former peer's records and kept copies are still the store's data.
+     */
+    private static Set<String> tenantsOf(def ec, Map<String, String> connections) {
+        Set<String> tenants = new LinkedHashSet<String>(connections.values())
+        if (connections) {
+            ((TenantScopedFinder.findGlobalUnscoped(ec, DarpanEntityConstants.CONFIG_TENANT_ACCESS,
+                    "privacy request: every tenant ever granted the store's connections, revoked grants included")
+                    ?.condition("configTypeEnumId", CONFIG_TYPE)?.condition("configId", EntityCondition.IN, connections.keySet())
+                    ?.useCache(false)?.list() ?: []) as List).each { tenants.add(normalize(it.tenantUserGroupId)) }
+        }
+        tenants.remove(null)
+        return tenants
+    }
+
+    /** The tenants holding the store's data: owners and peers of its connections (OC204). */
+    private static Set<String> tenantsForShop(def ec, Object rawShopDomain, String appId = null) {
+        return tenantsOf(ec, storeConnections(ec, rawShopDomain, appId))
+    }
+
+    /** OC204: whether this tenant still reads another Shopify connection through a live grant (one not to this store). */
+    private static boolean liveGrantElsewhere(def ec, String tenantId, Collection<String> storeConfigIds) {
+        Timestamp now = ec.user.nowTimestamp
+        return ((TenantScopedFinder.findGlobalUnscoped(ec, DarpanEntityConstants.CONFIG_TENANT_ACCESS,
+                "privacy shop redact: this tenant's other live shared Shopify connections, explicit tenantUserGroupId condition")
+                ?.condition("configTypeEnumId", CONFIG_TYPE)?.condition("tenantUserGroupId", tenantId)?.useCache(false)?.list() ?: []) as List)
+                .any { !storeConfigIds.contains(normalize(it.configId)) && (it.thruDate == null || ((Timestamp) it.thruDate).after(now)) }
     }
 
     /** An order id as Darpan may have stored it: the numeric id and its GraphQL global id. */
@@ -110,23 +148,26 @@ class ShopifyPrivacySupport {
         String shop = normalize(rawShopDomain)?.toLowerCase(Locale.ROOT)
         String appId = normalize(rawAppId)
         Map<String, Object> out = [shopDomain: shop, connectionsCleared: 0, deletedByTenant: [:], keptCopiesDropped: [:], needsReview: []]
-        Set<String> tenants = tenantsForShop(ec, shop, appId)
+        Map<String, String> connections = storeConnections(ec, shop, appId)
+        Set<String> tenants = tenantsOf(ec, connections)
         if (!tenants) { logger.info("Shopify shop redact for an unknown store; nothing held"); return out }
+        // DAR-BE-284: records and kept data that say which connection read them go exactly when it was this store's. OC204: for
+        // every tenant that read through it, the owner and every peer (a peer's records carry the owner's config id).
+        List<String> storeConfigIds = connections.keySet() as List<String>
         tenants.each { String tenantId ->
             List configs = ((TenantScopedFinder.findGlobalUnscoped(ec, ShopifyInstallSupport.CONFIG_ENTITY,
                             "privacy shop redact: this tenant's connections, explicit companyUserGroupId condition applied")
                     ?.condition("companyUserGroupId", tenantId)?.useCache(false)?.list() ?: []) as List)
             // With an app: only that app's connections to the store are cleared; anything else still live for the tenant
             // (a pasted token to the same store, or another store) means its findings may still be in use.
-            List thisStore = configs.findAll { ShopifyTokenSupport.shopDomainOf(it.shopApiUrl) == shop && (!appId || normalize(it.shopifyAppId) == appId) }
-            boolean otherStoreActive = configs.any { !(it in thisStore) && normalize(it.isActive) != "N" }
+            List thisStore = configs.findAll { connections.containsKey(normalize(it.shopifyAuthConfigId)) }
+            boolean otherStoreActive = configs.any { !(it in thisStore) && normalize(it.isActive) != "N" } ||
+                    liveGrantElsewhere(ec, tenantId, storeConfigIds)
             thisStore.each { def config ->
                 config.setAll([accessToken: null, refreshToken: null, accessTokenExpiresDate: null, refreshTokenExpiresDate: null, isActive: "N"])
                 ShopifyInstallSupport.withAuthzLifted(ec) { -> config.update() }
                 out.connectionsCleared = (out.connectionsCleared as int) + 1
             }
-            // DAR-BE-284: records that say which connection read them go exactly when it was this store's.
-            List<String> storeConfigIds = thisStore.collect { normalize(it.shopifyAuthConfigId) }.findAll { it } as List<String>
             // OC92: the store's kept copies and the ID index rows its connections wrote go too; no retention clears them.
             // A copy mid-refresh refuses, so the request fails here and Shopify retries it.
             if (storeConfigIds) {

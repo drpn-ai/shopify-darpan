@@ -26,6 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 class ShopifyPrivacyRequestSmokeTests {
     private static final String A = "PRIV_A"
     private static final String B = "PRIV_B"
+    /** OC204: peers that read the store only through A's shared connection (C granted, D granted then revoked). */
+    private static final String C = "PRIV_C"
+    private static final String D = "PRIV_D"
     private static final String SHOP = "priv-store.myshopify.com"
     private static final String OTHER_SHOP = "priv-other.myshopify.com"
     private ExecutionContext ec
@@ -46,11 +49,13 @@ class ShopifyPrivacyRequestSmokeTests {
     @BeforeEach
     void seed() {
         ["darpan.audit.AuditFindingRecord", "darpan.audit.AuditFinding"].each {
-            ec.entity.find(it).condition("companyUserGroupId", "in", [A, B]).deleteAll()
+            ec.entity.find(it).condition("companyUserGroupId", "in", [A, B, C, D]).deleteAll()
         }
+        ec.entity.find("darpan.auth.ConfigTenantAccess").condition("tenantUserGroupId", "in", [C, D]).deleteAll()
         ec.entity.find("darpan.shopify.ShopifyAuthConfig").condition("companyUserGroupId", "in", [A, B]).deleteAll()
-        ["darpan.idindex.RecordIdIndex", "darpan.idindex.RecordIdIndexCursor", "darpan.dataset.DatasetRead", "darpan.dataset.Dataset"].each {
-            ec.entity.find(it).condition("companyUserGroupId", "in", [A, B]).deleteAll()
+        ["darpan.idindex.RecordIdIndex", "darpan.idindex.RecordIdIndexCursor", "darpan.idindex.RecordIdIndexDrop", "darpan.dataset.DatasetRead",
+         "darpan.dataset.Dataset"].each {
+            ec.entity.find(it).condition("companyUserGroupId", "in", [A, B, C, D]).deleteAll()
         }
         [A, B].each { String t ->
             upsert("moqui.security.UserGroup", [userGroupId: t, description: t, groupTypeEnumId: TenantAccessSupport.DARPAN_COMPANY_GROUP_TYPE_ENUM_ID])
@@ -141,6 +146,42 @@ class ShopifyPrivacyRequestSmokeTests {
         assertTrue(keptDataLeft(B, "PRIV_DS_B2", "${B}_CFG2".toString()), "B's other store keeps its copy and index")
     }
 
+    /**
+     * OC204 (Session 010's security re-verify): A shares its connection to the store with C, and once shared it with D (revoked).
+     * Both read the store through it, so their finding records and kept data carry A's config id. shop/redact erases them as
+     * it erases A's: a former peer's data is still the store's data.
+     */
+    @Test
+    void shopRedactErasesWhatPeersReadThroughASharedConnectionRevokedGrantsIncluded() {
+        String shared = "${A}_CFG".toString()
+        peer(C, shared, null)
+        peer(D, shared, java.sql.Timestamp.valueOf("2026-06-01 00:00:00"))
+        [C, D].each { String t ->
+            finding(t, "F9", [["SHOPIFY", "9001", null]], shared)
+            keptCopy(t, "PRIV_DS_${t}".toString(), shared)
+        }
+        Map result = (Map) call("redact#Shop", [shopDomain: SHOP]).result
+        [C, D].each { String t ->
+            assertEquals([], shopifyRecordIds(t), "${t}'s records read through A's shared connection are erased")
+            assertFalse(keptDataLeft(t, "PRIV_DS_${t}".toString(), shared), "${t}'s kept copy and index rows are erased")
+        }
+        assertNull(ec.entity.find("darpan.shopify.ShopifyAuthConfig").condition("shopifyAuthConfigId", shared).useCache(false).one().accessToken)
+        assertTrue(((Map) result.deletedByTenant).keySet().containsAll([C, D]))
+    }
+
+    /** OC204: customers/redact and the data request reach a peer that read the store through a shared connection. */
+    @Test
+    void customerRedactAndDataRequestReachAPeerOfASharedConnection() {
+        String shared = "${A}_CFG".toString()
+        peer(C, shared, null)
+        finding(C, "F9", [["SHOPIFY", "9001", null]], shared)
+        Map report = (Map) call("report#CustomerData", [shopDomain: SHOP, orderIds: ["9001"]]).report
+        assertEquals(["9001"], ((List<Map>) ((Map) report.tenants)[C])*.recordId, "the peer's record is reported")
+        Map result = (Map) call("redact#Customer", [shopDomain: SHOP, orderIds: [9001]]).result
+        assertEquals(1L, ((Map) result.deletedByTenant)[C])
+        assertEquals([], shopifyRecordIds(C))
+    }
+
     @Test
     void idFormsCoverNumericAndGlobalIds() {
         assertEquals(["1001", "gid://shopify/Order/1001"] as Set, ShopifyPrivacySupport.orderIdForms(["gid://shopify/Order/1001"]))
@@ -165,6 +206,20 @@ class ShopifyPrivacyRequestSmokeTests {
                     systemEnumId: r[0], recordType: "order", recordId: r[1], internalId: r[2], sourceConfigId: sourceConfigId,
                     recordData: r[0] == "SHOPIFY" ? "{\"email\":\"shopper@example.com\"}" : "{}"])
         }
+    }
+
+    /** A peer tenant granted A's connection (thru = when the grant was revoked; null: still active). */
+    private void peer(String t, String configId, java.sql.Timestamp thru) {
+        // ConfigTenantAccess.configTypeEnumId has a DB FK to Enumeration (SecuritySeedData in prod); seeded by hand here
+        upsert("moqui.basic.EnumerationType", [enumTypeId: "DarpanSharedConfigType", description: "Darpan shared config types"])
+        upsert("moqui.basic.Enumeration", [enumId: "SCFG_SHOPIFY_AUTH", description: "Shopify auth config", enumTypeId: "DarpanSharedConfigType"])
+        upsert("moqui.security.UserGroup", [userGroupId: t, description: t, groupTypeEnumId: TenantAccessSupport.DARPAN_COMPANY_GROUP_TYPE_ENUM_ID])
+        upsert("darpan.audit.Audit", [auditId: "${t}_MC".toString(), companyUserGroupId: t, auditCode: "month-close", auditName: "Month close", periodEnumId: "AUDP_MONTH"])
+        upsert("darpan.audit.AuditStatement", [statementId: "${t}_R1".toString(), companyUserGroupId: t, auditId: "${t}_MC".toString(),
+                statementCode: "R1", categoryEnumId: "AUDC_ORDERS", weightEnumId: "AUDSW_FIRM", sequenceNum: 1L, statementText: "Every order is in both."])
+        upsert("darpan.audit.AuditCheck", [checkId: "${t}_CHK".toString(), companyUserGroupId: t, checkCode: "orders", label: "Orders"])
+        upsert("darpan.auth.ConfigTenantAccess", [configTypeEnumId: "SCFG_SHOPIFY_AUTH", configId: configId, tenantUserGroupId: t,
+                fromDate: java.sql.Timestamp.valueOf("2026-05-01 00:00:00"), thruDate: thru])
     }
 
     private void keptCopy(String t, String datasetId, String connection) {
