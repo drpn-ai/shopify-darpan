@@ -82,10 +82,6 @@ class ShopifyGraphqlQueryBuilder {
         return [source: source, fieldsByPath: fieldsByPath, selectedFieldPaths: selectedFieldPaths]
     }
 
-    static List<String> resolveSelectedFieldPaths(Map<String, Object> source, Collection requestedFieldPaths) {
-        return resolveFieldPaths(source, requestedFieldPaths, source.defaultSelectedFieldPaths as List)
-    }
-
     private static List<String> resolveFieldPaths(Map<String, Object> source, Collection requestedFieldPaths, List defaultFieldPaths) {
         List<String> requested = ShopifySourceCatalog.normalizeFieldPaths(requestedFieldPaths)
         if (!requested) requested = new ArrayList(defaultFieldPaths ?: [])
@@ -142,7 +138,7 @@ class ShopifyGraphqlQueryBuilder {
         ]
     }
 
-    static Map<String, Object> normalizeFilters(Map<String, Object> source, Map rawFilters) {
+    private static Map<String, Object> normalizeFilters(Map<String, Object> source, Map rawFilters) {
         Map<String, Map<String, Object>> supportedFilters = (Map<String, Map<String, Object>>) (source.supportedFilters ?: [:])
         Map<String, Object> filters = [:]
         (rawFilters ?: [:]).each { Object key, Object value ->
@@ -162,8 +158,12 @@ class ShopifyGraphqlQueryBuilder {
         return filters
     }
 
-    static String normalizeFilterValue(String filterKey, String filterValue, Map<String, Object> filterDefinition) {
+    private static String normalizeFilterValue(String filterKey, String filterValue, Map<String, Object> filterDefinition) {
         if (filterDefinition?.type == "datetime") return normalizeDateTimeFilterValue(filterKey, filterValue)
+        // One search token (open, closed, open,closed): a space, parenthesis or quote would join more terms into the search.
+        if (filterDefinition?.type == "keyword" && filterValue =~ /[\s()'"]/) {
+            throw new IllegalArgumentException("Shopify filter '${filterKey}' takes one value (no spaces, parentheses or quotes).")
+        }
         if (filterDefinition?.type == "idList") {
             List<String> ids = filterValue.split(",").collect { it.trim() }.findAll { it }
             // Digits only: the ids are joined into Shopify's search syntax, so anything else could change the search.
@@ -175,7 +175,7 @@ class ShopifyGraphqlQueryBuilder {
         return filterValue
     }
 
-    static String buildSearchQuery(Map<String, Object> source, Map<String, Object> filters) {
+    private static String buildSearchQuery(Map<String, Object> source, Map<String, Object> filters) {
         Map<String, Map<String, Object>> supportedFilters = (Map<String, Map<String, Object>>) (source.supportedFilters ?: [:])
         List<String> terms = []
         filters.each { String filterKey, Object value ->

@@ -115,6 +115,18 @@ class ShopifySourceCatalogAndQueryBuilderTests {
         }
     }
 
+    /** DAR-OPS-029 S42b. A keyword filter is one search token: anything else would change the search it is joined into. */
+    @Test
+    void keywordFilterValueIsOneSearchToken() {
+        ["open OR updated_at:>2020-01-01", "open)", "(open", "open closed", "open\tclosed"].each { String value ->
+            assertThrows(IllegalArgumentException, {
+                ShopifyGraphqlQueryBuilder.buildQuery([sourceDefinitionId: "SHOPIFY_ORDERS", filters: [status: value]])
+            }, "status filter '${value}' was accepted".toString())
+        }
+        assertEquals("status:closed", ShopifyGraphqlQueryBuilder.buildQuery([sourceDefinitionId: "SHOPIFY_ORDERS", filters: [status: "closed"]]).variables.query)
+        assertEquals("status:open,closed", ShopifyGraphqlQueryBuilder.buildQuery([sourceDefinitionId: "SHOPIFY_ORDERS", filters: [status: "open,closed"]]).variables.query)
+    }
+
     @Test
     void queryBuilderRejectsFieldsOutsideTheConfiguredSourceDefinition() {
         IllegalArgumentException error = assertThrows(IllegalArgumentException) {
