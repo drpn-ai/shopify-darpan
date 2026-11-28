@@ -6,15 +6,9 @@
         <description>Out-parameters every Shopify extract returns (extract#ShopifyOrders,
             extract#ShopifyOrderLineUnits, extract#ShopifyOrderReturnRefs). A script service returns
             only declared out-parameters, so a result key added to an extract must be declared here.</description>
+        <implements service="reconciliation.SourceConnectorContractServices.define#SourceExtractOutputs"/>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
             <parameter name="fileTypeEnumId"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 
