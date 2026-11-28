@@ -19,7 +19,6 @@
         {
             "configId": "CFG_CHAR",
             "opts": {
-                "disableAuthz": true,
                 "companyUserGroupId": "KREWE",
                 "requiredEndpointSystemEnumId": "SHOPIFY"
             }

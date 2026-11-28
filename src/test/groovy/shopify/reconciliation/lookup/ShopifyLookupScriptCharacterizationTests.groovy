@@ -14,8 +14,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 import static shopify.reconciliation.ShopifyScriptCharacterizationSupport.assertMatchesGolden
 
 /**
- * Characterization of the four lookup script services (lookup#ShopifyOrderIds,
- * lookup#ShopifyRefundOrReturnIds, lookup#ShopifyExchangeSweep, lookup#ShopifyOrderExchangeState),
+ * Characterization of the three lookup script services (lookup#ShopifyOrderIds,
+ * lookup#ShopifyRefundOrReturnIds, lookup#ShopifyExchangeSweep),
  * run through the real service definitions on a real Moqui ec. Auth-config resolution and each
  * lookup's support-class entry point are metaClass mocks that record their arguments; the support
  * classes themselves are covered by their own unit tests. Each case is pinned as a golden snapshot
@@ -56,16 +56,12 @@ class ShopifyLookupScriptCharacterizationTests {
             self.supportCalls.add([method: "sweepExchanges", authConfig: cfg, start: start, end: end, options: options])
             return self.supportResult
         }
-        ShopifyExchangeStateLookupSupport.metaClass.static.lookupExchangeState = { Map cfg, Collection ids, Map options ->
-            self.supportCalls.add([method: "lookupExchangeState", authConfig: cfg, ids: ids, options: options])
-            return self.supportResult
-        }
     }
 
     @AfterAll
     void cleanup() {
         [ShopifyAuthConfigSupport, ShopifyOrderLookupSupport, ShopifyRefundOrReturnLookupSupport,
-         ShopifyExchangeSweepSupport, ShopifyExchangeStateLookupSupport].each {
+         ShopifyExchangeSweepSupport].each {
             GroovySystem.metaClassRegistry.removeMetaClass(it)
         }
         ReconciliationSmokeTestSupport.cleanupMoqui(ec)
@@ -133,20 +129,6 @@ class ShopifyLookupScriptCharacterizationTests {
         authError = "Shopify auth config CFG_CHAR is not enabled for SHOPIFY."
         Map result = call("lookup#ShopifyExchangeSweep", [windowStartMillis: 1L, windowEndMillis: 2L])
         snapshot("lookup-exchange-sweep-auth-error", result)
-    }
-
-    @Test
-    void exchangeStatePassThrough() {
-        supportResult = [ok: true, statesByOrderId: ["1": [returns: []]], errors: [], lineItemsShape: "NODES"]
-        Map result = call("lookup#ShopifyOrderExchangeState", [orderIds: ["1"], readTimeoutMillis: 9])
-        snapshot("lookup-exchange-state-ok", result)
-    }
-
-    @Test
-    void exchangeStateAuthFailure() {
-        authError = "Shopify auth config 'CFG_CHAR' was not found."
-        Map result = call("lookup#ShopifyOrderExchangeState", [orderIds: ["1"]])
-        snapshot("lookup-exchange-state-auth-error", result)
     }
 
     private Map call(String verbNoun, Map parameters) {

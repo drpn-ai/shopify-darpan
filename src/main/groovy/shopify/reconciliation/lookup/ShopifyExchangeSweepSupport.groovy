@@ -1,6 +1,5 @@
 package shopify.reconciliation.lookup
 
-import shopify.graphql.ShopifyGraphqlTransport
 
 import java.time.Instant
 
@@ -43,14 +42,8 @@ class ShopifyExchangeSweepSupport {
 
     static Map<String, Object> sweepExchanges(Map authConfig, long windowStartMillis, long windowEndMillis,
                                               Map options = [:], Closure executor = null) {
-        Closure exec = executor ?: { Map cfg, String queryDocument, Map variables, Map opts ->
-            ShopifyGraphqlTransport.execute(cfg, queryDocument, variables, opts)
-        }
-        Map transportOptions = [
-                connectTimeoutMillis: options?.connectTimeoutMillis,
-                readTimeoutMillis   : options?.readTimeoutMillis,
-                maxAttempts         : options?.maxAttempts,
-        ]
+        Closure exec = ShopifyLookupScriptSupport.graphqlExecutor(executor)
+        Map transportOptions = ShopifyLookupScriptSupport.transportOptions(options)
         int maxPages = (options?.maxPages instanceof Number) ? ((Number) options.maxPages).intValue() : DEFAULT_MAX_PAGES
         String searchQuery = "updated_at:>='${Instant.ofEpochMilli(windowStartMillis)}' -return_status:no_return".toString()
 
