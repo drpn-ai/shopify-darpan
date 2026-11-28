@@ -33,12 +33,7 @@ All three use the `orders` query root and cursor pagination for the interactive 
 
 `SHOPIFY_ORDER_RETURN_REFS` selects order ids, `refunds`, and `returns` (with each return's nested `refunds`, used only to test whether the return has been refunded). It filters on `created_at` or `updated_at`.
 
-The catalog is exposed through:
-
-- `facade.ShopifyFacadeServices.list#ShopifySourceDefinitions`
-- `facade.ShopifyFacadeServices.get#ShopifySourceDefinition`
-
-Both catalog services are internal-only (`allow-remote="false"`) until a setup-flow UI consumer is wired; flip them back to remote together with that flow.
+The catalog is read in code only (`ShopifySourceCatalog`); no service exposes it.
 
 Each source also owns `defaultBulkSelectedFieldPaths`, the exact field set its Bulk Operations extraction selects. The JSONL record shape is a downstream contract for reconciliation schemas and `$.records[*]` rules, so those entries must not be dropped or renamed without a migration plan. For line units, `legacyResourceId` is load-bearing: OMS stores the numeric Shopify order id.
 
@@ -50,7 +45,7 @@ Bulk JSONL returns the children of a nested connection (for example `lineItems`)
 
 ## Query Builder
 
-`facade.ShopifyFacadeServices.build#ShopifyGraphqlQuery` accepts a source ID, selected field paths, filters, page size, cursor, direction, and nested connection page sizes. It validates all selected fields against the configured source definition before generating a query.
+`ShopifyGraphqlQueryBuilder.buildQuery` (code only; no service exposes it) accepts a source ID, selected field paths, filters, page size, cursor, direction, and nested connection page sizes. It validates all selected fields against the configured source definition before generating a query.
 
 For `SHOPIFY_ORDERS`, date filters are normalized to UTC ISO-8601 instants and translated into Shopify Admin `orders` search syntax:
 

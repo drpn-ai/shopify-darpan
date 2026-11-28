@@ -101,9 +101,12 @@ class ShopifyOrderPaymentSignalTests {
     }
 
     @Test
-    void summarizeCountsPaidAndUnpaidOrders() {
-        assertEquals([paymentTransactionYCount: 2, paymentTransactionNCount: 1],
-                ShopifyOrderPaymentSignal.summarize([[hasPaymentTransaction: "Y"], [hasPaymentTransaction: "N"], [hasPaymentTransaction: "Y"]]))
+    void tallyCountsPaidAndUnpaidOrdersOneAtATime() {
+        Map<String, Integer> summary = [paymentTransactionYCount: 0, paymentTransactionNCount: 0]
+        [[hasPaymentTransaction: "Y"], [hasPaymentTransaction: "N"], [hasPaymentTransaction: "Y"], "not a map"].each {
+            ShopifyOrderPaymentSignal.tally(summary, it)
+        }
+        assertEquals([paymentTransactionYCount: 2, paymentTransactionNCount: 2], summary)
     }
 
     @Test

@@ -56,14 +56,7 @@ class ShopifyOrderPaymentSignal {
         return text ? text.substring(text.lastIndexOf("/") + 1) : null
     }
 
-    /** Y/N counts over an extract's records, for requestMetadata. */
-    static Map<String, Integer> summarize(List records) {
-        Map<String, Integer> summary = [paymentTransactionYCount: 0, paymentTransactionNCount: 0]
-        (records ?: []).each { Object r -> tally(summary, r) }
-        return summary
-    }
-
-    /** DAR-BE-162: one record into a summarize() result, for an extract that streams its records. */
+    /** DAR-BE-162: one record into the [paymentTransactionYCount, paymentTransactionNCount] counts an extract streams. */
     static void tally(Map<String, Integer> summary, Object record) {
         String key = record instanceof Map && ((Map) record).get("hasPaymentTransaction") == "Y" ?
                 "paymentTransactionYCount" : "paymentTransactionNCount"

@@ -3,32 +3,12 @@ package shopify.facade.graphql
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import shopify.facade.settings.ShopifyAuthConfigSupport
-import shopify.graphql.ShopifyGraphqlQueryBuilder
 import shopify.graphql.ShopifyGraphqlTransport
 
 import static darpan.common.ValueSupport.normalize
 
 class ShopifyGraphqlFacadeSupport {
     private static final Logger logger = LoggerFactory.getLogger(ShopifyGraphqlFacadeSupport)
-
-    static Map<String, Object> buildGraphqlQuery(def ec, Object serviceContext) {
-        try {
-            return ShopifyGraphqlQueryBuilder.buildQuery([
-                    sourceDefinitionId : serviceContext?.sourceDefinitionId,
-                    apiVersion         : serviceContext?.apiVersion,
-                    selectedFieldPaths : serviceContext?.selectedFieldPaths,
-                    filters            : serviceContext?.filters,
-                    pageSize           : serviceContext?.pageSize,
-                    afterCursor        : serviceContext?.afterCursor,
-                    reverse            : serviceContext?.reverse,
-                    connectionPageSizes: serviceContext?.connectionPageSizes,
-            ])
-        } catch (Exception e) {
-            logger.warn("Shopify GraphQL query build failed", e)
-            ec.message.addError(e.message ?: "Shopify GraphQL query could not be built.")
-        }
-        return null
-    }
 
     static Map<String, Object> executeGraphql(def ec, Object serviceContext) {
         String configId = normalize(serviceContext?.shopifyAuthConfigId)

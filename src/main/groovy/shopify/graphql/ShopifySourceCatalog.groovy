@@ -245,8 +245,8 @@ class ShopifySourceCatalog {
              connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
             [fieldPath: "refunds.createdAt", label: "Refund Created At", type: "DateTime", selectionPath: "refunds.createdAt",
              connectionRoot: "refunds", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
-            // returns IS a connection (ReturnConnection). Live-probed shape uses nodes{}, matching
-            // ShopifyExchangeStateLookupSupport's existing `returns(first: 10) { nodes { ... } }`.
+            // returns IS a connection (ReturnConnection). Live-probed shape uses nodes{}:
+            // `returns(first: 10) { nodes { ... } }`.
             [fieldPath: "returns.id", label: "Return ID", type: "ID", selectionPath: "returns.nodes.id",
              connectionRoot: "returns", connectionDefaultPageSize: 50, connectionMaxPageSize: 100],
             [fieldPath: "returns.createdAt", label: "Return Created At", type: "DateTime", selectionPath: "returns.nodes.createdAt",
