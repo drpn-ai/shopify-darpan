@@ -1,6 +1,8 @@
 package shopify.facade.settings
 
+import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.TenantScopedFinder
+import darpan.reconciliation.automation.SourceEndpointAccessSupport
 import darpan.reconciliation.notification.TenantNotificationSupport
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -35,8 +37,8 @@ import static darpan.common.ValueSupport.normalize
  * <p>Each install creates (or, on a re-install of the same app on the same store for the same tenant,
  * updates) its OWN ShopifyAuthConfig row. Rows made by pasting a token are never touched. The new row is
  * enabled for every endpoint (no SourceConfigEndpointAccess row means enabled; Aditi 2026-11-28: "On by
- * default"), and no saved run or automation uses it until someone points one at it. Its legacy canReadOrders is
- * 'Y' for the one-time ENDPOINT_ACCESS migration, which turns 'N' into every endpoint off (retires in DAR-OPS-029 S99).</p>
+ * default", D20), written as an enabled endpoint row for every catalog endpoint, never through the legacy order-read
+ * flag (DAR-BE-275; LegacyCanReadOrdersRatchetTest), and no saved run or automation uses it until someone points one at it.</p>
  */
 class ShopifyInstallSupport {
     private static final Logger logger = LoggerFactory.getLogger(ShopifyInstallSupport)
@@ -288,12 +290,24 @@ class ShopifyInstallSupport {
                 timeZone          : "UTC",
                 shopifyAppId      : appId,
                 installedDate     : now,
-                // OC93: on by default everywhere; a not-yet-run ENDPOINT_ACCESS migration turns 'N' into every endpoint off.
-                canReadOrders     : "Y",
         ] + tokenFields).each { key, value -> created.set(key, value) }
         created.set("shopifyAuthConfigId", TenantScopedFinder.mintId(ec, CONFIG_ENTITY, "shopifyAuthConfigId"))
         created.create()
-        return normalize(created.shopifyAuthConfigId)
+        String configId = normalize(created.shopifyAuthConfigId)
+        enableEveryEndpoint(ec, configId, tenantId)
+        return configId
+    }
+
+    /**
+     * D20 (Aditi 2026-11-28, on by default): a new install is enabled for every endpoint the Shopify catalog registers, one 'Y'
+     * row each, as the connection page writes them (SourceEndpointWriteSupport.storeAccess, which needs a session the callback
+     * does not have). A re-install keeps whatever the tenant has switched since.
+     */
+    private static void enableEveryEndpoint(def ec, String configId, String tenantId) {
+        SourceEndpointAccessSupport.listEndpointsForConfig(ec, SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH, configId).each { Map endpoint ->
+            ec.entity.makeValue(SourceEndpointAccessSupport.ENTITY_NAME).setAll([configTypeEnumId: SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH,
+                    configId: configId, systemEnumId: endpoint.systemEnumId, companyUserGroupId: tenantId, isEnabled: "Y"]).createOrUpdate()
+        }
     }
 
     // ---- callback ------------------------------------------------------------------------------

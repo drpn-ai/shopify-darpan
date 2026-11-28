@@ -45,6 +45,13 @@ class ShopifyInstallSmokeTests {
         ec = ReconciliationSmokeTestSupport.initMoqui(backendRoot, "shopify-install-smoke")
         ReconciliationSmokeTestSupport.seedCompanyScope(ec)
         ec.artifactExecution.disableAuthz()
+        // the endpoint catalog (SourceSystemConnector rows naming darpan.shopify.ShopifyAuthConfig)
+        ec.entity.makeDataLoader().location("component://darpan/data/DarpanSystemSourceSeedData.xml").dummyFks(true).load()
+        ec.entity.makeDataLoader().location("component://darpan/data/SourceSystemConnectorSeedData.xml").dummyFks(true).load()
+        // SourceConfigEndpointAccess.configTypeEnumId has a DB FK to Enumeration (SecuritySeedData in prod)
+        ec.entity.makeValue("moqui.basic.EnumerationType").setAll([enumTypeId: "DarpanSharedConfigType", description: "shared config types"]).createOrUpdate()
+        ec.entity.makeValue("moqui.basic.Enumeration").setAll([enumId: "SCFG_SHOPIFY_AUTH", description: "Shopify auth config",
+                enumTypeId: "DarpanSharedConfigType"]).createOrUpdate()
         [TenantAccessSupport.DARPAN_COMPANY_EDITOR_GROUP_ID, TenantAccessSupport.DARPAN_COMPANY_VIEW_ONLY_GROUP_ID].each {
             ec.entity.makeValue("moqui.security.UserGroup").setAll([userGroupId: it, description: it,
                     groupTypeEnumId: TenantAccessSupport.DARPAN_PERMISSION_GROUP_TYPE_ENUM_ID]).createOrUpdate()
@@ -95,9 +102,16 @@ class ShopifyInstallSmokeTests {
         assertEquals("shpat_new_c1", installed.accessToken)
         assertEquals("shprt_new", installed.refreshToken)
         assertNotNull(installed.accessTokenExpiresDate)
-        // OC93, on by default (Aditi 2026-11-28): no endpoint row means every endpoint is enabled, and the legacy flag is 'Y'
-        // so a not-yet-run ENDPOINT_ACCESS migration (which turns 'N' into every endpoint off) keeps it on too.
-        assertEquals("Y", installed.canReadOrders, "a fresh install is on by default in every environment")
+        // D20 (Aditi 2026-11-28, on by default) through endpoint rows, never the legacy canReadOrders flag (DAR-BE-275's
+        // LegacyCanReadOrdersRatchetTest): the install writes an enabled row for every catalog endpoint of the connection.
+        List<String> endpoints = darpan.reconciliation.automation.SourceEndpointAccessSupport.listEndpointsForConfig(ec, "SCFG_SHOPIFY_AUTH",
+                installed.shopifyAuthConfigId as String)*.systemEnumId
+        assertTrue(endpoints.contains("SHOPIFY"), "the Shopify catalog is loaded: ${endpoints}")
+        List endpointRows = ec.entity.find("darpan.reconciliation.SourceConfigEndpointAccess").condition("configId", installed.shopifyAuthConfigId)
+                .useCache(false).list()
+        assertEquals(endpoints.sort(), endpointRows*.systemEnumId.sort(), "one row per catalog endpoint")
+        assertTrue(endpointRows.every { it.isEnabled == "Y" && it.companyUserGroupId == OWNER }, "every endpoint enabled, owned by the install's tenant")
+        assertEquals("N", installed.canReadOrders, "the legacy flag is not written")
 
         def pasted = ec.entity.find("darpan.shopify.ShopifyAuthConfig").condition("shopifyAuthConfigId", "PASTED_TOKEN_CONFIG").useCache(false).one()
         assertEquals("shpat_pasted", pasted.accessToken)
