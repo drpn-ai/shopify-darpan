@@ -203,6 +203,21 @@ class ShopifyPrivacyRequestSmokeTests {
         assertTrue(keptDataLeft(B, "PRIV_DS_B2", "${B}_CFG2".toString()), "B's other store keeps its copy and index")
     }
 
+    /**
+     * Security review of OC232: config ids are per-entity sequences, so the tenant's NetSuite connection can share the Shopify
+     * connection's id. shop/redact erases the store's Shopify kept data and never the NetSuite copy under the same id.
+     */
+    @Test
+    void aRedactNeverDropsAnotherSystemsCopyUnderTheSameConnectionId() {
+        keptCopy(A, "PRIV_DS_A", "${A}_CFG".toString())
+        keptCopy(A, "PRIV_DS_A_NS", "${A}_CFG".toString(), "NETSUITE_SUITEQL")
+        Map result = (Map) call("redact#Shop", [shopDomain: SHOP]).result
+        assertEquals(1, ((Map) result.keptCopiesDropped)[A])
+        assertFalse(ec.entity.find("darpan.dataset.Dataset").condition("datasetId", "PRIV_DS_A").useCache(false).count() > 0)
+        assertTrue(ec.entity.find("darpan.dataset.Dataset").condition("datasetId", "PRIV_DS_A_NS").useCache(false).count() > 0, "the NetSuite copy stays")
+        assertTrue(darpan.dataset.DatasetRefreshSupport.datasetDir(ec, A, "PRIV_DS_A_NS").exists(), "and its folder")
+    }
+
     @Test
     void idFormsCoverNumericAndGlobalIds() {
         assertEquals(["1001", "gid://shopify/Order/1001"] as Set, ShopifyPrivacySupport.orderIdForms(["gid://shopify/Order/1001"]))
@@ -243,17 +258,17 @@ class ShopifyPrivacyRequestSmokeTests {
                 fromDate: java.sql.Timestamp.valueOf("2026-05-01 00:00:00"), thruDate: thru])
     }
 
-    private void keptCopy(String t, String datasetId, String connection) {
+    private void keptCopy(String t, String datasetId, String connection, String system = "SHOPIFY") {
         java.sql.Timestamp now = ec.user.nowTimestamp
-        upsert("darpan.dataset.Dataset", [datasetId: datasetId, companyUserGroupId: t, systemEnumId: "SHOPIFY", sourceConfigId: connection,
+        upsert("darpan.dataset.Dataset", [datasetId: datasetId, companyUserGroupId: t, systemEnumId: system, sourceConfigId: connection,
                 optionsHash: "h-${datasetId}".toString(), statusId: "DST_ACTIVE", readRuleEnumId: "DRR_CHANGED_SINCE", idField: "id",
                 stampField: "updatedAt", windowField: "createdAt"])
         upsert("darpan.dataset.DatasetRead", [datasetId: datasetId, readSeqId: "000001", companyUserGroupId: t, readKindEnumId: "DRK_FULL",
                 statusId: "DRS_DONE", readAt: now])
-        upsert("darpan.idindex.RecordIdIndexCursor", [companyUserGroupId: t, datasetId: datasetId, systemEnumId: "SHOPIFY",
+        upsert("darpan.idindex.RecordIdIndexCursor", [companyUserGroupId: t, datasetId: datasetId, systemEnumId: system,
                 connectionId: connection, lastIndexedAt: now])
         upsert("darpan.idindex.RecordIdIndex", [rowKey: "rk-${datasetId}".toString(), companyUserGroupId: t, idNorm: "1001", idRaw: "1001",
-                systemCode: "SHOPIFY", systemEnumId: "SHOPIFY", connectionId: connection, recordKind: "ORDER", recordKey: "1001",
+                systemCode: system, systemEnumId: system, connectionId: connection, recordKind: "ORDER", recordKey: "1001",
                 fieldPath: "id", role: "OWN", lastSeenAt: now])
         File dir = darpan.dataset.DatasetRefreshSupport.datasetDir(ec, t, datasetId)
         dir.mkdirs()

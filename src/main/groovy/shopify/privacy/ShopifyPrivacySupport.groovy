@@ -38,6 +38,11 @@ class ShopifyPrivacySupport {
     static final String SHOPIFY_SYSTEM = "SHOPIFY"
 
     static final String CONFIG_TYPE = SharedConfigAccessSupport.CONFIG_TYPE_SHOPIFY_AUTH
+    /**
+     * The systems a Shopify connection's kept data is recorded under (its connector rows). A drop names them: a NetSuite or OMS
+     * connection can carry the same config id (per-entity sequences), and its kept data is not the store's.
+     */
+    static final List<String> KEPT_SYSTEMS = ["SHOPIFY", "SHOPIFY_ORDER_LINE_UNITS", "SHOPIFY_RETURN_REFS"].asImmutable()
 
     /** The store's connections (name.myshopify.com; through the signing app when one is named): configId -> owning tenant. */
     private static Map<String, String> storeConnections(def ec, Object rawShopDomain, String appId = null) {
@@ -80,7 +85,7 @@ class ShopifyPrivacySupport {
         if (!tenantId || !configIds) return 0
         Map dropped = (Map) ShopifyInstallSupport.withAuthzLifted(ec) { ->
             ec.service.sync().name("dataset.DatasetServices.drop#ConnectionKeptData")
-                    .parameters([companyUserGroupId: tenantId, sourceConfigIds: configIds as List]).call()
+                    .parameters([companyUserGroupId: tenantId, sourceConfigIds: configIds as List, systemEnumIds: KEPT_SYSTEMS]).call()
         }
         return ec.message.hasError() ? 0 : ((dropped?.datasetsDropped ?: 0) as int)
     }
