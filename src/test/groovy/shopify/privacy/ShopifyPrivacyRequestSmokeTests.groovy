@@ -182,6 +182,27 @@ class ShopifyPrivacyRequestSmokeTests {
         assertEquals([], shopifyRecordIds(C))
     }
 
+    /**
+     * OC232 (Session 010 round 2): the store's kept copies and ID index hold the customer's orders (ids, amounts, the customer's
+     * id; no name, email or address since DAR-BE-260), so customers/redact drops every tenant's kept data read through the
+     * store as shop/redact does; a copy is a cache, rebuilt from Shopify, which has redacted the customer itself. A redact
+     * naming no order drops nothing, and another store's copy stays.
+     */
+    @Test
+    void customerRedactDropsTheStoresKeptCopiesAndIdIndexRows() {
+        keptCopy(A, "PRIV_DS_A", "${A}_CFG".toString())
+        keptCopy(B, "PRIV_DS_B", "${B}_CFG".toString())
+        keptCopy(B, "PRIV_DS_B2", "${B}_CFG2".toString())
+        Map none = (Map) call("redact#Customer", [shopDomain: SHOP, orderIds: []]).result
+        assertEquals([(A): 0, (B): 0], none.keptCopiesDropped, "a redact naming no order drops nothing")
+        assertTrue(keptDataLeft(A, "PRIV_DS_A", "${A}_CFG".toString()))
+        Map result = (Map) call("redact#Customer", [shopDomain: SHOP, orderIds: [1001]]).result
+        assertEquals([(A): 1, (B): 1], result.keptCopiesDropped)
+        assertFalse(keptDataLeft(A, "PRIV_DS_A", "${A}_CFG".toString()), "A's copy of this store is gone")
+        assertFalse(keptDataLeft(B, "PRIV_DS_B", "${B}_CFG".toString()), "B's copy of this store is gone")
+        assertTrue(keptDataLeft(B, "PRIV_DS_B2", "${B}_CFG2".toString()), "B's other store keeps its copy and index")
+    }
+
     @Test
     void idFormsCoverNumericAndGlobalIds() {
         assertEquals(["1001", "gid://shopify/Order/1001"] as Set, ShopifyPrivacySupport.orderIdForms(["gid://shopify/Order/1001"]))

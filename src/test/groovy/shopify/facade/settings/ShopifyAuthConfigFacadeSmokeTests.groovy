@@ -32,6 +32,8 @@ class ShopifyAuthConfigFacadeSmokeTests {
         Path backendRoot = ReconciliationSmokeTestSupport.resolveBackendRoot()
         ec = ReconciliationSmokeTestSupport.initMoqui(backendRoot, "shopify-auth-config-smoke")
         ReconciliationSmokeTestSupport.seedCompanyScope(ec)
+        ReconciliationSmokeTestSupport.loadSeedData(ec, "component://darpan/data/DarpanSystemSourceSeedData.xml",
+                "component://darpan/data/DatasetSeedData.xml")
         seedPermissionGroup(TenantAccessSupport.DARPAN_TENANT_ADMIN_GROUP_ID, "Can manage tenant-scoped Darpan settings")
         seedPermissionGroup(TenantAccessSupport.DARPAN_COMPANY_VIEW_ONLY_GROUP_ID, "Can view tenant-scoped Darpan data but cannot mutate it")
         replaceTenantPermission(KREWE, TenantAccessSupport.DARPAN_COMPANY_VIEW_ONLY_GROUP_ID)
@@ -271,6 +273,61 @@ class ShopifyAuthConfigFacadeSmokeTests {
         assertFalse((Boolean) blockedResult.ok)
         assertTrue((blockedResult.errors ?: []).join(" ").contains("view access"))
         assertEquals("Krewe Shopify", findOne([shopifyAuthConfigId: "KREWE_SHOPIFY"]).description)
+    }
+
+    /**
+     * OC232 (DAR-BE-420, Shopify): deleting a connection drops the data kept for it, in the owner and in every tenant that
+     * ever read through it (a revoked peer; an active grant blocks the delete), so a later shop/redact, which finds a store
+     * only through its connections, leaves nothing behind. Another connection's copy stays.
+     */
+    @Test
+    void deletingAConnectionDropsWhatEveryTenantKeptThroughIt() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> created = saveFacade([description: "Kept delete", shopApiUrl: "https://kept-delete.myshopify.com/admin/api",
+                apiVersion: "2025-10", accessToken: "kept-delete-token", isActive: true])
+        assertTrue((Boolean) created.ok, created.errors?.toString())
+        String id = ((Map<String, Object>) created.savedShopifyAuthConfig).shopifyAuthConfigId
+        ec.entity.makeValue("moqui.basic.EnumerationType").setAll([enumTypeId: "DarpanSharedConfigType", description: "shared config types"]).createOrUpdate()
+        ec.entity.makeValue("moqui.basic.Enumeration").setAll([enumId: "SCFG_SHOPIFY_AUTH", description: "Shopify auth config",
+                enumTypeId: "DarpanSharedConfigType"]).createOrUpdate()
+        ec.entity.makeValue("darpan.auth.ConfigTenantAccess").setAll([configTypeEnumId: "SCFG_SHOPIFY_AUTH", configId: id, tenantUserGroupId: KREWE,
+                fromDate: TEST_FROM_DATE, thruDate: Timestamp.valueOf("2026-06-01 00:00:00")]).createOrUpdate()
+        try {
+            keptCopy(GORJANA, "XDEL_DS_G", id)
+            keptCopy(KREWE, "XDEL_DS_K", id)
+            keptCopy(GORJANA, "XDEL_DS_OTHER", "GORJANA_SHOPIFY")
+            ec.message.clearErrors()
+            Map<String, Object> deleted = deleteFacade(id)
+            assertTrue((Boolean) deleted.ok, deleted.errors?.toString())
+            assertFalse(keptDataLeft(GORJANA, "XDEL_DS_G", id), "the owner's kept data goes with the connection")
+            assertFalse(keptDataLeft(KREWE, "XDEL_DS_K", id), "a former peer's kept data read through it goes too")
+            assertTrue(keptDataLeft(GORJANA, "XDEL_DS_OTHER", "GORJANA_SHOPIFY"), "another connection's copy stays")
+        } finally {
+            ec.entity.find("darpan.auth.ConfigTenantAccess").condition("configId", id).deleteAll()
+            ["darpan.idindex.RecordIdIndex", "darpan.idindex.RecordIdIndexCursor", "darpan.idindex.RecordIdIndexDrop", "darpan.dataset.DatasetRead",
+             "darpan.dataset.Dataset"].each { ec.entity.find(it).condition("companyUserGroupId", "in", [GORJANA, KREWE]).deleteAll() }
+        }
+    }
+
+    private void keptCopy(String t, String datasetId, String connection) {
+        Timestamp now = ec.user.nowTimestamp
+        ec.entity.makeValue("darpan.dataset.Dataset").setAll([datasetId: datasetId, companyUserGroupId: t, systemEnumId: "SHOPIFY",
+                sourceConfigId: connection, optionsHash: "h-${datasetId}".toString(), statusId: "DST_ACTIVE", readRuleEnumId: "DRR_CHANGED_SINCE",
+                idField: "id", stampField: "updatedAt", windowField: "createdAt"]).createOrUpdate()
+        ec.entity.makeValue("darpan.dataset.DatasetRead").setAll([datasetId: datasetId, readSeqId: "000001", companyUserGroupId: t,
+                readKindEnumId: "DRK_FULL", statusId: "DRS_DONE", readAt: now]).createOrUpdate()
+        ec.entity.makeValue("darpan.idindex.RecordIdIndex").setAll([rowKey: "rk-${datasetId}".toString(), companyUserGroupId: t, idNorm: "1001",
+                idRaw: "1001", systemCode: "SHOPIFY", systemEnumId: "SHOPIFY", connectionId: connection, recordKind: "ORDER", recordKey: "1001",
+                fieldPath: "id", role: "OWN", lastSeenAt: now]).createOrUpdate()
+        File dir = darpan.dataset.DatasetRefreshSupport.datasetDir(ec, t, datasetId)
+        dir.mkdirs()
+        new File(dir, "current.json").text = '{"version":"v1"}'
+    }
+
+    private boolean keptDataLeft(String t, String datasetId, String connection) {
+        return ec.entity.find("darpan.dataset.Dataset").condition([companyUserGroupId: t, datasetId: datasetId]).useCache(false).count() > 0 ||
+                ec.entity.find("darpan.idindex.RecordIdIndex").condition([companyUserGroupId: t, connectionId: connection]).useCache(false).count() > 0 ||
+                darpan.dataset.DatasetRefreshSupport.datasetDir(ec, t, datasetId).exists()
     }
 
     private void assertTenantVisibleRows(String tenantId, List<String> expectedIds) {

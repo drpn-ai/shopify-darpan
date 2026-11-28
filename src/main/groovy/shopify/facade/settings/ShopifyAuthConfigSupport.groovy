@@ -9,6 +9,7 @@ import darpan.facade.common.SharedConfigGrantSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.facade.common.TenantScopedFinder
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
+import shopify.privacy.ShopifyPrivacySupport
 
 class ShopifyAuthConfigSupport {
     static final String ENTITY_NAME = "darpan.shopify.ShopifyAuthConfig"
@@ -400,6 +401,13 @@ class ShopifyAuthConfigSupport {
                     ec,
                     "Your active tenant only has view access for Shopify auth settings."
             )
+        }
+
+        if (!ec.message.hasError()) {
+            // OC232 (DAR-BE-420, Shopify): the data kept for the connection goes with it, in the owner and in every tenant that
+            // ever read through it; shop/redact finds a store only through its connections, so it could not erase them later.
+            // A copy mid-refresh refuses (an error), and nothing is deleted.
+            ShopifyPrivacySupport.dropConnectionKeptData(ec, configId, normalize(findAuthConfig(ec, configId)?.get("companyUserGroupId")))
         }
 
         if (!ec.message.hasError()) {

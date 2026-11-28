@@ -22,7 +22,9 @@ import static darpan.common.ValueSupport.normalize
  * both inside Shopify's 30-day deadline, so only database rows need action: the audit finding records Darpan read from
  * Shopify (AuditFindingRecord with systemEnumId SHOPIFY; recordData holds the full source record, and findings from
  * before DAR-BE-260 may hold email and address). Records read from HotWax or NetSuite are the merchant's other
- * systems' data and are not touched.</p>
+ * systems' data and are not touched. Kept copies and ID-index rows (darpan's dataset store) are kept past any retention, so
+ * both redacts drop the store's (OC92, OC232), and so does deleting the connection (ShopifyAuthConfigSupport.deleteAuthConfig),
+ * since a redact finds a store only through its connections.</p>
  *
  * <p><strong>Tenants.</strong> The store is found through ShopifyAuthConfig.shopApiUrl, across every tenant that
  * connects it and every tenant ever granted one of those connections (OC204: a peer reads through the owner's config id);
@@ -57,7 +59,7 @@ class ShopifyPrivacySupport {
      * OC204: every tenant that read the store through these connections: their owners, and every tenant ever granted one
      * (ConfigTenantAccess), a revoked grant too, since a former peer's records and kept copies are still the store's data.
      */
-    private static Set<String> tenantsOf(def ec, Map<String, String> connections) {
+    static Set<String> tenantsOf(def ec, Map<String, String> connections) {
         Set<String> tenants = new LinkedHashSet<String>(connections.values())
         if (connections) {
             ((TenantScopedFinder.findGlobalUnscoped(ec, DarpanEntityConstants.CONFIG_TENANT_ACCESS,
@@ -67,6 +69,34 @@ class ShopifyPrivacySupport {
         }
         tenants.remove(null)
         return tenants
+    }
+
+    /**
+     * OC92/OC232: one tenant's kept copies and ID-index rows read through these connections (drop#ConnectionKeptData, which
+     * conditions on the tenant explicitly; authz is lifted so an owner's connection delete reaches a peer's rows). A copy
+     * mid-refresh refuses with an error on ec.message: the caller fails and is retried. Returns how many copies went.
+     */
+    static int dropKeptData(def ec, String tenantId, Collection<String> configIds) {
+        if (!tenantId || !configIds) return 0
+        Map dropped = (Map) ShopifyInstallSupport.withAuthzLifted(ec) { ->
+            ec.service.sync().name("dataset.DatasetServices.drop#ConnectionKeptData")
+                    .parameters([companyUserGroupId: tenantId, sourceConfigIds: configIds as List]).call()
+        }
+        return ec.message.hasError() ? 0 : ((dropped?.datasetsDropped ?: 0) as int)
+    }
+
+    /**
+     * OC232 (DAR-BE-420, Shopify): a deleted connection's kept data, in its owner and in every tenant ever granted it. shop/redact
+     * finds a store only through its connections, so once the connection is gone it could not erase them. Stops at the first
+     * refusal (left on ec.message).
+     */
+    static Map<String, Integer> dropConnectionKeptData(def ec, String configId, String ownerTenantId) {
+        Map<String, Integer> dropped = [:]
+        for (String tenantId : tenantsOf(ec, [(configId): ownerTenantId])) {
+            dropped[tenantId] = dropKeptData(ec, tenantId, [configId])
+            if (ec.message.hasError()) break
+        }
+        return dropped
     }
 
     /** The tenants holding the store's data: owners and peers of its connections (OC204). */
@@ -125,17 +155,26 @@ class ShopifyPrivacySupport {
         return [shopDomain: normalize(shopDomain), tenants: byTenant]
     }
 
-    /** customers/redact: delete the Shopify records for these orders, per tenant. */
+    /**
+     * customers/redact: delete the Shopify records for these orders, per tenant. OC232: the store's kept copies and ID index hold
+     * the customer's orders too (ids, amounts, the customer's id; no name, email or address since DAR-BE-260), and a copy is a
+     * file a record cannot be cut from, so every kept copy read through the store goes, as on shop/redact. A copy is a cache:
+     * the next read rebuilds it from Shopify, which has redacted the customer itself.
+     */
     static Map<String, Object> redactCustomer(def ec, Object shopDomain, Object orderIds) {
         Set<String> forms = orderIdForms(orderIds)
         Map<String, Long> deleted = [:]
-        tenantsForShop(ec, shopDomain).each { String tenantId ->
+        Map<String, Integer> keptDropped = [:]
+        Map<String, String> connections = storeConnections(ec, shopDomain)
+        tenantsOf(ec, connections).each { String tenantId ->
             deleted[tenantId] = forms ? (recordFind(ec, tenantId, forms, "privacy customer redact: explicit companyUserGroupId condition applied")
                     ?.deleteAll() ?: 0L) as Long : 0L
+            keptDropped[tenantId] = forms ? dropKeptData(ec, tenantId, connections.keySet()) : 0
+            if (ec.message.hasError()) throw new IllegalStateException(ec.message.errorsString)
         }
         if (!deleted) logger.info("Shopify customer redact for an unknown store; nothing held")
         else logger.info("Shopify customer redact deleted Shopify finding records per tenant: {}", deleted)
-        return [shopDomain: normalize(shopDomain), deletedByTenant: deleted]
+        return [shopDomain: normalize(shopDomain), deletedByTenant: deleted, keptCopiesDropped: keptDropped]
     }
 
     /**
@@ -171,10 +210,8 @@ class ShopifyPrivacySupport {
             // OC92: the store's kept copies and the ID index rows its connections wrote go too; no retention clears them.
             // A copy mid-refresh refuses, so the request fails here and Shopify retries it.
             if (storeConfigIds) {
-                Map dropped = (Map) ec.service.sync().name("dataset.DatasetServices.drop#ConnectionKeptData")
-                        .parameters([companyUserGroupId: tenantId, sourceConfigIds: storeConfigIds]).call()
+                (out.keptCopiesDropped as Map)[tenantId] = dropKeptData(ec, tenantId, storeConfigIds)
                 if (ec.message.hasError()) throw new IllegalStateException(ec.message.errorsString)
-                (out.keptCopiesDropped as Map)[tenantId] = dropped?.datasetsDropped ?: 0
             }
             long deleted = storeConfigIds ? ((recordFind(ec, tenantId, null,
                     "privacy shop redact: the store's connections, explicit companyUserGroupId condition applied")
