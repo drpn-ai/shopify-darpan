@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * scoped finder. Reverting the fix back to a bare {@code ec.entity.find} would therefore fail no
  * runtime test in this repo; a static source assertion is the only way to pin the invariant. This is
  * the exact technique {@code darpan.facade.common.SharedConfigEntityContractTests
- * .saveNsAuthAndNsRestletConfigResolveTheirRecordsThroughFindGlobalUnscopedNotABareEntityFind} uses
+ * .saveNsAuthConfigResolvesItsRecordThroughFindGlobalUnscopedNotABareEntityFind} uses
  * for the equivalent darpan-side fix.</p>
  *
  * <p>Scoped to one method body at a time (via {@link #methodSource}), not the whole file: the test
