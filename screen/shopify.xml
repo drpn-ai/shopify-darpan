@@ -16,7 +16,8 @@
          Moqui refuses to run a transition with actions on a request with URL parameters as blanket CSRF
          protection, and an OAuth callback is unavoidably such a GET. The state and the HMAC are the
          CSRF defence here (same reasoning as slackOauthCallback in darpan's screen/darpan.xml). -->
-    <transition name="installCallback" method="get" read-only="true">
+    <!-- DAR-OPS-029 OC217: its URL carries Shopify's code, hmac and state; no ArtifactHit row keeps them. -->
+    <transition name="installCallback" method="get" read-only="true" track-artifact-hit="false">
         <actions>
             <script><![CDATA[
                 Map params = new LinkedHashMap(ec.web.request.getParameterMap())
